@@ -1,0 +1,11 @@
+# Installed as /etc/logrotate.d/lanscape-atlas by deploy/setup-alpine.sh.
+# copytruncate because supervise-daemon keeps the log file open.
+/var/log/lanscape-atlas.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
