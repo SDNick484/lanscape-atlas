@@ -1,0 +1,45 @@
+# lanscape-atlas example configuration. Copy to $LANSCAPE_DATA_DIR/config.toml.
+# Secrets can instead come from LANSCAPE_ROUTER_PASSWORD and LANSCAPE_API_TOKEN.
+data_dir = "/var/lib/lanscape-atlas"
+bind_host = "127.0.0.1"
+bind_port = 8720
+scan_interface = "eth0"
+observation_retention_days = 30
+ip_match_window_min = 10
+# api_token = ""
+# Without api_token, the app (pages, /api, /mcp) only accepts these Host headers
+# (plus localhost and bind_host) to block DNS rebinding. Add the name a proxy forwards, e.g.
+# "atlas.example.com"; "name:*" allows any port; ["*"] disables the check.
+# allowed_hosts = ["atlas.example.com"]
+
+# Remove this table (or leave host empty) to disable the ASUS router collector.
+[router]
+host = "192.0.2.1"
+username = "admin"
+password = ""
+use_ssl = true
+
+[collectors.asusrouter]
+enabled = true
+interval_s = 120
+timeout_s = 30
+
+[collectors.arp]
+enabled = true
+interval_s = 300
+timeout_s = 60
+
+[collectors.mdns]
+enabled = true
+interval_s = 60
+timeout_s = 10
+
+[collectors.ssdp]
+enabled = true
+interval_s = 600
+timeout_s = 10
+
+[collectors.nmap_light]
+enabled = true
+cron = "17 3 * * *"
+timeout_s = 1800

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+{% block content %}
+<h1>Status</h1>
+<p class="stats">
+  <span><strong>{{ counts.total }}</strong> devices</span>
+  <span><strong>{{ counts.online }}</strong> online</span>
+  <span><a href="{{ root }}/inbox"><strong>{{ counts.inbox }}</strong> in inbox</a></span>
+</p>
+<h2>Collectors</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Collector</th><th>Health</th><th>Failures</th><th>Last OK</th><th>Last error</th><th>Next run</th></tr></thead>
+  <tbody>
+  {% for c in collectors %}
+  <tr id="collector-{{ c.name }}">
+    <td>{{ c.name }}</td>
+    <td>{% if c.consecutive_failures > 0 %}<span class="chip fail">failing</span>{% else %}<span class="chip ok">ok</span>{% endif %}</td>
+    <td class="num">{{ c.consecutive_failures }}</td>
+    <td class="mono">{{ c.last_ok|ts or "never" }}</td>
+    <td>{% if c.last_error %}<span class="error-text">{{ c.last_error }}</span> <span class="muted mono">{{ c.last_error_at|ts }}</span>{% endif %}</td>
+    <td class="mono">{{ c.next_run_at|ts }}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="empty">No collector has run yet.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

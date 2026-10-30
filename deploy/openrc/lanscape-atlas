@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+# OpenRC service for lanscape-atlas on Alpine Linux.
+#
+# arp-scan and nmap need raw sockets. `capabilities` grants them to the
+# unprivileged service user as ambient capabilities (leading ^), which
+# supervise-daemon supports from OpenRC 0.45 onwards.
+
+description="lanscape-atlas home network inventory"
+
+command="/opt/lanscape-atlas/venv/bin/lanscape-atlas"
+command_args="serve"
+command_user="lanscape"
+supervisor="supervise-daemon"
+capabilities="^cap_net_raw,^cap_net_admin"
+# nmap otherwise assumes a non-root user cannot send raw packets and falls back
+# to slower connect scans. Only correct with the ambient capabilities above,
+# i.e. OpenRC >= 0.45; on older OpenRC remove this line (or run as root).
+export NMAP_PRIVILEGED=1
+
+output_log="/var/log/lanscape-atlas.log"
+error_log="/var/log/lanscape-atlas.log"
+
+export LANSCAPE_DATA_DIR="${LANSCAPE_DATA_DIR:-/var/lib/lanscape-atlas}"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d -m 0700 -o lanscape:lanscape "$LANSCAPE_DATA_DIR"
+	checkpath -f -m 0640 -o lanscape:lanscape /var/log/lanscape-atlas.log
+}

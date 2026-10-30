@@ -1,0 +1,63 @@
+{
+  "_comment": "Hand-built to mirror dataclasses.asdict(AsusClient) as returned by asusrouter 1.21.3 AsusData.CLIENTS (values keyed by MAC). Documentation-range addresses only.",
+  "nodes": {
+    "router": "00:00:5e:00:53:01",
+    "mesh": "00:00:5e:00:53:02"
+  },
+  "wifi_5g": {
+    "state": 1,
+    "description": {"name": "Pixel-Phone", "mac": "02:00:5E:00:53:10", "vendor": null},
+    "connection": {
+      "type": "5ghz",
+      "ip_address": "192.0.2.50",
+      "ip_method": "DHCP",
+      "internet_state": true,
+      "internet_mode": "allow",
+      "node": "00:00:5E:00:53:02",
+      "online": true,
+      "aimesh": null,
+      "guest": false,
+      "guest_id": 0,
+      "rssi": -61,
+      "since": null,
+      "rx_speed": null,
+      "tx_speed": null
+    }
+  },
+  "wifi_2g_no_node": {
+    "state": 1,
+    "description": {"name": "esp-sensor", "mac": "00:00:5e:00:53:11", "vendor": null},
+    "connection": {
+      "type": "2ghz",
+      "ip_address": "192.0.2.51",
+      "node": null,
+      "online": true,
+      "rssi": -72
+    }
+  },
+  "wired": {
+    "state": 1,
+    "description": {"name": "nas", "mac": "00-00-5E-00-53-12", "vendor": null},
+    "connection": {
+      "type": "wired",
+      "ip_address": "192.0.2.52",
+      "node": "00:00:5e:00:53:01",
+      "online": true
+    }
+  },
+  "bad_ip": {
+    "state": 1,
+    "description": {"name": "weird", "mac": "00:00:5e:00:53:13"},
+    "connection": {"type": "6ghz", "ip_address": "not-an-ip", "node": "garbage", "rssi": "-50"}
+  },
+  "no_mac": {
+    "state": 1,
+    "description": {"name": "ghost", "mac": null},
+    "connection": {"type": "wired", "ip_address": "192.0.2.53"}
+  },
+  "bad_mac": {
+    "state": 1,
+    "description": {"name": "ghost2", "mac": "zz"},
+    "connection": {"type": "wired", "ip_address": "192.0.2.54"}
+  }
+}

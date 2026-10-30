@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ap_link %}
+{% block title %}{{ d.name or "Device %d"|format(d.id) }}{% endblock %}
+{% macro set_by(key) -%}
+  {%- set src = d.field_sources.get(key) -%}
+  {%- if src %}<small class="set-by">set by {{ src[0] }} · {{ src[1]|day }}</small>{% endif -%}
+{%- endmacro %}
+{% block content %}
+<h1><span class="dot {{ 'online' if d.online else 'offline' }}" title="{{ 'online' if d.online else 'offline' }}"></span> {{ d.name or "(unnamed)" }}
+  <span class="muted">#{{ d.id }}</span></h1>
+<p class="meta">
+  {% if d.ipv4 %}<span class="mono">{{ d.ipv4 }}</span> · {% endif %}
+  {% if d.vendor %}{{ d.vendor }} · {% endif %}
+  last seen <span class="mono">{{ d.last_seen|ts }}</span>
+</p>
+
+<div class="cols">
+<form class="card edit" method="post" action="{{ root }}/devices/{{ d.id }}">
+  <h2>Details</h2>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% for key in ["name", "type", "icon", "place", "owner"] %}
+  <input type="hidden" name="orig_{{ key }}" value="{{ origs[key] }}">
+  <label class="field"><span>{{ key|capitalize }}</span>
+    <input name="{{ key }}" value="{{ values[key] }}">
+    {{ set_by("place_id" if key == "place" else key) }}
+  </label>
+  {% endfor %}
+  <input type="hidden" name="orig_notes" value="{{ origs.notes }}">
+  <label class="field"><span>Notes</span>
+    <textarea name="notes" rows="3">{{ values.notes }}</textarea>
+    {{ set_by("notes") }}
+  </label>
+  {% for key, choices in [("trust", trust_choices), ("scan_policy", scan_policy_choices)] %}
+  <input type="hidden" name="orig_{{ key }}" value="{{ origs[key] }}">
+  <label class="field"><span>{{ "Scan policy" if key == "scan_policy" else "Trust" }}</span>
+    <select name="{{ key }}">
+      {% for c in choices %}<option value="{{ c }}"{% if values[key] == c %} selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select>
+    {{ set_by(key) }}
+  </label>
+  {% endfor %}
+  <div class="actions"><button type="submit">Save</button></div>
+</form>
+
+<div class="card">
+  <h2>Deep scan</h2>
+  <p class="muted">Runs nmap with service detection against the current IPv4.</p>
+  <form method="post" action="{{ root }}/devices/{{ d.id }}/deep-scan">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" id="deep-scan"{% if d.scan_policy == "never" %} disabled title="scan_policy is never"{% endif %}>Deep scan</button>
+  </form>
+  {% if d.scan_policy == "never" %}<p class="muted">Disabled: scan policy is <em>never</em>.</p>{% endif %}
+</div>
+</div>
+
+<h2>Interfaces</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Kind</th><th>Address</th><th>Vendor</th><th>AP / band</th><th>Hints</th><th>First seen</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {% for i in d.interfaces %}
+  <tr id="iface-{{ i.id }}">
+    <td>{{ i.kind }}{% if i.is_random %} <span class="tag new">random</span>{% endif %}</td>
+    <td class="mono">{{ i.address }}</td>
+    <td>{{ i.vendor or "" }}</td>
+    <td>{{ ap_link(i.ap_node, aps, root) }}{% if i.band %} <span class="muted">{{ i.band }} GHz</span>{% endif %}</td>
+    <td class="hints">{% for k, v in i.hints|dictsort %}<span>{{ k }}: {{ v|fmt_value }}</span> {% endfor %}</td>
+    <td class="mono">{{ i.first_seen|ts }}</td>
+    <td class="mono">{{ i.last_seen|ts }}</td>
+  </tr>
+  {% else %}<tr><td colspan="7" class="empty">No interfaces.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>IP history</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>IPv4</th><th>Interface</th><th>First seen</th><th>Last seen</th><th>State</th></tr></thead>
+  <tbody>
+  {% set addr = {} %}{% for i in d.interfaces %}{% set _ = addr.update({i.id: i.address}) %}{% endfor %}
+  {% for l in d.leases %}
+  <tr>
+    <td class="mono">{{ l.ipv4 }}</td>
+    <td class="mono">{{ addr.get(l.interface_id, l.interface_id) }}</td>
+    <td class="mono">{{ l.first_seen|ts }}</td>
+    <td class="mono">{{ l.last_seen|ts }}</td>
+    <td>{% if l.closed %}<span class="muted">closed</span>{% else %}current{% endif %}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="empty">No leases.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Services</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Port</th><th>Name</th><th>Product</th><th>Source</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {% for s in d.services %}
+  <tr>
+    <td class="mono">{{ s.port }}/{{ s.proto }}</td>
+    <td>{{ s.name or "" }}</td>
+    <td>{{ s.product or "" }}{% if s.version %} <span class="muted">{{ s.version }}</span>{% endif %}</td>
+    <td>{{ s.source }}</td>
+    <td class="mono">{{ s.last_seen|ts }}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="empty">No services.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.94 scan initiated as: nmap -oX - -->
+<nmaprun scanner="nmap" args="nmap -oX - -sV -p- -T3 -Pn 192.0.2.30" version="7.94">
+<host><status state="up" reason="user-set"/>
+<address addr="192.0.2.30" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="8080"><state state="open" reason="syn-ack"/><service name="http" product="Example httpd" version="2.4.1" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="49152"><state state="open" reason="syn-ack"/><service name="upnp" method="probed" conf="10"/></port>
+</ports>
+</host>
+</nmaprun>

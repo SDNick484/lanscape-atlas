@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block content %}
+<h1>History</h1>
+<form class="filters" method="get" action="{{ root }}/history">
+  <label>Actor <input name="actor" value="{{ actor }}" placeholder="user, claude, collector:arp"></label>
+  <button type="submit">Filter</button>
+  {% if actor %}<a href="{{ root }}/history">Clear</a>{% endif %}
+</form>
+{% for b in batches %}
+<section class="batch card" id="batch-{{ b.id }}">
+  <header>
+    <strong>#{{ b.id }}</strong>
+    <span class="actor">{{ b.actor }}</span>
+    <span class="muted mono">{{ b.at|ts }}</span>
+    {% if b.undoes %}<span class="tag">undoes #{{ b.undoes }}</span>{% endif %}
+    {% if b.undone %}<span class="tag unwanted">undone</span>{% endif %}
+    <form class="push" method="post" action="{{ root }}/history/{{ b.id }}/undo">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if actor %}<input type="hidden" name="actor" value="{{ actor }}">{% endif %}
+      <button type="submit" class="secondary"{% if not b.can_undo %} disabled{% endif %}>Undo</button>
+    </form>
+  </header>
+  <ul class="changes">
+    {% for c in b.changes %}
+    <li>
+      {% if c.entity == "device" %}<a href="{{ root }}/devices/{{ c.entity_id }}">device #{{ c.entity_id }}</a>{% else %}{{ c.entity }} #{{ c.entity_id }}{% endif %}
+      <span class="field">{{ c.field }}</span>:
+      <span class="old">{{ c.old_value|fmt_value }}</span> → <span class="new">{{ c.new_value|fmt_value }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<p class="empty">No changes yet.</p>
+{% endfor %}
+{% endblock %}

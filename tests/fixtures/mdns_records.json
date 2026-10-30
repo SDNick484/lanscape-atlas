@@ -1,0 +1,7 @@
+[
+  {"name": "Living-Room-TV._googlecast._tcp.local.", "type": "_googlecast._tcp.local.",
+   "addresses": ["fe80::1", "192.0.2.30"], "port": 8009, "server": "tv-1234.local."},
+  {"name": "Hub", "type": "_hap._tcp", "addresses": ["192.0.2.31"], "port": 0, "server": null},
+  {"name": "Mesh", "type": "_matterc._udp", "addresses": ["192.0.2.32"], "port": 5540, "server": "m.local."},
+  {"name": "V6Only._http._tcp.local.", "type": "_http._tcp", "addresses": ["fe80::2"], "port": 80, "server": null}
+]

@@ -1,0 +1,17 @@
+{%- from "_macros.html" import ap_link %}
+{%- for d in devices %}
+<tr class="device-row{% if not d.online %} offline{% endif %}" id="device-{{ d.id }}">
+  <td><span class="dot {{ 'online' if d.online else 'offline' }}" title="{{ 'online' if d.online else 'offline' }}"></span></td>
+  <td><a class="name" href="{{ root }}/devices/{{ d.id }}">{{ d.name or "(unnamed)" }}</a>{% if d.trust != "known" %} <span class="tag {{ d.trust }}">{{ d.trust }}</span>{% endif %}</td>
+  <td>{{ d.icon or "" }}</td>
+  <td class="mono">{{ d.ipv4 or "" }}</td>
+  <td class="mono">{% for m in d.macs %}{{ m }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+  <td>{{ d.vendor or "" }}</td>
+  <td>{{ d.place or "" }}</td>
+  <td>{{ ap_link(d.ap_node, aps, root) }}{% if d.band %} <span class="muted">{{ d.band }} GHz</span>{% endif %}</td>
+  <td class="num">{{ d.service_count }}</td>
+  <td class="mono">{{ d.last_seen|ts }}</td>
+</tr>
+{%- else %}
+<tr><td colspan="10" class="empty">No devices match.</td></tr>
+{%- endfor %}

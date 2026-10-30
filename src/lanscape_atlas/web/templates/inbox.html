@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Inbox{% endblock %}
+{% block content %}
+<h1>Inbox <span class="muted count">{{ items|length }}</span></h1>
+<p class="muted">New devices and devices seen only by random MACs. Mark them, name them, or claim a random MAC onto a device you already know.</p>
+{% for it in items %}{% set d = it.device %}
+<article class="inbox-item card" id="inbox-{{ d.id }}">
+  <header>
+    <span class="dot {{ 'online' if d.online else 'offline' }}"></span>
+    <a class="name" href="{{ root }}/devices/{{ d.id }}">{{ d.name or "(unnamed)" }}</a>
+    <span class="tag {{ d.trust }}">{{ d.trust }}</span>
+    <span class="muted mono">{{ d.ipv4 or "" }}</span>
+    <span class="muted">{{ d.vendor or "" }}</span>
+  </header>
+  <div class="quick">
+    <form method="post" action="{{ root }}/inbox/{{ d.id }}/known">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit">Mark known</button>
+    </form>
+    <form method="post" action="{{ root }}/inbox/{{ d.id }}/unwanted">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary">Mark unwanted</button>
+    </form>
+    <form class="inline" method="post" action="{{ root }}/inbox/{{ d.id }}/name">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input name="name" value="{{ d.name or '' }}" placeholder="Name" aria-label="Name" required>
+      <input name="type" value="{{ d.type or '' }}" placeholder="Type" aria-label="Type" size="8">
+      <button type="submit">Save name</button>
+    </form>
+  </div>
+  {% for i in it.interfaces %}
+  <form class="inline claim" method="post" action="{{ root }}/interfaces/{{ i.id }}/claim">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <span class="mono">{{ i.address }}</span>{% if i.is_random %} <span class="tag new">random</span>{% endif %}
+    <label>claim onto
+      <select name="device_id" required>
+        <option value="">choose a known device</option>
+        {% for k in known if k.id != d.id %}<option value="{{ k.id }}">{{ k.name or "(unnamed)" }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="secondary"{% if not known %} disabled title="Mark a device known first"{% endif %}>Claim</button>
+  </form>
+  {% endfor %}
+</article>
+{% else %}
+<p class="empty">Inbox is empty.</p>
+{% endfor %}
+{% endblock %}

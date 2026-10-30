@@ -1,0 +1,11 @@
+Interface: eth0, type: EN10MB, MAC: 00:00:5e:00:53:aa, IPv4: 192.0.2.2
+Starting arp-scan 1.10.0
+192.0.2.1	00:00:5e:00:53:01	Example Vendor Inc.
+192.0.2.10	02:00:5e:00:53:0a	(Unknown: locally administered)
+192.0.2.11	not-a-mac	bad
+192.0.2.12	00:00:5e:00:53:0c
+192.0.2.12	00:00:5e:00:53:0c	(DUP: 2)
+192.0.2.12	00:00:5e:00:53:0d	(DUP: 2)
+not.an.ip	00:00:5e:00:53:0e	junk
+
+2 packets received

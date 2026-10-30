@@ -1,0 +1,11 @@
+{#- AP node: link to the device owning the MAC (MAC as tooltip), else the plain MAC. -#}
+{% macro ap_link(mac, aps, root) -%}
+  {%- if mac -%}
+    {%- set owner = aps.get(mac) -%}
+    {%- if owner -%}
+      <a href="{{ root }}/devices/{{ owner[0] }}" title="{{ mac }}">{{ owner[1] or mac }}</a>
+    {%- else -%}
+      <span class="mono">{{ mac }}</span>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}

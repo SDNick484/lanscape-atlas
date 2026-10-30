@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lanscape-atlas"
+version = "0.1.0"
+description = "Home network inventory: devices, services, topology."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "jinja2",
+    "python-multipart",
+    "apscheduler>=3.10,<4",
+    "asusrouter>=1.21.3",
+    "zeroconf>=0.151.5",
+    "mcp>=2.3.0,<3",
+    "aiohttp",
+    "tzlocal>=5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[project.scripts]
+lanscape-atlas = "lanscape_atlas.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lanscape_atlas"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src", "scripts"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.format]
+# The spec and plan are binding documents; their code snippets stay as written.
+exclude = ["docs/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["lanscape_atlas.store.*", "lanscape_atlas.service.*", "lanscape_atlas.ingest.*"]
+strict = true

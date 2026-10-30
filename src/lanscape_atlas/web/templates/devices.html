@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Devices{% endblock %}
+{% block content %}
+<h1>Devices <span class="muted count">{{ devices|length }}</span></h1>
+<form class="filters" method="get" action="{{ root }}/">
+  <input type="search" name="q" value="{{ f.raw.q }}" placeholder="Search name, IP, MAC, vendor" aria-label="Search">
+  <label>Online
+    <select name="online">
+      {% for v, label in [("", "any"), ("true", "online"), ("false", "offline")] %}
+      <option value="{{ v }}"{% if f.raw.online == v %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Trust
+    <select name="trust">
+      {% for v in ["", "new", "known", "unwanted"] %}
+      <option value="{{ v }}"{% if f.raw.trust == v %} selected{% endif %}>{{ v or "any" }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Type <input name="type" value="{{ f.raw.type }}" size="8"></label>
+  <label>Place <input name="place" value="{{ f.raw.place }}" size="8"></label>
+  <label>AP node <input name="ap_node" value="{{ f.raw.ap_node }}" size="17"></label>
+  {% if f.raw.sort %}<input type="hidden" name="sort" value="{{ f.raw.sort }}">{% endif %}
+  {% if f.raw.dir %}<input type="hidden" name="dir" value="{{ f.raw.dir }}">{% endif %}
+  <button type="submit">Filter</button>
+  <a href="{{ root }}/">Clear</a>
+</form>
+<div class="table-wrap">
+<table class="devices">
+  <thead>
+    <tr>
+      {%- for key, label in [("online", ""), ("name", "Name"), (None, "Icon"), ("ipv4", "IPv4"), (None, "MAC"), ("vendor", "Vendor"), ("place", "Place"), (None, "AP / band"), ("services", "Svc"), ("last_seen", "Last seen")] %}
+      <th>{% if key %}<a href="?{{ f.query(sort=key, dir=('' if (f.sort == key and f.desc) or (f.sort != key) else 'desc')) }}">{{ label or "●" }}{% if f.sort == key %} {{ "▾" if f.desc else "▴" }}{% endif %}</a>{% else %}{{ label }}{% endif %}</th>
+      {%- endfor %}
+    </tr>
+  </thead>
+  <tbody hx-get="{{ root }}/partials/devices?{{ f.query() }}" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "_device_rows.html" %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

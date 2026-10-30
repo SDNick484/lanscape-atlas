@@ -1,0 +1,1931 @@
+[
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:00Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:80",
+  "ipv4": "192.0.2.80",
+  "hostname": "thermostat",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -59
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:00:01Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:85",
+  "ipv4": "192.0.2.85",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:10Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:20",
+  "ipv4": "192.0.2.20",
+  "hostname": "living-room-tv",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "5",
+   "rssi": -52
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:19Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:62",
+  "ipv4": "192.0.2.62",
+  "hostname": "esphome-bedroom-fan",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -66
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:21Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:63",
+  "ipv4": "192.0.2.63",
+  "hostname": "esphome-water-sensor",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -69
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:00:25Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:80",
+  "ipv4": "192.0.2.80",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:28Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:21",
+  "ipv4": "192.0.2.21",
+  "hostname": "bedroom-tv",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "5",
+   "rssi": -61
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:00:28Z",
+  "iface_kind": null,
+  "mac": "02:00:5e:00:53:41",
+  "ipv4": "192.0.2.41",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:32Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:88",
+  "ipv4": "192.0.2.88",
+  "hostname": "e-reader",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -75
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:00:35Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:73",
+  "ipv4": "192.0.2.73",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:00:35Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:83",
+  "ipv4": "192.0.2.83",
+  "hostname": "smart-plug-2",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -69
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:00:43Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:70",
+  "ipv4": "192.0.2.70",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "Embedded HTTP"
+    },
+    {
+     "port": 554,
+     "proto": "tcp",
+     "name": "rtsp"
+    }
+   ]
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:08Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:60",
+  "ipv4": "192.0.2.60",
+  "hostname": "esphome-garage-door",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -60
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:01:11Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.20",
+  "hostname": "Living-Room-TV",
+  "attrs": {
+   "services": [
+    {
+     "port": 8009,
+     "proto": "tcp",
+     "name": "googlecast"
+    },
+    {
+     "port": 8008,
+     "proto": "tcp",
+     "name": "http"
+    }
+   ],
+   "server": "living-room-tv.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:14Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:10",
+  "ipv4": "192.0.2.10",
+  "hostname": "nas-01",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:01:25Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.21",
+  "hostname": "Bedroom-TV",
+  "attrs": {
+   "services": [
+    {
+     "port": 8009,
+     "proto": "tcp",
+     "name": "googlecast"
+    }
+   ],
+   "server": "bedroom-tv.local."
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:01:31Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:31",
+  "ipv4": "192.0.2.31",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 631,
+     "proto": "tcp",
+     "name": "ipp"
+    },
+    {
+     "port": 9100,
+     "proto": "tcp",
+     "name": "jetdirect"
+    }
+   ]
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:35Z",
+  "iface_kind": "wifi",
+  "mac": "02:00:5e:00:53:43",
+  "ipv4": "192.0.2.43",
+  "hostname": "phone-d",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -73
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:01:36Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:23",
+  "ipv4": "192.0.2.23",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:36Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:24",
+  "ipv4": "192.0.2.24",
+  "hostname": "kitchen-speaker",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -58
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:01:37Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:52",
+  "ipv4": "192.0.2.52",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:01:37Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:72",
+  "ipv4": "192.0.2.72",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:01:40Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:72",
+  "ipv4": "192.0.2.72",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 554,
+     "proto": "tcp",
+     "name": "rtsp"
+    }
+   ]
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:44Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:31",
+  "ipv4": "192.0.2.31",
+  "hostname": "label-printer",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -70
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:01:49Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:01",
+  "ipv4": "192.0.2.1",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:54Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:23",
+  "ipv4": "192.0.2.23",
+  "hostname": "game-console",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:01:56Z",
+  "iface_kind": "wifi",
+  "mac": "02:00:5e:00:53:42",
+  "ipv4": "192.0.2.42",
+  "hostname": "phone-c",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "6",
+   "rssi": -50
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:01:56Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:83",
+  "ipv4": "192.0.2.83",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:02:01Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:11",
+  "ipv4": "192.0.2.11",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.2"
+    },
+    {
+     "port": 8006,
+     "proto": "tcp",
+     "name": "https",
+     "product": "Proxmox VE web UI"
+    },
+    {
+     "port": 3128,
+     "proto": "tcp",
+     "name": "http-proxy",
+     "product": "Proxmox spiceproxy"
+    }
+   ]
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:02:01Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.40",
+  "hostname": "Phone-A",
+  "attrs": {
+   "services": [
+    {
+     "port": 62078,
+     "proto": "tcp",
+     "name": "apple-mobdev2"
+    }
+   ],
+   "server": "phone-a.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:02:04Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.31",
+  "hostname": "Label-Printer",
+  "attrs": {
+   "services": [
+    {
+     "port": 631,
+     "proto": "tcp",
+     "name": "ipp"
+    }
+   ],
+   "server": "label-printer.local."
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:02:05Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.20",
+  "hostname": "Living Room TV",
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux/4.9 UPnP/1.0 Chromecast/1.56",
+   "location": "http://192.0.2.20:8008/ssdp/device-desc.xml",
+   "st": "urn:dial-multiscreen-org:service:dial:1"
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:02:26Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:60",
+  "ipv4": "192.0.2.60",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:02:29Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:84",
+  "ipv4": "192.0.2.84",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:02:33Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:13",
+  "ipv4": "192.0.2.13",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 8123,
+     "proto": "tcp",
+     "name": "http",
+     "product": "Home Assistant"
+    },
+    {
+     "port": 1883,
+     "proto": "tcp",
+     "name": "mqtt",
+     "product": "Mosquitto"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:02:44Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:14",
+  "ipv4": "192.0.2.14",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:02:45Z",
+  "iface_kind": "wifi",
+  "mac": "02:00:5e:00:53:41",
+  "ipv4": "192.0.2.41",
+  "hostname": "phone-b",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "5",
+   "rssi": -55
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:02:48Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:20",
+  "ipv4": "192.0.2.20",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:02:52Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.44",
+  "hostname": "Kids-Tablet",
+  "attrs": {
+   "services": [
+    {
+     "port": 7000,
+     "proto": "tcp",
+     "name": "airplay"
+    }
+   ],
+   "server": "kids-tablet.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:03:05Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:24",
+  "ipv4": "192.0.2.24",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:06Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:86",
+  "ipv4": "192.0.2.86",
+  "hostname": "arcade-cabinet",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:13Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:70",
+  "ipv4": "192.0.2.70",
+  "hostname": "cam-front-door",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -62
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:17Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:73",
+  "ipv4": "192.0.2.73",
+  "hostname": "cam-nursery",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -57
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:03:18Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:25",
+  "ipv4": "192.0.2.25",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:23Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:84",
+  "ipv4": "192.0.2.84",
+  "hostname": "doorbell",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "5",
+   "rssi": -54
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:03:29Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:22",
+  "ipv4": "192.0.2.22",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:03:32Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:87",
+  "ipv4": "192.0.2.87",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:03:43Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:30",
+  "ipv4": "192.0.2.30",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:48Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:12",
+  "ipv4": "192.0.2.12",
+  "hostname": "pve-vm-omv",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:03:55Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:85",
+  "ipv4": "192.0.2.85",
+  "hostname": "hue-bridge",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:01Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:53",
+  "ipv4": "192.0.2.53",
+  "hostname": "office-laptop-wifi",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "6",
+   "rssi": -47
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:12Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:02",
+  "ipv4": "192.0.2.2",
+  "hostname": "mesh-node-upstairs",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:04:14Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:86",
+  "ipv4": "192.0.2.86",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.6"
+    },
+    {
+     "port": 1234,
+     "proto": "tcp",
+     "name": "http",
+     "product": "EmulationStation"
+    }
+   ]
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:04:16Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.85",
+  "hostname": "Hue-Bridge",
+  "attrs": {
+   "services": [
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "hue"
+    },
+    {
+     "port": 443,
+     "proto": "tcp",
+     "name": "hue"
+    }
+   ],
+   "server": "hue-bridge.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:17Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:82",
+  "ipv4": "192.0.2.82",
+  "hostname": "smart-plug-1",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -65
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:20Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:31",
+  "ipv4": "192.0.2.31",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:04:21Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.1",
+  "hostname": null,
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux/5.4 UPnP/1.1 MiniUPnPd/2.2",
+   "location": "http://192.0.2.1:5000/rootDesc.xml",
+   "st": "urn:schemas-upnp-org:device:InternetGatewayDevice:1"
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:22Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:52",
+  "ipv4": "192.0.2.52",
+  "hostname": "office-laptop",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:04:22Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:71",
+  "ipv4": "192.0.2.71",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "Embedded HTTP"
+    },
+    {
+     "port": 554,
+     "proto": "tcp",
+     "name": "rtsp"
+    },
+    {
+     "port": 8000,
+     "proto": "tcp",
+     "name": "http-alt"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:26Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:13",
+  "ipv4": "192.0.2.13",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:29Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:12",
+  "ipv4": "192.0.2.12",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:29Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:65",
+  "ipv4": "192.0.2.65",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:30Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:86",
+  "ipv4": "192.0.2.86",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:33Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:61",
+  "ipv4": "192.0.2.61",
+  "hostname": "esphome-porch-light",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -63
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:04:37Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:01",
+  "ipv4": "192.0.2.1",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 53,
+     "proto": "tcp",
+     "name": "domain"
+    },
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "lighttpd"
+    },
+    {
+     "port": 443,
+     "proto": "tcp",
+     "name": "https"
+    }
+   ]
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:37Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:25",
+  "ipv4": "192.0.2.25",
+  "hostname": "office-speaker",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -64
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:04:40Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.21",
+  "hostname": "Bedroom TV",
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "WebOS/4.1.0 UPnP/1.0",
+   "location": "http://192.0.2.21:3000/",
+   "st": "urn:schemas-upnp-org:device:MediaRenderer:1"
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:04:41Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:14",
+  "ipv4": "192.0.2.14",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 53,
+     "proto": "tcp",
+     "name": "domain",
+     "product": "dnsmasq",
+     "version": "2.89"
+    },
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "lighttpd"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:45Z",
+  "iface_kind": null,
+  "mac": "02:00:5e:00:53:40",
+  "ipv4": "192.0.2.40",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:04:47Z",
+  "iface_kind": "wifi",
+  "mac": "02:00:5e:00:53:40",
+  "ipv4": "192.0.2.40",
+  "hostname": "phone-a",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "5",
+   "rssi": -48
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:04:48Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.30",
+  "hostname": "Office-Printer",
+  "attrs": {
+   "services": [
+    {
+     "port": 631,
+     "proto": "tcp",
+     "name": "ipp"
+    },
+    {
+     "port": 9100,
+     "proto": "tcp",
+     "name": "pdl-datastream"
+    },
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http"
+    }
+   ],
+   "server": "office-printer.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:49Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:81",
+  "ipv4": "192.0.2.81",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:04:58Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:10",
+  "ipv4": "192.0.2.10",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:04:58Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:87",
+  "ipv4": "192.0.2.87",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.2"
+    }
+   ]
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:05:09Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.65",
+  "hostname": "esphome-greenhouse",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-greenhouse.local."
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:05:10Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.10",
+  "hostname": "nas-01",
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux/4.4 UPnP/1.0 DLNADOC/1.50",
+   "location": "http://192.0.2.10:8200/rootDesc.xml",
+   "st": "urn:schemas-upnp-org:device:MediaServer:1"
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:05:16Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:50",
+  "ipv4": "192.0.2.50",
+  "hostname": "work-laptop",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "6",
+   "rssi": -45
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:05:19Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:73",
+  "ipv4": "192.0.2.73",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 554,
+     "proto": "tcp",
+     "name": "rtsp"
+    }
+   ]
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:05:23Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.12",
+  "hostname": "omv-storage",
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh"
+    },
+    {
+     "port": 445,
+     "proto": "tcp",
+     "name": "smb"
+    }
+   ],
+   "server": "omv-storage.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:05:39Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:87",
+  "ipv4": "192.0.2.87",
+  "hostname": "fpga-console",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:05:45Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:21",
+  "ipv4": "192.0.2.21",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:05:55Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.63",
+  "hostname": "esphome-water-sensor",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-water-sensor.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:04Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:65",
+  "ipv4": "192.0.2.65",
+  "hostname": "esphome-greenhouse",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -75
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:06:06Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:12",
+  "ipv4": "192.0.2.12",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.2"
+    },
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "nginx"
+    },
+    {
+     "port": 445,
+     "proto": "tcp",
+     "name": "microsoft-ds",
+     "product": "Samba smbd",
+     "version": "4"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:06:06Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:82",
+  "ipv4": "192.0.2.82",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:09Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:13",
+  "ipv4": "192.0.2.13",
+  "hostname": "homeassistant",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:06:12Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.23",
+  "hostname": null,
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux UPnP/1.0 Game-Console/1.0",
+   "location": "http://192.0.2.23:2869/upnphost/udhisapi.dll?content=uuid:1",
+   "st": "upnp:rootdevice"
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:16Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:64",
+  "ipv4": "192.0.2.64",
+  "hostname": "esphome-desk-lamp",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "2.4",
+   "rssi": -72
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:06:17Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:88",
+  "ipv4": "192.0.2.88",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:31Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:22",
+  "ipv4": "192.0.2.22",
+  "hostname": "streaming-box",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:35Z",
+  "iface_kind": "wifi",
+  "mac": "02:00:5e:00:53:45",
+  "ipv4": "192.0.2.45",
+  "hostname": "guest-tablet",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "5",
+   "rssi": -66
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:37Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:72",
+  "ipv4": "192.0.2.72",
+  "hostname": "cam-backyard",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "5",
+   "rssi": -68
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:06:43Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:11",
+  "ipv4": "192.0.2.11",
+  "hostname": "pve-host",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:06:43Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:53",
+  "ipv4": "192.0.2.53",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:06:46Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:11",
+  "ipv4": "192.0.2.11",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:06:53Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.22",
+  "hostname": "Streaming-Box",
+  "attrs": {
+   "services": [
+    {
+     "port": 7000,
+     "proto": "tcp",
+     "name": "airplay"
+    },
+    {
+     "port": 3689,
+     "proto": "tcp",
+     "name": "daap"
+    }
+   ],
+   "server": "streaming-box.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:06:55Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.62",
+  "hostname": "esphome-bedroom-fan",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-bedroom-fan.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:01Z",
+  "iface_kind": null,
+  "mac": "02:00:5e:00:53:42",
+  "ipv4": "192.0.2.42",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:07:07Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:51",
+  "ipv4": "192.0.2.51",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.6"
+    },
+    {
+     "port": 3389,
+     "proto": "tcp",
+     "name": "ms-wbt-server"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:13Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:63",
+  "ipv4": "192.0.2.63",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:15Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:44",
+  "ipv4": "192.0.2.44",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:07:27Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:51",
+  "ipv4": "192.0.2.51",
+  "hostname": "family-desktop",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:07:29Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:22",
+  "ipv4": "192.0.2.22",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 7000,
+     "proto": "tcp",
+     "name": "airplay"
+    },
+    {
+     "port": 49152,
+     "proto": "tcp",
+     "name": "upnp"
+    }
+   ]
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:31Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:62",
+  "ipv4": "192.0.2.62",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:07:40Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.10",
+  "hostname": "nas-01",
+  "attrs": {
+   "services": [
+    {
+     "port": 445,
+     "proto": "tcp",
+     "name": "smb"
+    },
+    {
+     "port": 5000,
+     "proto": "tcp",
+     "name": "http"
+    }
+   ],
+   "server": "nas-01.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:07:40Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.53",
+  "hostname": "Office-Laptop",
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh"
+    }
+   ],
+   "server": "office-laptop.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:07:43Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.25",
+  "hostname": "Office-Speaker",
+  "attrs": {
+   "services": [
+    {
+     "port": 8009,
+     "proto": "tcp",
+     "name": "googlecast"
+    }
+   ],
+   "server": "office-speaker.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:46Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:50",
+  "ipv4": "192.0.2.50",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:07:50Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:51",
+  "ipv4": "192.0.2.51",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:07:57Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:10",
+  "ipv4": "192.0.2.10",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh",
+     "product": "OpenSSH",
+     "version": "9.2"
+    },
+    {
+     "port": 445,
+     "proto": "tcp",
+     "name": "microsoft-ds",
+     "product": "Samba smbd",
+     "version": "4"
+    },
+    {
+     "port": 5000,
+     "proto": "tcp",
+     "name": "http",
+     "product": "nginx",
+     "version": "1.22"
+    },
+    {
+     "port": 2049,
+     "proto": "tcp",
+     "name": "nfs"
+    }
+   ]
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:08:00Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:71",
+  "ipv4": "192.0.2.71",
+  "hostname": "cam-driveway",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:02Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.64",
+  "hostname": "esphome-desk-lamp",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-desk-lamp.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:05Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.52",
+  "hostname": "Office-Laptop",
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh"
+    }
+   ],
+   "server": "office-laptop.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:08:11Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:44",
+  "ipv4": "192.0.2.44",
+  "hostname": "kids-tablet",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:02",
+   "band": "5",
+   "rssi": -60
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:08:16Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:30",
+  "ipv4": "192.0.2.30",
+  "hostname": "office-printer",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:16Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.50",
+  "hostname": "Work-Laptop",
+  "attrs": {
+   "services": [
+    {
+     "port": 22,
+     "proto": "tcp",
+     "name": "ssh"
+    },
+    {
+     "port": 7000,
+     "proto": "tcp",
+     "name": "airplay"
+    }
+   ],
+   "server": "work-laptop.local."
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:18Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.24",
+  "hostname": "Kitchen-Speaker",
+  "attrs": {
+   "services": [
+    {
+     "port": 8009,
+     "proto": "tcp",
+     "name": "googlecast"
+    }
+   ],
+   "server": "kitchen-speaker.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:08:20Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:60",
+  "ipv4": "192.0.2.60",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:08:20Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:61",
+  "ipv4": "192.0.2.61",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "nmap",
+  "seen_at": "2026-01-01T00:08:32Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:30",
+  "ipv4": "192.0.2.30",
+  "hostname": null,
+  "attrs": {
+   "services": [
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http",
+     "product": "Embedded HTTP Server"
+    },
+    {
+     "port": 631,
+     "proto": "tcp",
+     "name": "ipp",
+     "product": "CUPS",
+     "version": "2.4"
+    },
+    {
+     "port": 9100,
+     "proto": "tcp",
+     "name": "jetdirect"
+    }
+   ]
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:08:32Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.85",
+  "hostname": "Hue Bridge",
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux/3.14.0 UPnP/1.0 IpBridge/1.60",
+   "location": "http://192.0.2.85:80/description.xml",
+   "st": "upnp:rootdevice"
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:38Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.80",
+  "hostname": "Thermostat",
+  "attrs": {
+   "services": [
+    {
+     "port": 80,
+     "proto": "tcp",
+     "name": "http"
+    }
+   ],
+   "server": "thermostat.local."
+  }
+ },
+ {
+  "source": "ssdp",
+  "seen_at": "2026-01-01T00:08:46Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.24",
+  "hostname": "Kitchen Speaker",
+  "attrs": {
+   "name_source": "ssdp",
+   "server": "Linux/3.8 UPnP/1.0 Chromecast/1.40",
+   "location": "http://192.0.2.24:8008/ssdp/device-desc.xml",
+   "st": "urn:dial-multiscreen-org:service:dial:1"
+  }
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:08:48Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.13",
+  "hostname": "homeassistant",
+  "attrs": {
+   "services": [
+    {
+     "port": 8123,
+     "proto": "tcp",
+     "name": "home-assistant"
+    }
+   ],
+   "server": "homeassistant.local."
+  }
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:08:54Z",
+  "iface_kind": "wifi",
+  "mac": "00:00:5e:00:53:81",
+  "ipv4": "192.0.2.81",
+  "hostname": "robot-vacuum",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": "2.4",
+   "rssi": -71
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:08:58Z",
+  "iface_kind": null,
+  "mac": "02:00:5e:00:53:43",
+  "ipv4": "192.0.2.43",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:08:59Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:02",
+  "ipv4": "192.0.2.2",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:09:02Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:70",
+  "ipv4": "192.0.2.70",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:09:07Z",
+  "iface_kind": null,
+  "mac": "02:00:5e:00:53:45",
+  "ipv4": "192.0.2.45",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "asusrouter",
+  "seen_at": "2026-01-01T00:09:24Z",
+  "iface_kind": "ethernet",
+  "mac": "00:00:5e:00:53:14",
+  "ipv4": "192.0.2.14",
+  "hostname": "pihole-dns",
+  "attrs": {
+   "ap_node": "00:00:5e:00:53:01",
+   "band": null,
+   "rssi": null
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:09:33Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:71",
+  "ipv4": "192.0.2.71",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:09:42Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.60",
+  "hostname": "esphome-garage-door",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-garage-door.local."
+  }
+ },
+ {
+  "source": "arp",
+  "seen_at": "2026-01-01T00:09:43Z",
+  "iface_kind": null,
+  "mac": "00:00:5e:00:53:64",
+  "ipv4": "192.0.2.64",
+  "hostname": null,
+  "attrs": {}
+ },
+ {
+  "source": "mdns",
+  "seen_at": "2026-01-01T00:09:45Z",
+  "iface_kind": null,
+  "mac": null,
+  "ipv4": "192.0.2.61",
+  "hostname": "esphome-porch-light",
+  "attrs": {
+   "services": [
+    {
+     "port": 6053,
+     "proto": "tcp",
+     "name": "esphomelib"
+    }
+   ],
+   "server": "esphome-porch-light.local."
+  }
+ }
+]

@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-leaks
+        name: check for personal network data
+        entry: python scripts/check_leaks.py
+        language: system
+        pass_filenames: true

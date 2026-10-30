@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Topology{% endblock %}
+{% block content %}
+<div id="topology" class="topology" data-root="{{ root }}" data-csrf="{{ csrf }}">
+  <div class="topo-toolbar" role="toolbar" aria-label="Topology tools">
+    <form id="topo-add" class="inline">
+      <label class="sr-only" for="topo-name">Name</label>
+      <input id="topo-name" name="name" placeholder="New device name" maxlength="80" required>
+      <label class="sr-only" for="topo-type">Type</label>
+      <select id="topo-type" name="type">
+        <option value="switch">switch</option>
+        <option value="hub">hub</option>
+        <option value="other">other</option>
+      </select>
+      <button type="submit" id="topo-add-btn">Add placeholder</button>
+    </form>
+    <button type="button" id="topo-connect" class="secondary" disabled title="Select two devices">Connect selected (wired)</button>
+    <button type="button" id="topo-delete" class="secondary" disabled title="Select a manual link">Delete link</button>
+    <button type="button" id="topo-fit" class="secondary">Fit</button>
+    <span class="topo-legend muted" aria-label="Legend">
+      <span class="leg-group">Colour:
+        <span class="sw wired"></span>wired <span class="sw wifi"></span>wifi
+        <span class="sw backhaul"></span>mesh backhaul</span>
+      <span class="leg-group">Line:
+        <span class="sw dashed"></span>discovered <span class="sw solid"></span>manual</span>
+    </span>
+  </div>
+  <p id="topo-status" class="topo-status" role="status" aria-live="polite"></p>
+  <div class="topo-body">
+    <div id="cy" class="topo-canvas" aria-label="Network topology graph"></div>
+    <aside id="topo-panel" class="card topo-panel" hidden>
+      <h2 id="topo-panel-name"></h2>
+      <dl>
+        <dt>Type</dt><dd id="topo-panel-type"></dd>
+        <dt>State</dt><dd id="topo-panel-state"></dd>
+      </dl>
+      <a id="topo-panel-link" href="#">Open device page</a>
+    </aside>
+  </div>
+  <p class="muted topo-help">Drag devices to arrange them; positions are saved automatically.
+  Shift-click (or box-select) two devices to connect them. Dashed edges come from the router's
+  client list and cannot be deleted.</p>
+</div>
+<script src="{{ root }}/static/cytoscape.min.js" defer></script>
+<script src="{{ root }}/static/topology.js" defer></script>
+{% endblock %}
