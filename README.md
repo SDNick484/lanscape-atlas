@@ -116,6 +116,36 @@ to `/etc/crontabs/root` and make sure `crond` runs (`rc-update add crond default
 17 4 * * 0 su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-oui'
 ```
 
+### Scripted install and upgrade
+
+`deploy/setup-alpine.sh` performs the steps above and is safe to re-run, so the same
+command installs and later upgrades. It needs root, an Alpine container with OpenRC
+0.45 or newer, and Python 3.12 or newer. It only touches `/opt/lanscape-atlas`,
+`/etc/lanscape-atlas`, `/var/lib/lanscape-atlas`, the log file, its own init script
+and logrotate entry; it never upgrades packages or restarts other services.
+
+1. Copy `deploy/setup.env.example` to `/etc/lanscape-atlas/setup.env`, fill it in and
+   `chmod 600` it. It holds your router password and API token, so keep it out of the
+   repository.
+2. Copy the script to the container (for a private repository there is nothing to
+   clone from yet) and look before you leap:
+
+   ```sh
+   sh setup-alpine.sh --dry-run
+   ```
+
+3. Run it without `--dry-run`. For a private repository it first generates a
+   read-only deploy key, prints the public half and exits (status 3); add it under
+   the repository's Settings, Deploy keys, then run it again.
+
+Each run stops the service, checks out `--ref` (default `main`), reinstalls into the
+virtualenv, backs up the database (last three kept) when the code changed, renders
+`config.toml` from `setup.env`, migrates, restarts, and finishes with a smoke test of
+`/api/v1/collectors` and `/api/v1/devices`. Edit `setup.env`, not `config.toml`: the
+latter is regenerated on every run (the previous copy is kept as `config.toml.prev`).
+The API token is generated on the first run and kept afterwards unless you set
+`API_TOKEN`; the script never prints it.
+
 ### Commands
 
 | Command | Purpose |
