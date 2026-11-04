@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Floor plan{% endblock %}
+{% block content %}
+<div id="fp-app" class="fp" data-root="{{ root }}" data-csrf="{{ csrf }}">
+  <div class="fp-toolbar" role="toolbar" aria-label="Floor plan tools">
+    {% if plan %}
+    <button type="button" id="save-changes" disabled>Save changes</button>
+    <button type="button" id="discard-changes" class="secondary" disabled>Discard</button>
+    <button type="button" id="mode-layout" class="secondary" aria-pressed="false">Draw room</button>
+    {% endif %}
+    <form id="plan-upload" class="inline push" method="post" action="{{ root }}/floorplan/plan" enctype="multipart/form-data">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label for="plan-file" class="muted">{{ "Replace plan" if plan else "Upload plan" }}</label>
+      <input type="file" id="plan-file" name="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" required>
+      <button type="submit" class="secondary">Upload</button>
+    </form>
+  </div>
+  <p id="fp-status" class="fp-status" role="status" aria-live="polite"></p>
+
+  <div class="fp-body">
+    <div class="fp-main">
+    {% if svg %}
+      <div id="floorplan" class="fp-stage">
+        <img id="plan-img" src="{{ plan.url }}" width="{{ svg.w }}" height="{{ svg.h }}" alt="Floor plan image" draggable="false">
+        <svg id="plan-svg" class="fp-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ svg.w }} {{ svg.h }}" preserveAspectRatio="none" data-unit="{{ '%.3f'|format(svg.unit) }}" aria-label="Rooms and devices">
+          <g class="fp-rooms">
+            {%- for r in svg.rooms %}
+            <polygon class="fp-room" data-room-id="{{ r.id }}" points="{{ r.points }}"></polygon>
+            {%- endfor %}
+          </g>
+          <g class="fp-labels">
+            {%- for r in svg.rooms %}
+            <text class="fp-room-label" x="{{ '%.2f'|format(r.cx) }}" y="{{ '%.2f'|format(r.cy) }}" font-size="{{ '%.2f'|format(svg.unit * 1.8) }}">{{ r.name }}</text>
+            {%- endfor %}
+          </g>
+          <g class="fp-devices">
+            {%- for m in svg.markers %}
+            <circle class="fp-dev{% if not m.online %} offline{% endif %}" data-device-id="{{ m.id }}" cx="{{ '%.2f'|format(m.cx) }}" cy="{{ '%.2f'|format(m.cy) }}" r="{{ '%.2f'|format(svg.unit * 0.9) }}" tabindex="0" role="button" aria-label="{{ m.label }}"><title>{{ m.label }}</title></circle>
+            {%- endfor %}
+          </g>
+          <g class="fp-draft"></g>
+        </svg>
+      </div>
+      <div id="room-draw" class="card fp-draw" hidden>
+        <p class="muted">Click on the plan to add corners. Click the first corner or <em>Close room</em> to finish.
+        Saving with an existing room's name redraws that room.</p>
+        <div class="inline">
+          <button type="button" id="room-close" disabled>Close room</button>
+          <button type="button" id="room-cancel" class="secondary">Cancel</button>
+        </div>
+        <form id="room-form" class="inline" method="post" action="{{ root }}/floorplan/rooms" hidden>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="polygon" id="room-polygon">
+          <label for="room-name">Room name</label>
+          <input id="room-name" name="name" list="room-names" maxlength="200" required autocomplete="off">
+          <button type="submit" id="room-save">Save room</button>
+        </form>
+      </div>
+      <p class="muted fp-help">Drag devices from the list onto a room. Drag a placed device to move it
+      within its room, or select it and use the arrow keys. Changes are kept until you press
+      <em>Save changes</em>.</p>
+    {% else %}
+      <p class="card empty">No floor plan yet. Upload a PNG, JPG or SVG image (up to 10 MiB) to start.</p>
+    {% endif %}
+    </div>
+
+    <aside class="fp-side">
+      <section id="fp-selected" class="card" hidden>
+        <h2 id="fp-sel-name"></h2>
+        <p><a id="fp-sel-link" href="#">Open device page</a></p>
+        <button type="button" id="fp-sel-tray" class="secondary">Move to list</button>
+      </section>
+      <section class="card">
+        <h2>Not on the plan</h2>
+        <label class="sr-only" for="tray-filter">Filter devices</label>
+        <input type="search" id="tray-filter" placeholder="Filter by name" autocomplete="off">
+        <div id="tray" class="fp-tray">
+          {%- for g in trays %}
+          <div class="fp-group">
+            <h3>{{ g.name }}</h3>
+            <ul>
+              {%- for e in g.devices %}
+              <li class="fp-item" data-tray-device="{{ e.device_id }}"><span class="fp-name">{{ e.label }}</span>
+                {%- if g.room_id is not none %}<label class="fp-roam"><input type="checkbox" data-roaming-for="{{ e.device_id }}"{% if e.roaming %} checked{% endif %}> roaming</label>{% endif %}
+                {%- if e.roaming and e.set_by %}<small class="set-by">last set by {{ e.set_by }} at {{ e.set_at|ts }}</small>{% endif %}</li>
+              {%- endfor %}
+            </ul>
+          </div>
+          {%- else %}
+          <p class="empty">Every device is on the plan.</p>
+          {%- endfor %}
+        </div>
+      </section>
+      <section class="card">
+        <h2>Rooms</h2>
+        <ul class="fp-rooms-list">
+          {%- for r in rooms %}
+          <li>
+            <form class="inline" method="post" action="{{ root }}/floorplan/rooms/{{ r.id }}/name">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <label class="sr-only" for="room-rename-{{ r.id }}">New name for {{ r.name }}</label>
+              <input id="room-rename-{{ r.id }}" name="new_name" value="{{ r.name }}" maxlength="200" required>
+              <button type="submit" class="secondary">Rename</button>
+              {%- if not r.polygon %} <span class="muted">no outline</span>{% endif %}
+            </form>
+          </li>
+          {%- else %}
+          <li class="empty">No rooms yet.</li>
+          {%- endfor %}
+        </ul>
+      </section>
+    </aside>
+  </div>
+  <datalist id="room-names">
+    {%- for r in rooms %}<option value="{{ r.name }}"></option>{% endfor -%}
+  </datalist>
+  <script type="application/json" id="fp-data">{{ data_json|safe }}</script>
+</div>
+<script src="{{ root }}/static/floorplan.js" defer></script>
+{% endblock %}

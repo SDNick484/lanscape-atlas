@@ -21,6 +21,8 @@ dependencies = [
     "mcp>=2.3.0,<3",
     "aiohttp",
     "tzlocal>=5",
+    "Pillow",
+    "defusedxml",
 ]
 
 [project.optional-dependencies]
@@ -64,3 +66,7 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = ["lanscape_atlas.store.*", "lanscape_atlas.service.*", "lanscape_atlas.ingest.*"]
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["defusedxml", "defusedxml.*"]
+ignore_missing_imports = true

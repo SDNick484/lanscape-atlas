@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # Imported directly but guaranteed by a declared dependency: name -> provider.
-TRANSITIVE = {"starlette": "fastapi", "pydantic": "fastapi"}
+TRANSITIVE = {"starlette": "fastapi", "pydantic": "fastapi", "PIL": "pillow"}
 
 
 def _declared() -> set[str]:
@@ -35,3 +35,13 @@ def test_third_party_imports_are_declared() -> None:
         m for m in _imported() if m.lower() not in declared and TRANSITIVE.get(m) not in declared
     }
     assert not missing, f"undeclared dependencies: {sorted(missing)}"
+
+
+def test_migration_files_are_packaged() -> None:
+    """Hatch packages everything under src/lanscape_atlas; the migration must be there."""
+    cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["hatch"]["build"]["targets"][
+        "wheel"
+    ]
+    assert cfg["packages"] == ["src/lanscape_atlas"]
+    assert not cfg.get("exclude") and not cfg.get("only-include")
+    assert (ROOT / "src/lanscape_atlas/store/migrations/0002_floor_plan.sql").is_file()

@@ -12,6 +12,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from lanscape_atlas.netutil import normalize_mac, valid_ipv4
@@ -478,3 +479,114 @@ def ap_device_names(
         ):
             found[str(r[0])] = (int(r[1]), r[2])
     return found
+
+
+_PLACEMENT_FIELDS = ("place_id", "pos_x", "pos_y", "roaming")
+
+
+def last_placement_batch(conn: sqlite3.Connection, device_id: int) -> int:
+    """Latest batch id that changed a device's placement fields, or 0 if none.
+
+    Covers ``place_id``, ``pos_x``, ``pos_y`` and ``roaming`` changes from any writer
+    (``place_devices``, ``update_device``, ``set_place``, claims and undo batches).
+    ``place_devices`` compares it with the client's ``based_on`` to detect stale writes.
+    """
+    marks = ", ".join("?" for _ in _PLACEMENT_FIELDS)
+    row = conn.execute(
+        "SELECT MAX(batch_id) FROM change WHERE entity = 'device' AND entity_id = ?"
+        f" AND field IN ({marks})",
+        (device_id, *_PLACEMENT_FIELDS),
+    ).fetchone()
+    return int(row[0]) if row is not None and row[0] is not None else 0
+
+
+def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any]:
+    """Everything the floor plan page needs, read-only.
+
+    ``placed`` are fixed devices in a room with coordinates; ``roaming`` are roaming
+    devices assigned to a room (with who set it and when: the newer of the ``place_id``
+    and ``roaming`` ``field_source`` rows, roaming on a tie); ``unplaced`` is everything
+    else (no room, or a fixed device without coordinates). Each ``unplaced`` entry
+    carries its ``place_id`` (the room id, or None) so the page can group the tray by room.
+    Each device carries ``last_batch`` (see ``last_placement_batch``) so the page can
+    send it back as ``based_on``. Exposes plan metadata only, never the file path or
+    image bytes. ``now`` is accepted for symmetry with other views; online state is the
+    stored ``device.online`` flag.
+    """
+    del now
+    plan_row = conn.execute(
+        "SELECT width, height, file_name, updated_at FROM floor_plan WHERE id = 1"
+    ).fetchone()
+    plan = (
+        {
+            "width": plan_row["width"],
+            "height": plan_row["height"],
+            "file_name": plan_row["file_name"],
+            "updated_at": plan_row["updated_at"],
+        }
+        if plan_row is not None
+        else None
+    )
+    rooms = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "polygon": json.loads(r["polygon"]) if r["polygon"] else None,
+        }
+        for r in conn.execute("SELECT id, name, polygon FROM place ORDER BY id")
+    ]
+    marks = ", ".join("?" for _ in _PLACEMENT_FIELDS)
+    placed: list[dict[str, Any]] = []
+    roaming: list[dict[str, Any]] = []
+    unplaced: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT d.id, d.name, d.place_id, d.pos_x, d.pos_y, d.roaming, d.online,"
+        " CASE WHEN fr.set_at IS NOT NULL AND (fs.set_at IS NULL OR fr.set_at >= fs.set_at)"
+        " THEN fr.actor ELSE fs.actor END AS set_by,"
+        " CASE WHEN fr.set_at IS NOT NULL AND (fs.set_at IS NULL OR fr.set_at >= fs.set_at)"
+        " THEN fr.set_at ELSE fs.set_at END AS set_at,"
+        " coalesce(lb.batch_id, 0) AS last_batch"
+        " FROM device d"
+        " LEFT JOIN field_source fs ON fs.entity = 'device' AND fs.entity_id = d.id"
+        " AND fs.field = 'place_id'"
+        " LEFT JOIN field_source fr ON fr.entity = 'device' AND fr.entity_id = d.id"
+        " AND fr.field = 'roaming'"
+        " LEFT JOIN (SELECT entity_id, MAX(batch_id) AS batch_id FROM change"
+        f" WHERE entity = 'device' AND field IN ({marks}) GROUP BY entity_id) lb"
+        " ON lb.entity_id = d.id"
+        " ORDER BY d.id",
+        _PLACEMENT_FIELDS,
+    )
+    for r in rows:
+        base = {"device_id": r["id"], "name": r["name"]}
+        if r["place_id"] is not None and r["roaming"]:
+            roaming.append(
+                {
+                    **base,
+                    "place_id": r["place_id"],
+                    "set_by": r["set_by"],
+                    "set_at": r["set_at"],
+                    "online": bool(r["online"]),
+                    "last_batch": r["last_batch"],
+                }
+            )
+        elif r["place_id"] is not None and r["pos_x"] is not None and r["pos_y"] is not None:
+            placed.append(
+                {
+                    **base,
+                    "place_id": r["place_id"],
+                    "x": r["pos_x"],
+                    "y": r["pos_y"],
+                    "online": bool(r["online"]),
+                    "last_batch": r["last_batch"],
+                }
+            )
+        else:
+            unplaced.append({**base, "place_id": r["place_id"], "last_batch": r["last_batch"]})
+    return {
+        "plan": plan,
+        "rooms": rooms,
+        "placed": placed,
+        "roaming": roaming,
+        "unplaced": unplaced,
+    }

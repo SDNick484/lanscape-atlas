@@ -39,6 +39,8 @@ EXPECTED = {
     "run_deep_scan",
     "recent_changes",
     "undo",
+    "get_floor_plan",
+    "place_devices",
 }
 
 
@@ -126,7 +128,7 @@ async def test_tool_names_exact(app: FastAPI) -> None:
     async with _session(app) as client:
         tools = (await client.list_tools()).tools
         assert {t.name for t in tools} == EXPECTED
-        assert len(tools) == 10
+        assert len(tools) == 12
         assert set(TOOL_NAMES) == EXPECTED
         for t in tools:
             assert t.description and len(t.description) > 20, t.name
@@ -467,3 +469,120 @@ def test_http_host_check_without_token(
     app = _make_app(tmp_path, db, clock, allowed_hosts=("*",))
     with TestClient(app) as c:
         assert _post(c, "/mcp", _init()).status_code == 200
+
+
+# ------------------------------------------------------------ floor plan tools
+
+
+def _last_batch_actor(db: sqlite3.Connection) -> str:
+    row = db.execute("SELECT actor FROM batch ORDER BY id DESC LIMIT 1").fetchone()
+    return str(row[0])
+
+
+def _placement(rd: Any, x: float = 0.3, y: float = 0.3) -> dict[str, Any]:
+    return {"device_id": rd.dev, "place_id": rd.room, "x": x, "y": y, "roaming": False}
+
+
+async def test_floor_plan_tools_listed_with_metadata(mcp_client: Any) -> None:
+    async with mcp_client() as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+    assert {"get_floor_plan", "place_devices"} <= set(TOOL_NAMES)
+    gfp, pd = tools["get_floor_plan"], tools["place_devices"]
+    assert gfp.title and pd.title
+    assert gfp.annotations is not None and gfp.annotations.read_only_hint is True
+    assert pd.annotations is not None
+    assert pd.annotations.read_only_hint is False and pd.annotations.destructive_hint is False
+
+
+async def test_get_floor_plan_has_no_file_names(mcp_client: Any, plan_seeded: None) -> None:
+    async with mcp_client() as c:
+        out = _data(await _call(c, "get_floor_plan"))
+    text = json.dumps(out)
+    assert "file_name" not in text and "sha256" not in text and "plan.png" not in text
+    assert set(out["plan"]) == {"width", "height", "updated_at"}
+    assert (out["plan"]["width"], out["plan"]["height"]) == (1600, 1200)
+
+
+async def test_get_floor_plan_without_plan(mcp_client: Any) -> None:
+    async with mcp_client() as c:
+        out = _data(await _call(c, "get_floor_plan"))
+    assert out["plan"] is None
+    assert set(out) >= {"rooms", "placed", "roaming", "unplaced"}
+
+
+async def test_place_devices_actor_is_claude_and_undoable(
+    mcp_client: Any, room_and_device: Any
+) -> None:
+    rd = room_and_device
+    async with mcp_client() as c:
+        out = _data(
+            await _call(
+                c,
+                "place_devices",
+                placements=[_placement(rd)],
+                based_on={str(rd.dev): 0},
+            )
+        )
+        assert out["batch_id"] > 0
+        assert _last_batch_actor(rd.db) == "claude"
+        view = _data(await _call(c, "get_floor_plan"))
+        assert [d["device_id"] for d in view["placed"]] == [rd.dev]
+        _data(await _call(c, "undo", batch_id=out["batch_id"]))
+        view = _data(await _call(c, "get_floor_plan"))
+        assert view["placed"] == []
+
+
+async def test_place_devices_stale_names_ids(mcp_client: Any, stale_setup: Any) -> None:
+    body = stale_setup.body
+    dev = body["placements"][0]["device_id"]
+    async with mcp_client() as c:
+        r = await _call(c, "place_devices", **body)
+    assert r.is_error
+    assert _text(r) == (
+        f"placement changed since it was read for devices [{dev}]; "
+        "call get_floor_plan and retry with the new last_batch values"
+    )
+
+
+async def test_place_devices_outside_room_writes_nothing(
+    mcp_client: Any, room_and_device: Any
+) -> None:
+    rd = room_and_device
+    before = rd.db.execute("SELECT count(*) FROM change").fetchone()[0]
+    async with mcp_client() as c:
+        r = await _call(
+            c,
+            "place_devices",
+            placements=[_placement(rd, 1.5, 0.3)],
+            based_on={str(rd.dev): 0},
+        )
+    assert r.is_error
+    assert rd.db.execute("SELECT count(*) FROM change").fetchone()[0] == before
+
+
+@pytest.mark.parametrize(
+    ("placements", "based_on"),
+    [
+        ([{"device_id": 1, "place_id": None}], {"abc": 0}),
+        ([{"device_id": "1", "place_id": None}], {}),
+        ([{"device_id": 1, "place_id": None, "roaming": "yes"}], {}),
+        ([{"device_id": 1, "place_id": None, "actor": "user"}], {}),
+    ],
+)
+async def test_place_devices_strict_input(
+    mcp_client: Any, placements: list[dict[str, Any]], based_on: dict[str, Any]
+) -> None:
+    async with mcp_client() as c:
+        r = await _call(c, "place_devices", placements=placements, based_on=based_on)
+    assert r.is_error
+    if "abc" in based_on:
+        assert _text(r) == "based_on keys must be device ids"
+
+
+def test_instructions_and_docstring_cover_floor_plan_tools() -> None:
+    from lanscape_atlas import mcp_server
+
+    assert "get_floor_plan" in mcp_server.INSTRUCTIONS
+    assert "place_devices" in mcp_server.INSTRUCTIONS
+    src = Path(mcp_server.__file__).read_text()
+    assert "may be omitted" in src and "counts as 0" in src

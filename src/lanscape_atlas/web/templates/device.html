@@ -51,6 +51,17 @@
   </form>
   {% if d.scan_policy == "never" %}<p class="muted">Disabled: scan policy is <em>never</em>.</p>{% endif %}
 </div>
+
+<div class="card" id="device-floorplan">
+  <h2>Floor plan</h2>
+  <p>{% if roaming %}<span class="tag">Roaming</span> in {{ d.place }}{% elif d.place %}Fixed in {{ d.place }}{% else %}<span class="muted">No room assigned.</span>{% endif %}</p>
+  <form method="post" action="{{ root }}/devices/{{ d.id }}/roaming">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="roaming" value="{{ 'off' if roaming else 'on' }}">
+    <button type="submit" class="secondary" id="roaming-toggle"{% if not d.place and not roaming %} disabled title="Assign a room first"{% endif %}>{{ "Mark fixed" if roaming else "Mark roaming" }}</button>
+  </form>
+  <p class="muted"><a href="{{ root }}/floorplan">Open the floor plan</a></p>
+</div>
 </div>
 
 <h2>Interfaces</h2>

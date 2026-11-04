@@ -47,11 +47,13 @@ from lanscape_atlas.ingest import Ingestor
 from lanscape_atlas.mcp_server import build_mcp
 from lanscape_atlas.oui import OuiDB
 from lanscape_atlas.scheduler import CollectorRunner, start_scheduler, stop_scheduler
-from lanscape_atlas.service import Service, UndoConflict
+from lanscape_atlas.service import Service, StaleWrite, UndoConflict
 from lanscape_atlas.store.db import migrate, open_db
-from lanscape_atlas.web import pages
+from lanscape_atlas.web import floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.deep_scan import start_deep_scan
+from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
+from lanscape_atlas.web.floorplan_api import router as floorplan_router
 
 log = logging.getLogger(__name__)
 
@@ -132,9 +134,13 @@ def _message(exc: BaseException, default: str) -> str:
     return default
 
 
+JSON_PAGE_PATHS = ("/floorplan/placements",)
+
+
 def _wants_json(scope: Scope) -> bool:
-    """``/api*``, ``/mcp*`` and the topology page's JSON endpoints (``/topology/...``)."""
-    return _needs_auth(scope) or _route_path(scope).startswith("/topology/")
+    """``/api*``, ``/mcp*`` and the pages' JSON endpoints (``/topology/...``, floor plan saves)."""
+    path = _route_path(scope)
+    return _needs_auth(scope) or path.startswith("/topology/") or path in JSON_PAGE_PATHS
 
 
 def _is_page(request: Request) -> bool:
@@ -160,6 +166,15 @@ async def _undo_conflict(request: Request, exc: Exception) -> Response:
         return pages.error_page(request, 409, str(exc))
     return JSONResponse(
         {"detail": "conflict", "conflicting": list(exc.conflicting)}, status_code=409
+    )
+
+
+async def _stale_write(request: Request, exc: Exception) -> Response:
+    # JSON on every path: the floor plan page's fetch calls rely on it too.
+    assert isinstance(exc, StaleWrite)
+    return JSONResponse(
+        {"detail": "conflict", "conflicting": list(exc.conflicting), "message": STALE_MESSAGE},
+        status_code=409,
     )
 
 
@@ -286,13 +301,13 @@ def _origin_checked(scope: Scope) -> bool:
     if scope.get("method", "GET").upper() not in _UNSAFE_METHODS:
         return False
     return any(
-        p == "/api" or p.startswith(("/api/", "/topology/"))
+        p == "/api" or p.startswith(("/api/", "/topology/", "/floorplan/"))
         for p in (_route_path(scope), scope.get("path", ""))
     )
 
 
 class OriginCheckMiddleware:
-    """Unsafe methods on ``/api/*`` and ``/topology/*`` with a foreign ``Origin`` get 403.
+    """Unsafe methods on ``/api/*``, ``/topology/*`` and ``/floorplan/*``: foreign ``Origin``: 403.
 
     Applies in every mode: browsers attach ``Origin`` to cross-site form posts and
     fetches, so a page elsewhere cannot trigger undo or scans. Requests without an
@@ -437,6 +452,7 @@ def create_app(
     app.add_exception_handler(ValueError, _value_error)
     app.add_exception_handler(OverflowError, _overflow)
     app.add_exception_handler(UndoConflict, _undo_conflict)
+    app.add_exception_handler(StaleWrite, _stale_write)
     app.add_exception_handler(ScanRefused, _scan_refused)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
@@ -453,5 +469,7 @@ def create_app(
         app.router.routes.append(Route(path, endpoint, include_in_schema=False))
 
     app.include_router(api_router)
+    app.include_router(floorplan_router)
+    app.include_router(floorplan.router)
     pages.install(app)
     return app

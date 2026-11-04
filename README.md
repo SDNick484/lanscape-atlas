@@ -12,7 +12,7 @@ hostnames.
 The screenshots show a generated "fake house" dataset in documentation address
 ranges, not a real network.
 
-## Features (Phase 1)
+## Features
 
 - **Discovery** with five collectors: ASUS router client list (`asusrouter`),
   `arp-scan`, mDNS, SSDP, and a nightly light `nmap` scan. A deep `nmap -sV` scan
@@ -29,6 +29,47 @@ ranges, not a real network.
 - **HTTP API** under `/api/v1` (OpenAPI via FastAPI) and an **MCP server** at `/mcp`
   in the same process.
 - **Vendor lookup** from a local IEEE OUI file; no network call at lookup time.
+- **Floor plan** (Phase 2): upload a plan, draw rooms, place devices. See below.
+
+## Floor plan
+
+The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
+
+- **Upload a plan.** Choose a PNG, JPG or SVG up to 10 MiB. Replacing the plan later
+  requires the same aspect ratio, so room outlines and device points stay valid.
+- **Draw rooms.** Press *Draw room*, click the corners, close the shape (click the
+  first corner or *Close room*), name it ("Room A") and save. Saving an existing name
+  redraws that room. Rename rooms from the Rooms list. A device point must lie
+  inside its room; a point on an edge counts as inside.
+- **Place devices.** Drag a device from the list onto a room, drag a placed device to
+  move it within its room, or select it and use the arrow keys. Nothing is written
+  until you press *Save changes*; *Discard* drops the pending edits. If another tab
+  or Claude moved the same device in the meantime, the save is refused (409) and the
+  page reloads with a message instead of overwriting.
+- **Roaming devices** (phones, laptops) belong to a room's list but have no point on
+  the plan. Tick *roaming* next to the device in the list, or press *Mark roaming* (and *Mark fixed* to undo it) on its device page.
+  Turning roaming off leaves the device in that room's list, ready to be dropped.
+- **Undo.** Every plan, room and placement change is a batch in History and can be
+  undone like any other change.
+
+HTTP: `GET /api/v1/floorplan` returns the plan, rooms and device placements,
+`PUT /api/v1/floorplan/rooms` saves a room, and `POST /api/v1/floorplan/placements`
+saves placements (with `based_on` batch ids for stale-write detection).
+
+MCP: `get_floor_plan` and `place_devices` are **text only**. They return room names,
+polygons and device positions; image bytes and file paths are never served, so the
+plan image reaches a browser only through the web UI. Writes use actor `claude`.
+
+The image is stored in `$DATA_DIR/floorplan` (mode 0750, created by
+`deploy/setup-alpine.sh`; create it yourself on a manual install) and is never in
+git. A floor plan is personal data: keep room names and images out of the repository.
+Put real room names in a denylist file and point `LANSCAPE_LEAK_DENYLIST` (or
+`LANSCAPE_DENYLIST`) at it; `scripts/check_leaks.py` also rejects tracked image files.
+
+**Upgrading from Phase 1.** The database migrates from schema v1 to v2 on start. The
+scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
+before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
+directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
 
 ## Requirements
 
@@ -59,6 +100,7 @@ python3 -m venv /opt/lanscape-atlas/venv
 addgroup -S lanscape
 adduser -S -D -H -G lanscape -h /var/lib/lanscape-atlas lanscape
 install -d -m 0700 -o lanscape -g lanscape /var/lib/lanscape-atlas
+install -d -m 0750 -o lanscape -g lanscape /var/lib/lanscape-atlas/floorplan
 
 # Configuration
 cp config.example.toml /var/lib/lanscape-atlas/config.toml
@@ -246,7 +288,8 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 ```
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
-`claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`.
+`claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
+`get_floor_plan`, `place_devices`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
 its own batch and can be undone like any other change. Tool output never includes
@@ -290,6 +333,10 @@ Tools:
   `~/.config/lanscape-atlas/denylist.txt` (one term per line, `#` comments). Put your
   hostnames, room names and domain there. Set `LANSCAPE_DENYLIST` to use another
   file; if set, the file must exist and be readable or the check fails.
+  `LANSCAPE_LEAK_DENYLIST` names an additional denylist file (for example room
+  names) with the same rules; terms from all sources are merged.
+- The same script rejects any `.png`, `.jpg`, `.jpeg`, `.svg`, `.gif` or `.webp`
+  file outside `docs/screenshots/`: floor plans and photos stay in the data dir.
 - `scripts/anonymize.py` rewrites a real capture into documentation values with a
   stable mapping, so relationships between devices survive:
 
@@ -318,7 +365,7 @@ Neither tool detects bare 12-hex-digit MACs without separators (for example
 
 | Phase | Scope |
 |---|---|
-| 2 | Floor plan: upload an image or SVG, draw rooms, drag devices onto them |
+| 2 (done) | Floor plan: upload an image or SVG, draw rooms, drag devices onto them |
 | 3 | Bluetooth presence via ESP32/ESPHome Bluetooth proxies, with rough room location |
 | 4 | MQTT / Home Assistant publishing and new-device notifications |
 | 5 | Z-Wave devices via Hubitat or Home Assistant |

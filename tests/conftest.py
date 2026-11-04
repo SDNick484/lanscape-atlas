@@ -110,3 +110,25 @@ def ing(
     db: sqlite3.Connection, svc: Service, events: EventBus, oui: OuiDB, clock: FixedClock
 ) -> Ingestor:
     return Ingestor(db, svc, events, oui, clock)
+
+
+# ------------------------------------------------- floor plan fixtures (Phase 2)
+from helpers.floorplan_fixtures import (  # noqa: E402, F401
+    client,
+    client_csrf,
+    client_with_token,
+    git_add,
+    live_server,
+    mcp_client,
+    page,
+    plan_seeded,
+    room_and_device,
+    run_check_leaks,
+    saved_room_named,
+    seeded_device,
+    seeded_room,
+    stale_setup,
+    synthetic_plan_and_room,
+    tmp_data_dir,
+    tmp_git_repo,
+)

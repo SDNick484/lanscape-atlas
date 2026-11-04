@@ -81,10 +81,14 @@ def test_change_records_previous_provenance(svc, make_device, clock):
 
 
 def test_values_round_trip_as_json(svc, make_device):
-    d = make_device(pos_x=1.5, notes="hi")
-    b = svc.update_device("user", d, {"pos_x": 3, "notes": None})
+    # pos_x/pos_y are set through place_devices now (Ruling 19); place_id is the int field.
+    with svc.conn:
+        p1 = svc.conn.execute("insert into place(name) values ('Room A')").lastrowid
+        p2 = svc.conn.execute("insert into place(name) values ('Room B')").lastrowid
+    d = make_device(place_id=p1, notes="hi")
+    b = svc.update_device("user", d, {"place_id": p2, "notes": None})
     got = {r[3]: (json.loads(r[4]), json.loads(r[5])) for r in _changes(svc, b)}
-    assert got == {"pos_x": (1.5, 3), "notes": ("hi", None)}
+    assert got == {"place_id": (p1, p2), "notes": ("hi", None)}
 
 
 def test_noop_update_creates_no_batch(svc, make_device, events):

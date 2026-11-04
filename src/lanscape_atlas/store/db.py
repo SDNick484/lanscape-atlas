@@ -6,7 +6,7 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def open_db(path: Path | str) -> sqlite3.Connection:
@@ -19,22 +19,39 @@ def open_db(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+def _load_migration(n: int) -> str:
+    """SQL text of migration ``n`` (``migrations/000n_*.sql``)."""
+    folder = resources.files("lanscape_atlas.store").joinpath("migrations")
+    for item in folder.iterdir():
+        if item.name.startswith(f"{n:04d}_") and item.name.endswith(".sql"):
+            return item.read_text("utf-8")
+    raise RuntimeError(f"missing migration {n}")
+
+
+def _apply(conn: sqlite3.Connection, script: str, version: int) -> None:
+    """Run ``script`` and set user_version in one transaction; roll back on failure."""
+    # executescript commits first and runs outside a transaction; wrap it so a
+    # failure leaves no partial schema and user_version is set atomically.
+    try:
+        conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version={version};\nCOMMIT;")
+    except sqlite3.Error:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+
+
 def migrate(conn: sqlite3.Connection) -> int:
-    """Apply the schema if not yet applied; safe to call on every startup."""
+    """Bring the schema up to SCHEMA_VERSION; safe to call on every startup."""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema version {current} is newer than supported {SCHEMA_VERSION}"
         )
-    if current == SCHEMA_VERSION:
-        return current
-    script = resources.files("lanscape_atlas.store").joinpath("schema.sql").read_text("utf-8")
-    # executescript commits first and runs outside a transaction; wrap it so a
-    # failure leaves no partial schema and user_version is set atomically.
-    try:
-        conn.executescript(f"BEGIN;\n{script}\nPRAGMA user_version={SCHEMA_VERSION};\nCOMMIT;")
-    except sqlite3.Error:
-        if conn.in_transaction:
-            conn.rollback()
-        raise
-    return SCHEMA_VERSION
+    if current == 0:
+        script = resources.files("lanscape_atlas.store").joinpath("schema.sql").read_text("utf-8")
+        _apply(conn, script, 1)
+        current = 1
+    for n in range(current + 1, SCHEMA_VERSION + 1):
+        _apply(conn, _load_migration(n), n)
+        current = n
+    return current

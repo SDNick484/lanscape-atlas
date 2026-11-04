@@ -5,14 +5,22 @@ Usage: python scripts/check_leaks.py [paths...]
 With no paths, scans every file from ``git ls-files``. Exits 0 when clean,
 1 after printing ``path:line: reason`` lines.
 
-The optional denylist (one term per line, ``#`` comments) is read from
-``$LANSCAPE_DENYLIST`` (must exist if set) or ``~/.config/lanscape-atlas/denylist.txt``.
+The optional denylist (one term per line, ``#`` comments, case-insensitive) is read from
+``$LANSCAPE_DENYLIST`` (must exist if set) or, when that is unset,
+``~/.config/lanscape-atlas/denylist.txt``. ``$LANSCAPE_LEAK_DENYLIST`` is an additional
+source (e.g. room names) with the same rules and is also fail-closed; terms from all
+sources are merged.
+
+Image files (.png .jpg .jpeg .svg .gif .webp) must never be committed, whether found by
+the default ``git ls-files`` scan or passed as explicit paths (pre-commit). Only paths
+under ``docs/screenshots/`` (synthetic renders) are exempt.
 """
 
 from __future__ import annotations
 
 import ipaddress
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -49,28 +57,47 @@ class DenylistError(Exception):
     """The denylist was explicitly requested but cannot be read."""
 
 
-def load_denylist() -> set[str]:
-    """Load lowercase denylist terms.
-
-    An explicit ``$LANSCAPE_DENYLIST`` must be readable (fail closed); a missing
-    file at the default location simply means no denylist.
-    """
-    override = os.environ.get("LANSCAPE_DENYLIST")
-    if override:
-        try:
-            text = Path(override).read_text(encoding="utf-8")
-        except OSError as exc:
-            raise DenylistError(f"cannot read LANSCAPE_DENYLIST={override}: {exc}") from exc
-    else:
-        default = Path.home() / ".config" / "lanscape-atlas" / "denylist.txt"
-        try:
-            text = default.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return set()
-        except OSError as exc:
-            raise DenylistError(f"cannot read {default}: {exc}") from exc
+def _read_terms(path: Path, label: str) -> set[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DenylistError(f"cannot read {label}={path}: {exc}") from exc
     terms = (line.strip().lower() for line in text.splitlines())
     return {t for t in terms if t and not t.startswith("#")}
+
+
+def load_denylist() -> set[str]:
+    """Load lowercase denylist terms from every configured source and merge them.
+
+    ``$LANSCAPE_DENYLIST`` and ``$LANSCAPE_LEAK_DENYLIST`` must be readable when set
+    (fail closed). With ``$LANSCAPE_DENYLIST`` unset, a missing file at the default
+    location simply means no denylist from that source.
+    """
+    terms: set[str] = set()
+    override = os.environ.get("LANSCAPE_DENYLIST")
+    if override:
+        terms |= _read_terms(Path(override), "LANSCAPE_DENYLIST")
+    else:
+        default = Path.home() / ".config" / "lanscape-atlas" / "denylist.txt"
+        if default.exists():
+            terms |= _read_terms(default, "default denylist")
+    extra = os.environ.get("LANSCAPE_LEAK_DENYLIST")
+    if extra is not None:
+        if not extra:
+            raise DenylistError("LANSCAPE_LEAK_DENYLIST is set but empty")
+        terms |= _read_terms(Path(extra), "LANSCAPE_LEAK_DENYLIST")
+    return terms
+
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp")
+IMAGE_EXEMPT_PREFIX = "docs/screenshots/"
+
+
+def is_forbidden_image(path: str) -> bool:
+    norm = posixpath.normpath(path.replace("\\", "/"))
+    if not norm.lower().endswith(IMAGE_SUFFIXES):
+        return False
+    return not norm.startswith(IMAGE_EXEMPT_PREFIX)
 
 
 def is_ip_exempt(path: str) -> bool:
@@ -135,6 +162,11 @@ def main(argv: list[str]) -> int:
     paths = argv or tracked_files()
     leaks: list[str] = []
     for path in paths:
+        if is_forbidden_image(path):
+            leaks.append(
+                f"{path}: image file must not be committed (plans and photos stay in the data dir)"
+            )
+            continue
         try:
             data = Path(path).read_bytes()
         except OSError:

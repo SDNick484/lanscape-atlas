@@ -1,6 +1,6 @@
 """MCP server (spec section 8.3): look up, rename and place devices from Claude.
 
-``build_mcp`` registers exactly the ten tools in ``TOOL_NAMES`` on an SDK
+``build_mcp`` registers exactly the twelve tools in ``TOOL_NAMES`` on an SDK
 ``MCPServer`` (the mcp 2.x name for FastMCP). ``create_app`` mounts it at ``/mcp``
 with the streamable HTTP transport; auth is the app's bearer-token middleware.
 
@@ -26,10 +26,12 @@ from dataclasses import asdict
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import ValidationError
 
 from lanscape_atlas.collectors.nmap import ScanRefused
-from lanscape_atlas.service import Service, UndoConflict, queries
+from lanscape_atlas.service import Service, StaleWrite, UndoConflict, queries
+from lanscape_atlas.web.floorplan_api import PlacementsBody, apply_placements
 
 ACTOR = "claude"
 MAX_LIMIT = 200
@@ -45,13 +47,16 @@ TOOL_NAMES = (
     "run_deep_scan",
     "recent_changes",
     "undo",
+    "get_floor_plan",
+    "place_devices",
 )
 
 INSTRUCTIONS = (
     "lanscape-atlas is an inventory of the devices on a home network. Use find_device or "
     "list_devices to locate a device, get_device for its full record, and update_device / "
     "set_place / claim_interface to name, place or merge devices. Every change you make is "
-    "recorded as actor 'claude' and can be reverted with undo(batch_id)."
+    "recorded as actor 'claude' and can be reverted with undo(batch_id). get_floor_plan lists "
+    "rooms and where devices sit; place_devices puts devices in rooms or at points on the plan."
 )
 
 Scanner = Callable[[int], Awaitable[None]]
@@ -63,6 +68,11 @@ def error_message(exc: BaseException) -> str | None:
     """The plain tool-error text for an expected failure, or ``None`` if unexpected."""
     if isinstance(exc, UndoConflict):
         return f"undo conflict with batches {list(exc.conflicting)}"
+    if isinstance(exc, StaleWrite):
+        return (
+            f"placement changed since it was read for devices {list(exc.conflicting)}; "
+            "call get_floor_plan and retry with the new last_batch values"
+        )
     if isinstance(exc, ScanRefused):
         return f"scan refused: {_arg(exc, 'refused')}"
     if isinstance(exc, KeyError):
@@ -146,13 +156,18 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
         root.handlers[:] = handlers
         root.setLevel(level)
 
-    def tool[F: Callable[..., Any]](fn: F) -> F:
-        mcp.add_tool(_plain_errors(fn))
-        return fn
+    def tool[F: Callable[..., Any]](
+        title: str | None = None, annotations: ToolAnnotations | None = None
+    ) -> Callable[[F], F]:
+        def register(fn: F) -> F:
+            mcp.add_tool(_plain_errors(fn), title=title, annotations=annotations)
+            return fn
+
+        return register
 
     # ------------------------------------------------------------------ reads
 
-    @tool
+    @tool()
     def find_device(query: str) -> list[dict[str, Any]]:
         """Find devices matching an IPv4 address (current lease), a MAC address (full or
         partial, e.g. "00:00:5e:00:53" or "5e0053"), or text in the device name, vendor
@@ -164,7 +179,7 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
             )
             return [asdict(d) for d in found]
 
-    @tool
+    @tool()
     def list_devices(
         online: bool | None = None,
         type: str | None = None,
@@ -195,7 +210,7 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
             )
         return [asdict(r) for r in rows]
 
-    @tool
+    @tool()
     def get_device(device_id: int) -> dict[str, Any]:
         """Full record of one device: summary fields plus owner, notes, scan_policy,
         interfaces (MACs, Wi-Fi node, band, hostname hints), IP lease history, open
@@ -205,7 +220,7 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
                 queries.get_device(service.conn, device_id, window_min=service.ip_match_window_min)
             )
 
-    @tool
+    @tool()
     def list_services(
         device_id: int | None = None, port: int | None = None
     ) -> list[dict[str, Any]]:
@@ -215,7 +230,7 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
         with service.lock:
             return [asdict(s) for s in queries.list_services(service.conn, device_id, port)]
 
-    @tool
+    @tool()
     def recent_changes(limit: int = 20, actor: str | None = None) -> list[dict[str, Any]]:
         """The audit trail, newest first: one row per changed field with batch_id, actor
         ("user", "claude", "system" or "collector:<name>"), time, entity, field, and old
@@ -227,27 +242,27 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
 
     # ----------------------------------------------------------------- writes
 
-    @tool
+    @tool()
     def update_device(device_id: int, fields: dict[str, Any]) -> dict[str, int]:
         """Set user-facing fields on a device. Allowed keys: name, type, icon, owner,
         notes, trust, scan_policy (and place_id; prefer set_place). Use null to clear a
         field. Recorded as actor "claude"; returns {"batch_id": n} for undo."""
         return {"batch_id": service.update_device(ACTOR, device_id, fields)}
 
-    @tool
+    @tool()
     def claim_interface(interface_id: int, device_id: int) -> dict[str, int]:
         """Attach an interface (typically a random/private Wi-Fi MAC that showed up as its
         own device) to device_id. The interface's old device is merged into device_id and
         removed if it has nothing left. Returns {"batch_id": n}; undo reverses it."""
         return {"batch_id": service.claim_interface(ACTOR, interface_id, device_id)}
 
-    @tool
+    @tool()
     def set_place(device_id: int, place_name: str) -> dict[str, int]:
         """Put a device in a place (room or area such as "Office" or "Living room"),
         creating the place if it does not exist yet. Returns {"batch_id": n}."""
         return {"batch_id": service.set_place(ACTOR, device_id, place_name)}
 
-    @tool
+    @tool()
     async def run_deep_scan(device_id: int) -> dict[str, str]:
         """Start an on-demand nmap deep scan of a device's current IPv4 in the background.
         Refused when the device's scan_policy is "never", it has no current IPv4, or a
@@ -256,11 +271,63 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
         await scanner(device_id)
         return {"status": "started"}
 
-    @tool
+    @tool()
     def undo(batch_id: int) -> dict[str, int]:
         """Revert every change in a batch (batch ids come from recent_changes or a write
         tool's result). Fails with "undo conflict with batches [...]" if later changes
         touched the same fields; undo those first. Returns the new undo batch's id."""
         return {"batch_id": service.undo(ACTOR, batch_id)}
+
+    # ------------------------------------------------------------ floor plan
+
+    @tool(
+        title="Get floor plan",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    def get_floor_plan() -> dict[str, Any]:
+        """The floor plan: plan (width and height in pixels and updated_at, or null when no
+        plan is uploaded; no image or file name), rooms (id, name, polygon: a list of
+        [x, y] points), placed (fixed devices with a point), roaming (devices assigned to
+        a room only, no point) and unplaced (no room, or a room but no point; each has
+        place_id, null if none). Coordinates are normalized 0..1 across the plan image
+        (x left to right, y top to bottom). Every device carries last_batch: pass it back
+        in place_devices' based_on."""
+        with service.lock:
+            view = queries.floor_plan_view(service.conn, now=service.clock())
+        plan = view["plan"]
+        if plan is not None:
+            view["plan"] = {k: plan[k] for k in ("width", "height", "updated_at")}
+        return view
+
+    @tool(
+        title="Place devices on the floor plan",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, open_world_hint=False
+        ),
+    )
+    def place_devices(
+        placements: list[dict[str, Any]], based_on: dict[str, Any] | None = None
+    ) -> dict[str, int]:
+        """Place devices on the floor plan in one batch. Each placement is {device_id,
+        place_id, x, y, roaming}: place_id is a room id from get_floor_plan (null to
+        unplace); x and y are normalized 0..1 coordinates and must fall inside that
+        room's polygon; roaming=true puts the device in the room only (x and y null);
+        roaming=false with a place_id and no x/y assigns the room without a point.
+        Ids must be integers and roaming a boolean. based_on maps "<device_id>" to that
+        device's last_batch from get_floor_plan (0 if it has never been placed). It may be omitted,
+        but a missing entry counts as 0, so any device that was ever placed is then stale. If a
+        device changed since, nothing is written and the error names the stale ids:
+        call get_floor_plan and retry. Recorded as actor "claude"; returns {"batch_id":
+        n} (0 if nothing changed); undo(batch_id) reverts it."""
+        try:
+            body = PlacementsBody.model_validate(
+                {"placements": placements, "based_on": based_on or {}}
+            )
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(part) for part in first["loc"])
+            raise ValueError(f"invalid placements: {where}: {first['msg']}") from None
+        # Service.place_devices takes service.lock itself.
+        return {"batch_id": apply_placements(service, ACTOR, body)}
 
     return mcp
