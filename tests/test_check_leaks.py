@@ -1,4 +1,12 @@
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
 from check_leaks import find_leaks, load_denylist, main
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_leaks.py"
 
 # Real-looking MACs are assembled at runtime so this file itself stays clean:
 # the file allow-list only exempts the private-IP check (spec section 9).
@@ -105,3 +113,163 @@ def test_denylist_file_parsed(tmp_path, monkeypatch):
 
 def test_aa_bb_placeholder_mac_allowed():
     assert find_leaks("aa:bb:cc:dd:ee:ff", "x.py", set()) == []
+
+
+# ---- Task 11: LANSCAPE_LEAK_DENYLIST and the tracked-image check ----------------------
+
+
+@pytest.fixture
+def isolated_env(tmp_path, monkeypatch):
+    """Keep the developer's real ~/.config denylist and env vars out of subprocess runs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("LANSCAPE_DENYLIST", raising=False)
+    monkeypatch.delenv("LANSCAPE_LEAK_DENYLIST", raising=False)
+
+
+def test_tracked_image_fails(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    (tmp_git_repo / "plan.png").write_bytes(b"\x89PNG")
+    git_add(tmp_git_repo, "plan.png")
+    result = run_check_leaks(tmp_git_repo)
+    assert result.returncode != 0
+    assert "plan.png: image file must not be committed" in result.stdout
+
+
+def test_uppercase_image_extension_fails(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    (tmp_git_repo / "PLAN.PNG").write_bytes(b"\x89PNG")
+    git_add(tmp_git_repo, "PLAN.PNG")
+    assert run_check_leaks(tmp_git_repo).returncode != 0
+
+
+def test_all_image_extensions_fail(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    for ext in ("jpg", "jpeg", "svg", "gif", "webp"):
+        (tmp_git_repo / f"p.{ext}").write_bytes(b"x")
+        git_add(tmp_git_repo, f"p.{ext}")
+    out = run_check_leaks(tmp_git_repo).stdout
+    for ext in ("jpg", "jpeg", "svg", "gif", "webp"):
+        assert f"p.{ext}: image file" in out
+
+
+def test_docs_screenshots_exempt(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    (tmp_git_repo / "docs" / "screenshots").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "screenshots" / "x.png").write_bytes(b"\x89PNG")
+    git_add(tmp_git_repo, "docs/screenshots/x.png")
+    assert run_check_leaks(tmp_git_repo).returncode == 0
+
+
+def test_screenshots_exemption_is_exact_prefix(
+    tmp_git_repo, git_add, run_check_leaks, isolated_env
+):
+    (tmp_git_repo / "docs" / "screenshots-extra").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "screenshots-extra" / "x.png").write_bytes(b"\x89PNG")
+    git_add(tmp_git_repo, "docs/screenshots-extra/x.png")
+    assert run_check_leaks(tmp_git_repo).returncode != 0
+
+
+def test_explicit_path_image_fails(tmp_git_repo, isolated_env):
+    (tmp_git_repo / "plan.png").write_bytes(b"\x89PNG")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "plan.png"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "image file must not be committed" in result.stdout
+
+
+def test_explicit_path_screenshot_exempt(tmp_git_repo, isolated_env):
+    (tmp_git_repo / "docs" / "screenshots").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "screenshots" / "x.png").write_bytes(b"\x89PNG")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "docs/screenshots/x.png"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+def test_denylisted_room_name_fails(
+    tmp_git_repo, git_add, run_check_leaks, isolated_env, monkeypatch, tmp_path
+):
+    deny = tmp_path / "deny.txt"
+    deny.write_text("Room Zed\n")
+    monkeypatch.setenv("LANSCAPE_LEAK_DENYLIST", str(deny))
+    (tmp_git_repo / "note.md").write_text("see room ZED\n")
+    git_add(tmp_git_repo, "note.md")
+    assert run_check_leaks(tmp_git_repo).returncode != 0
+
+
+def test_missing_leak_denylist_file_fails(
+    tmp_git_repo, run_check_leaks, isolated_env, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("LANSCAPE_LEAK_DENYLIST", str(tmp_path / "nope.txt"))
+    result = run_check_leaks(tmp_git_repo)
+    assert result.returncode != 0
+    assert "LANSCAPE_LEAK_DENYLIST" in result.stderr
+
+
+def test_legacy_denylist_env_still_works(
+    tmp_git_repo, git_add, run_check_leaks, isolated_env, monkeypatch, tmp_path
+):
+    deny = tmp_path / "legacy.txt"
+    deny.write_text("garage-cam\n")
+    monkeypatch.setenv("LANSCAPE_DENYLIST", str(deny))
+    (tmp_git_repo / "note.md").write_text("host Garage-Cam\n")
+    git_add(tmp_git_repo, "note.md")
+    assert run_check_leaks(tmp_git_repo).returncode != 0
+
+
+def test_denylist_sources_merge(tmp_path, monkeypatch):
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("alpha\n")
+    b.write_text("# c\nBeta\n")
+    monkeypatch.setenv("LANSCAPE_DENYLIST", str(a))
+    monkeypatch.setenv("LANSCAPE_LEAK_DENYLIST", str(b))
+    assert load_denylist() == {"alpha", "beta"}
+
+
+def test_clean_repo_passes(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    (tmp_git_repo / "ok.md").write_text("nothing here\n")
+    git_add(tmp_git_repo, "ok.md")
+    assert run_check_leaks(tmp_git_repo).returncode == 0
+
+
+def _check_paths(repo, *paths):
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *paths],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_screenshots_dotdot_escape_not_exempt(tmp_git_repo, isolated_env):
+    (tmp_git_repo / "docs" / "screenshots").mkdir(parents=True)
+    (tmp_git_repo / "plan.png").write_bytes(b"\x89PNG")
+    assert _check_paths(tmp_git_repo, "docs/screenshots/../plan.png").returncode != 0
+    assert _check_paths(tmp_git_repo, "docs\\screenshots\\..\\plan.png").returncode != 0
+
+
+def test_screenshots_nested_exempt(tmp_git_repo, isolated_env):
+    (tmp_git_repo / "docs" / "screenshots" / "sub").mkdir(parents=True)
+    (tmp_git_repo / "docs" / "screenshots" / "sub" / "a.png").write_bytes(b"\x89PNG")
+    assert _check_paths(tmp_git_repo, "docs/screenshots/sub/a.png").returncode == 0
+    assert _check_paths(tmp_git_repo, "./docs/screenshots/sub/a.png").returncode == 0
+
+
+def test_screenshots_prefix_case_sensitive(tmp_git_repo, isolated_env):
+    assert _check_paths(tmp_git_repo, "Docs/Screenshots/a.png").returncode != 0
+
+
+def test_empty_leak_denylist_env_fails(tmp_git_repo, run_check_leaks, isolated_env, monkeypatch):
+    monkeypatch.setenv("LANSCAPE_LEAK_DENYLIST", "")
+    result = run_check_leaks(tmp_git_repo)
+    assert result.returncode != 0
+    assert "LANSCAPE_LEAK_DENYLIST" in result.stderr

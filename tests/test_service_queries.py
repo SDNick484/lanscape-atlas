@@ -240,12 +240,12 @@ def test_list_services(db, house):
 
 
 def test_recent_changes(db, svc, make_device):
-    d = make_device(name="a", pos_x=1.0)
+    d = make_device(name="a", notes="n")
     b1 = svc.update_device("user", d, {"name": "b"})
-    b2 = svc.update_device("claude", d, {"pos_x": None})
+    b2 = svc.update_device("claude", d, {"notes": None})
     changes = q.recent_changes(db)
     assert [(c.batch_id, c.actor, c.field, c.old_value, c.new_value) for c in changes] == [
-        (b2, "claude", "pos_x", 1.0, None),
+        (b2, "claude", "notes", "n", None),
         (b1, "user", "name", "a", "b"),
     ]
     assert changes[0].at == T0

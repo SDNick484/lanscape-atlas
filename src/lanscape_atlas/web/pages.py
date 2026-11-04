@@ -36,9 +36,10 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 
 from lanscape_atlas.collectors.nmap import ScanRefused
-from lanscape_atlas.service import Service, UndoConflict
+from lanscape_atlas.service import Placement, Service, StaleWrite, UndoConflict
 from lanscape_atlas.service import queries as q
 from lanscape_atlas.web.deep_scan import start_deep_scan
+from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
 from lanscape_atlas.web.topology import (
     Graph,
     LayoutBody,
@@ -323,6 +324,7 @@ def _form_values(view: q.DeviceView) -> dict[str, str]:
 class DevicePage:
     view: q.DeviceView
     aps: dict[str, tuple[int, str | None]]
+    roaming: bool = False
 
 
 def _device_page(
@@ -342,6 +344,7 @@ def _device_page(
             "nav": "devices",
             "d": page.view,
             "aps": page.aps,
+            "roaming": page.roaming,
             "values": values or current,
             "origs": origs or current,
             "trust_choices": TRUST_CHOICES,
@@ -356,7 +359,8 @@ def _load_view(svc: Service, device_id: int) -> DevicePage:
     with svc.lock:
         view = q.get_device(svc.conn, device_id, window_min=svc.ip_match_window_min)
         aps = q.ap_device_names(svc.conn, (i.ap_node for i in view.interfaces))
-    return DevicePage(view, aps)
+        row = svc.conn.execute("SELECT roaming FROM device WHERE id = ?", (device_id,)).fetchone()
+    return DevicePage(view, aps, bool(row[0]))
 
 
 @router.get("/devices/{device_id}", response_class=HTMLResponse)
@@ -416,6 +420,34 @@ async def device_deep_scan(request: Request, device_id: PathId, form: Form) -> R
         page = await run_in_threadpool(_load_view, _service(request), device_id)
         return _device_page(request, page, flash=("error", _message(e)), status_code=409)
     return _redirect(request, f"/devices/{device_id}?scan=started")
+
+
+@router.post("/devices/{device_id}/roaming", response_model=None)
+def device_roaming(request: Request, device_id: PathId, form: Form) -> Response:
+    """Roaming on (needs a room; clears the point) or off (keeps the room, no point)."""
+    svc = _service(request)
+    choice = _text(form, "roaming")
+    try:
+        if choice not in ("on", "off"):
+            raise ValueError("roaming must be on or off")
+        with svc.lock:
+            row = svc.conn.execute(
+                "SELECT place_id FROM device WHERE id = ?", (device_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no device with id {device_id}")
+            seen = q.last_placement_batch(svc.conn, device_id)
+        if row[0] is None:
+            raise ValueError("assign a room before marking the device roaming")
+        placement = Placement(device_id, int(row[0]), None, None, roaming=choice == "on")
+        svc.place_devices(ACTOR, [placement], {device_id: seen})
+    except StaleWrite:
+        page = _load_view(svc, device_id)
+        return _device_page(request, page, flash=("error", STALE_MESSAGE), status_code=409)
+    except ValueError as e:
+        page = _load_view(svc, device_id)
+        return _device_page(request, page, flash=("error", _message(e)), status_code=422)
+    return _redirect(request, f"/devices/{device_id}")
 
 
 # -------------------------------------------------------------------- inbox

@@ -503,6 +503,7 @@ ensure_user() {
 			adduser -S -D -H -G "$SVC_USER" -h "$DATA_DIR" "$SVC_USER"
 	fi
 	act "data dir $DATA_DIR (0700, $SVC_USER)" install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
+	act "floor plan dir $DATA_DIR/floorplan (0750, $SVC_USER)" install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR/floorplan"
 	act "config dir $ETC_DIR (0700, root)" install -d -m 0700 "$ETC_DIR"
 }
 

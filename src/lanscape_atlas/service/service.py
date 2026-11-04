@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -37,6 +37,8 @@ from typing import Any
 
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event, EventBus
+from lanscape_atlas.floorplan.geometry import check_aspect, parse_polygon, point_in_polygon
+from lanscape_atlas.service import queries
 
 USER_FIELDS = frozenset(
     {"name", "type", "icon", "place_id", "pos_x", "pos_y", "owner", "notes", "trust", "scan_policy"}
@@ -44,6 +46,9 @@ USER_FIELDS = frozenset(
 PROVENANCE_FIELDS = frozenset({"name", "type", "icon"})
 # Curated fields a claim carries from a merged-away source onto its target (Ruling 42).
 _MERGE_FIELDS = ("name", "type", "icon", "place_id", "owner", "notes", "pos_x", "pos_y")
+_POINT_FIELDS = ("pos_x", "pos_y")
+# Device fields that make up a placement (as counted by queries.last_placement_batch).
+_PLACEMENT_FIELDS = ("place_id", "pos_x", "pos_y", "roaming")
 
 TRUST_VALUES = frozenset({"known", "new", "unwanted"})
 SCAN_POLICY_VALUES = frozenset({"normal", "never"})
@@ -65,6 +70,7 @@ _SERVICE_COLUMNS = (
     "first_seen",
     "last_seen",
 )
+_FLOOR_PLAN_COLUMNS = ("id", "width", "height", "sha256", "file_name", "updated_at")
 _FIELD_SOURCE_KEY = "_field_source"
 # A deleted device's saved topology position ({"x", "y"}), present only if it had one.
 _LAYOUT_KEY = "_layout"
@@ -80,6 +86,7 @@ _DEVICE_COLUMNS = (
     "notes",
     "trust",
     "scan_policy",
+    "roaming",
     "online",
     "first_seen",
     "last_seen",
@@ -94,6 +101,30 @@ class UndoConflict(Exception):
         self.conflicting = conflicting
 
 
+class StaleWrite(Exception):
+    """Raised when a device's placement changed after the batch the client last saw."""
+
+    def __init__(self, conflicting: list[int]) -> None:
+        super().__init__(f"placement changed since it was loaded for devices {conflicting}")
+        self.conflicting = conflicting
+
+
+@dataclass(frozen=True)
+class Placement:
+    """One device's requested placement for ``Service.place_devices``.
+
+    ``roaming=True``: ``place_id`` set, ``x``/``y`` None. ``roaming=False``: a point
+    (``x`` and ``y``) inside the room's polygon, a room with no point, or no
+    ``place_id`` and no point (unplaced).
+    """
+
+    device_id: int
+    place_id: int | None
+    x: float | None
+    y: float | None
+    roaming: bool = False
+
+
 _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
     "device": frozenset(_DEVICE_COLUMNS) - {"id"},
     "link": frozenset(_LINK_COLUMNS) - {"id"},
@@ -101,11 +132,13 @@ _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
     # Only claim_interface writes these; device_id is their one undoable field.
     "interface": frozenset({"device_id"}),
     "service": frozenset({"device_id"}),
+    "floor_plan": frozenset(_FLOOR_PLAN_COLUMNS) - {"id"},
 }
 _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "device": _DEVICE_COLUMNS,
     "link": _LINK_COLUMNS,
     "service": _SERVICE_COLUMNS,
+    "floor_plan": _FLOOR_PLAN_COLUMNS,
 }
 
 
@@ -251,6 +284,18 @@ class Service:
             if field in _TEXT_FIELDS and value is not None and not isinstance(value, str):
                 raise ValueError(f"{field} must be a string or None, got {value!r}")
 
+    @staticmethod
+    def _leaving_room(row: sqlite3.Row, new_place_id: int | None) -> dict[str, Any]:
+        """Placement fields to clear when a device's ``place_id`` changes.
+
+        The point belongs to the old room, so it is cleared. ``roaming`` is kept
+        for another room and cleared when the device leaves every room.
+        """
+        clear: dict[str, Any] = {f: None for f in ("pos_x", "pos_y") if row[f] is not None}
+        if new_place_id is None and row["roaming"]:
+            clear["roaming"] = 0
+        return clear
+
     # ------------------------------------------------------------ batch / collector
 
     def begin_batch(self, actor: str) -> int:
@@ -292,8 +337,16 @@ class Service:
     # --------------------------------------------------------------- public writes
 
     def update_device(self, actor: str, device_id: int, fields: dict[str, Any]) -> int:
-        """Set user-editable fields; returns the batch id, or 0 if nothing changed."""
+        """Set user-editable fields; returns the batch id, or 0 if nothing changed.
+
+        ``pos_x``/``pos_y`` are refused (``ValueError``): points go through
+        ``place_devices``, which checks containment. A ``place_id`` change
+        clears the device's point in the same batch, and a change to ``None``
+        also clears ``roaming`` (roaming needs a room).
+        """
         self._check_actor(actor)
+        if "pos_x" in fields or "pos_y" in fields:
+            raise ValueError("pos_x and pos_y cannot be set here; set positions with place_devices")
         self._validate_device_fields(fields)
         batch_id = 0
         with self._write_txn():
@@ -306,6 +359,8 @@ class Service:
             ):
                 raise ValueError(f"no place with id {place_id}")
             changed = {f: v for f, v in fields.items() if row[f] != v}
+            if "place_id" in changed:
+                changed.update(self._leaving_room(row, changed["place_id"]))
             if changed:
                 batch_id = self.begin_batch(actor)
                 for field, value in changed.items():
@@ -316,7 +371,11 @@ class Service:
         return batch_id
 
     def set_place(self, actor: str, device_id: int, place_name: str) -> int:
-        """Assign a device to the named place, creating the place if needed."""
+        """Assign a device to the named place, creating the place if needed.
+
+        Moving to another place clears the device's point in the same batch;
+        ``roaming`` is kept.
+        """
         self._check_actor(actor)
         if not isinstance(place_name, str) or not place_name.strip():
             raise ValueError("place_name must be a non-empty string")
@@ -340,8 +399,253 @@ class Service:
                 self._write_field(
                     batch_id, "device", device_id, "place_id", row["place_id"], place_id, actor
                 )
+                # The point belonged to the old room; roaming stays (it has a room).
+                for field, value in self._leaving_room(row, place_id).items():
+                    self._write_field(
+                        batch_id, "device", device_id, field, row[field], value, actor
+                    )
         self._publish(batch_id, actor)
         return batch_id
+
+    def save_room(self, actor: str, name: str, polygon: object) -> int:
+        """Create the named room (place) if new, and store its polygon; returns the batch id.
+
+        The name is stripped of leading and trailing whitespace first.
+
+        ``polygon`` is validated by ``parse_polygon`` (``ValueError``, nothing
+        written) and stored as ``json.dumps`` of the point lists so the text is
+        stable. Creation follows the ``set_place`` pattern, so undo deletes the
+        place. Redrawing a room clears, in the same batch, the point of every
+        device in it whose point falls outside the new polygon, so undo restores
+        the old polygon and those points. Returns 0 if nothing changed.
+        """
+        self._check_actor(actor)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string")
+        name = name.strip()
+        text = json.dumps([list(p) for p in parse_polygon(polygon)])
+        batch_id = 0
+        with self._write_txn():
+            prow = self.conn.execute(
+                "SELECT id, polygon FROM place WHERE name = ?", (name,)
+            ).fetchone()
+            if prow is None:
+                batch_id = self.begin_batch(actor)
+                cur = self.conn.execute("INSERT INTO place(name) VALUES (?)", (name,))
+                assert cur.lastrowid is not None
+                place_id = cur.lastrowid
+                self._write_field(batch_id, "place", place_id, "name", None, name, actor)
+                old = None
+            else:
+                place_id = int(prow[0])
+                old = prow[1]
+            if old != text:
+                if not batch_id:
+                    batch_id = self.begin_batch(actor)
+                self._write_field(batch_id, "place", place_id, "polygon", old, text, actor)
+                self._clear_stranded(batch_id, place_id, json.loads(text), actor)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def _clear_stranded(
+        self, batch_id: int, place_id: int, polygon_points: object, actor: str
+    ) -> None:
+        """Clear (logged) the point of each device in ``place_id`` now outside its polygon."""
+        polygon = parse_polygon(polygon_points)
+        for row in self.conn.execute(
+            "SELECT id, pos_x, pos_y FROM device WHERE place_id = ?"
+            " AND (pos_x IS NOT NULL OR pos_y IS NOT NULL) ORDER BY id",
+            (place_id,),
+        ).fetchall():
+            x, y = row["pos_x"], row["pos_y"]
+            if x is not None and y is not None and point_in_polygon(x, y, polygon):
+                continue
+            for field in ("pos_x", "pos_y"):
+                if row[field] is not None:
+                    self._write_field(
+                        batch_id, "device", int(row["id"]), field, row[field], None, actor
+                    )
+
+    def rename_room(self, actor: str, place_id: int, new_name: str) -> int:
+        """Rename a place, keeping its id (and so its devices); returns the batch id.
+
+        ``KeyError`` for an unknown place; ``ValueError`` for a blank or taken name.
+        Returns 0 if the name is unchanged.
+        """
+        self._check_actor(actor)
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise ValueError("new_name must be a non-empty string")
+        new_name = new_name.strip()
+        batch_id = 0
+        with self._write_txn():
+            row = self.conn.execute("SELECT name FROM place WHERE id = ?", (place_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"no place with id {place_id}")
+            if row[0] != new_name:
+                if self.conn.execute("SELECT 1 FROM place WHERE name = ?", (new_name,)).fetchone():
+                    raise ValueError(f"a place named {new_name!r} already exists")
+                batch_id = self.begin_batch(actor)
+                self._write_field(batch_id, "place", place_id, "name", row[0], new_name, actor)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def set_floor_plan(
+        self, actor: str, *, width: int, height: int, sha256: str, file_name: str
+    ) -> int:
+        """Create or replace the single floor plan image row (id 1); returns the batch id.
+
+        A replacement must keep the existing aspect ratio (``ValueError``
+        otherwise, nothing written). The first upload logs ``sha256`` with a
+        NULL old value, which undo reads as a creation and answers by deleting
+        the row.
+        """
+        self._check_actor(actor)
+        if (
+            isinstance(width, bool)
+            or isinstance(height, bool)
+            or not isinstance(width, int)
+            or not isinstance(height, int)
+            or width <= 0
+            or height <= 0
+        ):
+            raise ValueError("width and height must be positive integers")
+        if not isinstance(sha256, str) or not sha256:
+            raise ValueError("sha256 must be a non-empty string")
+        if not isinstance(file_name, str) or not file_name:
+            raise ValueError("file_name must be a non-empty string")
+        with self._write_txn():
+            cur = self.conn.execute("SELECT * FROM floor_plan WHERE id = 1").fetchone()
+            if cur is not None:
+                check_aspect(int(cur["width"]), int(cur["height"]), width, height)
+            batch_id = self.begin_batch(actor)
+            now = self._now()
+            if cur is None:
+                self.conn.execute(
+                    "INSERT INTO floor_plan(id, width, height, sha256, file_name, updated_at)"
+                    " VALUES (1, ?, ?, ?, ?, ?)",
+                    (width, height, sha256, file_name, now),
+                )
+                # sha256 first with old=None is the creation marker undo looks for.
+                for field, value in (
+                    ("sha256", sha256),
+                    ("width", width),
+                    ("height", height),
+                    ("file_name", file_name),
+                    ("updated_at", now),
+                ):
+                    self._log_change(batch_id, "floor_plan", 1, field, None, value)
+                    self._restore_source("floor_plan", 1, field, actor, now)
+            else:
+                for field, value in (
+                    ("width", width),
+                    ("height", height),
+                    ("sha256", sha256),
+                    ("file_name", file_name),
+                    ("updated_at", now),
+                ):
+                    self._write_field(batch_id, "floor_plan", 1, field, cur[field], value, actor)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def place_devices(
+        self, actor: str, placements: Sequence[Placement], based_on: Mapping[int, int]
+    ) -> int:
+        """Set ``place_id``/``pos_x``/``pos_y``/``roaming`` for several devices in one batch.
+
+        ``based_on`` maps each device id to the last placement batch the client
+        saw for it (0 if none; a missing entry counts as 0). In one transaction,
+        and before anything is written: every placement is validated (shape,
+        known device, known place, point inside the room's polygon:
+        ``ValueError``, ``KeyError`` for an unknown device), then any device
+        whose ``queries.last_placement_batch`` is newer than ``based_on`` raises
+        ``StaleWrite`` listing all such ids. Only changed fields are logged.
+        Returns the batch id, or 0 if nothing changed.
+        """
+        self._check_actor(actor)
+        for p in placements:
+            self._validate_placement(p)
+        ids = [p.device_id for p in placements]
+        dupes = sorted({d for d in ids if ids.count(d) > 1})
+        if dupes:
+            raise ValueError(f"devices listed more than once: {dupes}")
+        for device_id, seen in based_on.items():
+            if isinstance(seen, bool) or not isinstance(seen, int):
+                raise ValueError(f"based_on[{device_id}] must be an int, got {seen!r}")
+        batch_id = 0
+        with self._write_txn():
+            rows = {p.device_id: self._device_row(p.device_id) for p in placements}
+            polygons: dict[int, list[tuple[float, float]] | None] = {}
+            for p in placements:
+                if p.place_id is None:
+                    continue
+                if p.place_id not in polygons:
+                    prow = self.conn.execute(
+                        "SELECT polygon FROM place WHERE id = ?", (p.place_id,)
+                    ).fetchone()
+                    if prow is None:
+                        raise ValueError(f"no place with id {p.place_id}")
+                    polygons[p.place_id] = (
+                        None if prow[0] is None else parse_polygon(json.loads(prow[0]))
+                    )
+                if p.x is None or p.y is None:
+                    continue
+                polygon = polygons[p.place_id]
+                if polygon is None:
+                    raise ValueError(f"place {p.place_id} has no polygon; draw the room first")
+                if not point_in_polygon(p.x, p.y, polygon):
+                    raise ValueError(
+                        f"point ({p.x}, {p.y}) for device {p.device_id} is outside"
+                        f" place {p.place_id}"
+                    )
+            stale = sorted(
+                d for d in rows if queries.last_placement_batch(self.conn, d) > based_on.get(d, 0)
+            )
+            if stale:
+                raise StaleWrite(stale)
+            for p in placements:
+                row = rows[p.device_id]
+                target = {
+                    "place_id": p.place_id,
+                    "pos_x": p.x,
+                    "pos_y": p.y,
+                    "roaming": 1 if p.roaming else 0,
+                }
+                for field, value in target.items():
+                    if row[field] == value:
+                        continue
+                    if not batch_id:
+                        batch_id = self.begin_batch(actor)
+                    self._write_field(
+                        batch_id, "device", p.device_id, field, row[field], value, actor
+                    )
+        self._publish(batch_id, actor)
+        return batch_id
+
+    @staticmethod
+    def _validate_placement(p: Placement) -> None:
+        """Shape checks for one Placement (no database access); ``ValueError`` on failure."""
+        if not isinstance(p, Placement):
+            raise ValueError(f"expected a Placement, got {p!r}")
+        if isinstance(p.device_id, bool) or not isinstance(p.device_id, int):
+            raise ValueError(f"device_id must be an int, got {p.device_id!r}")
+        if p.place_id is not None and (
+            isinstance(p.place_id, bool) or not isinstance(p.place_id, int)
+        ):
+            raise ValueError(f"place_id must be an int or None, got {p.place_id!r}")
+        for label, value in (("x", p.x), ("y", p.y)):
+            if value is not None and not _is_number(value):
+                raise ValueError(f"{label} must be a number or None, got {value!r}")
+        if not isinstance(p.roaming, bool):
+            raise ValueError(f"roaming must be a bool, got {p.roaming!r}")
+        has_x, has_y = p.x is not None, p.y is not None
+        if p.roaming:
+            if p.place_id is None or has_x or has_y:
+                raise ValueError(f"device {p.device_id}: roaming needs a place_id and no point")
+            return
+        if has_x != has_y:
+            raise ValueError(f"device {p.device_id}: x and y must both be set or both be None")
+        if has_x and p.place_id is None:
+            raise ValueError(f"device {p.device_id}: a point needs a place_id")
 
     def add_link(
         self,
@@ -439,7 +743,9 @@ class Service:
         differs from the target's non-null value (Ruling 42). Curated source
         fields the target lacks are copied onto it, with their provenance, in
         the same batch so undo restores both devices exactly. ``trust`` and
-        ``scan_policy`` never block. Nothing is written on refusal.
+        ``scan_policy`` never block. The source's point (``pos_x``/``pos_y``) is
+        copied only as a pair together with its room, and never onto a roaming
+        target (Ruling 23a). Nothing is written on refusal.
         """
         self._check_actor(actor)
         with self._write_txn():
@@ -501,6 +807,8 @@ class Service:
         for field in _MERGE_FIELDS:
             if src[field] is None or (field not in owned and field != "place_id"):
                 continue
+            if field in _POINT_FIELDS and tgt["roaming"]:
+                continue  # a roaming device has no point; the source's point is dropped
             if tgt[field] is None:
                 copy.append(field)
             elif tgt[field] != src[field]:
@@ -510,6 +818,12 @@ class Service:
                 f"claim would discard curated fields on device {source}: {', '.join(conflicts)}"
                 " \u2014 rename or clear them first"
             )
+        # A point travels only as a pair and only with its room: the copied
+        # place_id, or a target already in the source's room.
+        same_room = tgt["place_id"] is not None and tgt["place_id"] == src["place_id"]
+        point = [f for f in copy if f in _POINT_FIELDS]
+        if point and (len(point) != 2 or not ("place_id" in copy or same_room)):
+            copy = [f for f in copy if f not in _POINT_FIELDS]
         return copy
 
     def _copy_fields(self, batch_id: int, source: int, target: int, fields: list[str]) -> None:
@@ -608,8 +922,76 @@ class Service:
             new_batch = cur.lastrowid
             for ch in reversed(rows):
                 self._apply_inverse(new_batch, ch)
+            # Raising here rolls the whole undo back.
+            self._check_undo_placements(batch_id, new_batch, rows)
         self._publish(new_batch, actor)
         return new_batch
+
+    def _check_undo_placements(self, batch_id: int, new_batch: int, rows: list[_Change]) -> None:
+        """After an undo's inverses are applied, refuse a placement that breaks spec section 3.
+
+        Checked: devices whose placement the undone batch touched, and devices in
+        a place whose polygon it touched. A point must have a place whose
+        *current* polygon contains it, and a roaming device must have a room and
+        no point. A violation raises ``UndoConflict`` naming the later live
+        batches that redrew that room or changed that device's placement
+        (Ruling 23c). With no such batch the undo restores exactly the state
+        from before ``batch_id`` (e.g. pre-Phase 2 data), so it is allowed.
+        """
+        devices = {
+            ch.entity_id
+            for ch in rows
+            if ch.entity == "device" and (ch.field == "*" or ch.field in _PLACEMENT_FIELDS)
+        }
+        places = {ch.entity_id for ch in rows if ch.entity == "place" and ch.field == "polygon"}
+        for pid in places:
+            devices.update(
+                int(r[0])
+                for r in self.conn.execute("SELECT id FROM device WHERE place_id = ?", (pid,))
+            )
+        live = self._live_filter(batch_id)
+        conflicting: set[int] = set()
+        for device_id in sorted(devices):
+            row = self.conn.execute(
+                "SELECT place_id, pos_x, pos_y, roaming FROM device WHERE id = ?", (device_id,)
+            ).fetchone()
+            if row is None or self._placement_ok(row):
+                continue
+            found = {
+                int(r[0])
+                for r in self.conn.execute(
+                    "SELECT DISTINCT batch_id FROM change WHERE batch_id > ?"
+                    " AND entity = 'device' AND entity_id = ?"
+                    f" AND field IN ('*', {', '.join('?' for _ in _PLACEMENT_FIELDS)})",
+                    (batch_id, device_id, *_PLACEMENT_FIELDS),
+                )
+            }
+            if row["place_id"] is not None:
+                found.update(
+                    int(r[0])
+                    for r in self.conn.execute(
+                        "SELECT DISTINCT batch_id FROM change WHERE batch_id > ?"
+                        " AND entity = 'place' AND entity_id = ? AND field = 'polygon'",
+                        (batch_id, row["place_id"]),
+                    )
+                )
+            conflicting |= {b for b in found if b != new_batch and live(b)}
+        if conflicting:
+            raise UndoConflict(sorted(conflicting))
+
+    def _placement_ok(self, row: sqlite3.Row) -> bool:
+        """Spec section 3 invariants for one device's (place_id, pos_x, pos_y, roaming)."""
+        x, y, place_id = row["pos_x"], row["pos_y"], row["place_id"]
+        if row["roaming"]:
+            return place_id is not None and x is None and y is None
+        if x is None and y is None:
+            return True
+        if x is None or y is None or place_id is None:
+            return False
+        prow = self.conn.execute("SELECT polygon FROM place WHERE id = ?", (place_id,)).fetchone()
+        if prow is None or prow[0] is None:
+            return False
+        return point_in_polygon(x, y, parse_polygon(json.loads(prow[0])))
 
     # -- conflict detection
 
@@ -658,7 +1040,7 @@ class Service:
                     found.add(int(bid))
 
         for ch in rows:
-            whole = ch.field == "*" or ch.is_place_existence
+            whole = ch.field == "*" or ch.is_place_existence or ch.is_floor_plan_creation
             # Same entity: same field, or any field when either side is row-level.
             collect(
                 "SELECT DISTINCT batch_id FROM change WHERE batch_id > ? AND entity = ?"
@@ -718,6 +1100,9 @@ class Service:
                     # service ids are not AUTOINCREMENT; a later discovery may
                     # have taken it. Re-insert under a fresh id and log that id.
                     row["id"] = None
+                if ch.entity == "device":
+                    # Snapshots logged before schema v2 have no roaming key.
+                    row.setdefault("roaming", 0)
                 entity_id = self._insert_row(ch.entity, row)
                 row["id"] = entity_id
                 for field, (src_actor, src_set_at) in sorted(
@@ -734,6 +1119,14 @@ class Service:
             return
         if ch.field not in _ENTITY_COLUMNS[ch.entity]:
             raise RuntimeError(f"cannot undo change on unknown field {ch.entity}.{ch.field}")
+        if ch.entity == "floor_plan" and ch.old is None:
+            # First upload: the sha256 marker deletes the whole row; the sibling
+            # per-field creation changes are covered by that deletion.
+            if ch.field == "sha256":
+                current = self._snapshot("floor_plan", ch.entity_id)
+                self._log_change(batch_id, "floor_plan", ch.entity_id, "*", current, None)
+                self._delete_entity("floor_plan", ch.entity_id)
+            return
         if ch.is_place_existence:
             cur_actor, cur_set_at = self._source("place", ch.entity_id, "name")
             if ch.old is None:  # place creation -> delete
@@ -784,7 +1177,7 @@ class Service:
     def _snapshot(self, entity: str, entity_id: int) -> dict[str, Any]:
         """Full row as a dict, plus its ``field_source`` rows (if any) for a device."""
         snap = self._row_dict(entity, entity_id)
-        if entity == "device":
+        if entity in ("device", "floor_plan"):
             sources = {
                 str(r[0]): [str(r[1]), str(r[2])]
                 for r in self.conn.execute(
@@ -795,9 +1188,13 @@ class Service:
             }
             if sources:
                 snap[_FIELD_SOURCE_KEY] = sources
-            layout = self.conn.execute(
-                "SELECT x, y FROM topology_layout WHERE device_id = ?", (entity_id,)
-            ).fetchone()
+            layout = (
+                self.conn.execute(
+                    "SELECT x, y FROM topology_layout WHERE device_id = ?", (entity_id,)
+                ).fetchone()
+                if entity == "device"
+                else None
+            )
             if layout is not None:
                 snap[_LAYOUT_KEY] = {"x": layout["x"], "y": layout["y"]}
         return snap
@@ -893,5 +1290,12 @@ class _Change:
         )
 
     @property
+    def is_floor_plan_creation(self) -> bool:
+        """``floor_plan.sha256`` logged with a NULL old value marks the first upload."""
+        return self.entity == "floor_plan" and self.field == "sha256" and self.old is None
+
+    @property
     def creates(self) -> bool:
-        return (self.field == "*" or self.is_place_existence) and self.old is None
+        return (
+            self.field == "*" or self.is_place_existence or self.is_floor_plan_creation
+        ) and self.old is None

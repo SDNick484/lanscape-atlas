@@ -8,9 +8,10 @@ from datetime import timedelta
 import pytest
 
 from conftest import T0, dump_state
+from helpers.plan import save_square_room, svc_last
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED
 from lanscape_atlas.observation import Observation
-from lanscape_atlas.service import UndoConflict
+from lanscape_atlas.service import Placement, UndoConflict
 
 PHONE = "00:00:5e:00:53:31"  # the phone's real (wifi) MAC
 RMAC = "02:00:5e:00:53:32"  # its randomized MAC
@@ -262,11 +263,19 @@ def test_claim_copies_curated_fields_onto_null_target(svc, db, clock, phone):
             "delete from field_source where entity='device' and entity_id=? and field='name'",
             (target,),
         )
-    svc.update_device("claude", source, {"name": "Nick's Pixel", "pos_x": 10, "pos_y": 20.5})
+    svc.update_device("claude", source, {"name": "Nick's Pixel"})
+    place = save_square_room(svc, "Kitchen")
     clock.advance(minutes=5)
+    # Points go through place_devices (Ruling 19); the place_id comes from a different actor.
     svc.set_place("user", source, "Kitchen")
+    clock.advance(minutes=5)
+    svc.place_devices(
+        "claude",
+        [Placement(source, place, 0.3, 0.25)],
+        based_on={source: svc_last(db, source)},
+    )
     src_sources = _sources(db, source)
-    place = db.execute("select place_id from device where id = ?", (source,)).fetchone()[0]
+    assert src_sources["place_id"][0] == "user"
     before = dump_state(db)
     clock.advance(minutes=5)
 
@@ -276,8 +285,8 @@ def test_claim_copies_curated_fields_onto_null_target(svc, db, clock, phone):
     row = db.execute("select * from device where id = ?", (target,)).fetchone()
     assert (row["name"], row["pos_x"], row["pos_y"], row["place_id"]) == (
         "Nick's Pixel",
-        10,
-        20.5,
+        0.3,
+        0.25,
         place,
     )
     tgt_sources = _sources(db, target)
@@ -363,6 +372,27 @@ def test_claim_undo_restores_layout_dump_state(svc, db, phone):
     assert after["topology_layout"] == [(source, 3.0, 4.0)]
 
 
+def test_claim_undo_restores_roaming_exactly(svc, db, phone):
+    """Ruling 2: a deleted device's snapshot carries roaming, and undo restores it."""
+    target, source, rid = phone
+    with db:
+        db.execute("update device set roaming = 1 where id = ?", (source,))
+    before = dump_state(db)
+    b = svc.claim_interface("user", rid, target)
+    snap = json.loads(
+        db.execute(
+            "select old_value from change where batch_id = ? and entity = 'device' and field = '*'",
+            (b,),
+        ).fetchone()[0]
+    )
+    assert snap["roaming"] == 1
+    svc.undo("user", b)
+    after = dump_state(db)
+    del before["batch"], before["change"], after["batch"], after["change"]
+    assert after == before
+    assert db.execute("select roaming from device where id = ?", (source,)).fetchone()[0] == 1
+
+
 def test_later_ingest_does_not_block_undo(ing, svc, db, clock, phone):
     target, source, rid = phone
     b = svc.claim_interface("user", rid, target)
@@ -425,3 +455,63 @@ def test_claim_then_presence_uses_new_owner(ing, svc, db, clock, phone):
     clock.now = T0 + timedelta(minutes=20)
     ing.ingest([obs(mac=RMAC, seen_at=clock())])
     assert db.execute("select online from device where id = ?", (target,)).fetchone()[0] == 1
+
+
+# ---------------------------------------------- Phase 2 fix round 1: F6 (Ruling 23a)
+
+
+def _placement(db, device_id):
+    return tuple(
+        db.execute(
+            "select place_id, pos_x, pos_y, roaming from device where id = ?", (device_id,)
+        ).fetchone()
+    )
+
+
+def test_claim_onto_roaming_target_keeps_it_roaming_without_point(svc, db, phone):
+    """A fixed source's point is not copied onto a roaming target (no point while roaming)."""
+    target, source, rid = phone
+    room = save_square_room(svc)
+    svc.place_devices(
+        "claude",
+        [Placement(target, room, None, None, True), Placement(source, room, 0.3, 0.3)],
+        based_on={},
+    )
+    before = curated(db)
+    b = svc.claim_interface("user", rid, target)
+    assert device_ids(db) == [target]
+    assert _placement(db, target) == (room, None, None, 1)
+    assert not {"pos_x", "pos_y"} & set(_sources(db, target))
+    svc.undo("user", b)
+    assert curated(db) == before
+
+
+def test_claim_onto_fixed_target_in_same_room_copies_point(svc, db, phone):
+    target, source, rid = phone
+    room = save_square_room(svc)
+    svc.place_devices(
+        "claude",
+        [Placement(target, room, None, None), Placement(source, room, 0.3, 0.25)],
+        based_on={},
+    )
+    before = curated(db)
+    b = svc.claim_interface("user", rid, target)
+    assert _placement(db, target) == (room, 0.3, 0.25, 0)
+    svc.undo("user", b)
+    assert curated(db) == before
+
+
+def test_claim_onto_unplaced_target_copies_place_and_point_together(svc, db, phone):
+    target, source, rid = phone
+    room = save_square_room(svc)
+    svc.place_devices("claude", [Placement(source, room, 0.3, 0.25)], based_on={})
+    b = svc.claim_interface("user", rid, target)
+    assert _placement(db, target) == (room, 0.3, 0.25, 0)
+    logged = {
+        r[0]
+        for r in db.execute(
+            "select field from change where batch_id = ? and entity = 'device' and entity_id = ?",
+            (b, target),
+        )
+    }
+    assert {"place_id", "pos_x", "pos_y"} <= logged

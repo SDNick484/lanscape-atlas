@@ -235,3 +235,16 @@ def test_shellcheck_clean() -> None:
         ["shellcheck", "--shell=sh", str(SCRIPT)], capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 0, proc.stdout
+
+
+def test_deploy_script_creates_floorplan_dir() -> None:
+    text = SCRIPT.read_text()
+    pattern = r'install -d -m 0750 -o "\$SVC_USER" -g "\$SVC_USER" "\$DATA_DIR/floorplan"'
+    assert re.search(pattern, text)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_dry_run_lists_floorplan_dir(shell: list[str], tmp_path: Path) -> None:
+    proc = run(shell, "--env", str(write_env(tmp_path, BASE_ENV)), "--dry-run")
+    assert "floorplan" in proc.stdout + proc.stderr
+    assert "0750" in proc.stdout + proc.stderr
