@@ -243,12 +243,18 @@ class CollectorRunner:
 # ---------------------------------------------------------------------- jobs
 
 
-async def _prune_job(service: Service, days: int) -> None:
+async def _prune_job(service: Service, days: int, ble_days: int) -> None:
+    """Nightly prune; each prune runs even if the other fails."""
     try:
         n = service.prune_observations(days)
         log.info("pruned %d observations older than %d days", n, days)
     except Exception:  # noqa: BLE001
         log.exception("observation prune failed")
+    try:
+        n = service.prune_ble(ble_days)
+        log.info("pruned %d BLE sightings older than %d days", n, ble_days)
+    except Exception:  # noqa: BLE001
+        log.exception("BLE sighting prune failed")
 
 
 async def _presence_job(ingestor: Ingestor) -> None:
@@ -302,7 +308,7 @@ async def start_scheduler(
     sched.add_job(
         _prune_job,
         CronTrigger(hour=PRUNE_HOUR, minute=PRUNE_MINUTE, timezone=tz),
-        args=[service, settings.observation_retention_days],
+        args=[service, settings.observation_retention_days, settings.bluetooth.retention_days],
         id="prune",
         name="prune",
         **common,

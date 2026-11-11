@@ -13,6 +13,11 @@ _IBEACON_PREFIX = b"\x02\x15"
 _IBEACON_MIN_LEN = 22
 _ADDRESS = re.compile(r"^[0-9a-f]{2}([:-])(?:[0-9a-f]{2}\1){4}[0-9a-f]{2}$")
 _DECIMAL = re.compile(r"^[0-9]+$")
+_IBEACON_VALUE = re.compile(
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"/([0-9]{1,5})/([0-9]{1,5})"
+)
+_U16_MAX = 0xFFFF
 
 
 @dataclass(frozen=True)
@@ -34,14 +39,50 @@ class Identity:
 
     @classmethod
     def parse(cls, key: str) -> Identity:
+        """Parse ``<kind>:<value>``; the value is validated and stored canonical.
+
+        ``address:`` takes anything ``normalize_address`` accepts. ``ibeacon:``
+        takes ``<uuid>/<major>/<minor>``: a hyphenated UUID (any case) and two
+        plain decimal integers 0-65535. Anything else raises ``ValueError``.
+        """
         kind, sep, value = key.partition(":")
         if not sep or not value:
             raise ValueError(f"invalid identity key: {key!r}")
         if kind == "address":
-            return cls("address", value)
+            return cls("address", _canonical_value("address", value))
         if kind == "ibeacon":
-            return cls("ibeacon", value)
+            return cls("ibeacon", _canonical_value("ibeacon", value))
         raise ValueError(f"invalid identity key: {key!r}")
+
+
+def _canonical_value(kind: str, value: str) -> str:
+    """Return ``value`` in canonical form for ``kind``; raise ValueError if invalid."""
+    if kind == "address":
+        return normalize_address(value)
+    if kind == "ibeacon":
+        m = _IBEACON_VALUE.fullmatch(value)
+        if m is None:
+            raise ValueError(f"invalid iBeacon identity {value!r}: want <uuid>/<major>/<minor>")
+        uid, major, minor = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+        for label, n in (("major", major), ("minor", minor)):
+            if n > _U16_MAX:
+                raise ValueError(f"invalid iBeacon identity {value!r}: {label} {n} > {_U16_MAX}")
+        return f"{uid}/{major}/{minor}"
+    raise ValueError(f"invalid identity kind: {kind!r}")
+
+
+def check_canonical(identity: Identity) -> None:
+    """Raise ValueError unless ``identity`` is valid and already in canonical form.
+
+    A hand-built ``Identity`` cannot bypass the validation ``Identity.parse`` does.
+    """
+    if not isinstance(identity.value, str):
+        raise ValueError(f"invalid identity value: {identity.value!r}")
+    canonical = _canonical_value(identity.kind, identity.value)
+    if canonical != identity.value:
+        raise ValueError(
+            f"identity {identity.key()!r} is not canonical (expected {identity.kind}:{canonical})"
+        )
 
 
 def normalize_address(addr: str) -> str:

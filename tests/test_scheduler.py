@@ -19,7 +19,7 @@ from lanscape_atlas import scheduler as scheduler_mod
 from lanscape_atlas.clock import iso
 from lanscape_atlas.collectors import REGISTRY, build_collectors
 from lanscape_atlas.collectors.arp import ArpCollector
-from lanscape_atlas.config import CollectorSettings, RouterSettings, Settings
+from lanscape_atlas.config import BluetoothSettings, CollectorSettings, RouterSettings, Settings
 from lanscape_atlas.observation import Observation
 from lanscape_atlas.scheduler import (
     CollectorRunner,
@@ -575,6 +575,35 @@ async def test_prune_and_presence_jobs_call_through(settings, runner, svc, monke
         assert calls == [("prune", 30), ("presence", None)]
     finally:
         await stop_scheduler(sched, [])
+
+
+async def test_prune_job_prunes_ble(tmp_path, runner, svc, monkeypatch) -> None:
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(svc, "prune_observations", lambda d: calls.append(("obs", d)) or 0)
+    monkeypatch.setattr(svc, "prune_ble", lambda d: calls.append(("ble", d)) or 0)
+    s = Settings(data_dir=tmp_path, bluetooth=BluetoothSettings(retention_days=9))
+    sched = await start_scheduler(s, runner, [], svc)
+    try:
+        j = sched.get_job("prune")
+        await j.func(*j.args)
+        assert calls == [("obs", 30), ("ble", 9)]
+    finally:
+        await stop_scheduler(sched, [])
+
+
+async def test_prune_job_ble_failure_does_not_block_observations(
+    runner, svc, monkeypatch, caplog
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def boom(_d):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(svc, "prune_observations", lambda d: calls.append(("obs", d)) or 0)
+    monkeypatch.setattr(svc, "prune_ble", boom)
+    await scheduler_mod._prune_job(svc, 30, 14)  # must not raise
+    assert calls == [("obs", 30)]
+    assert "BLE sighting prune failed" in caplog.text
 
 
 async def test_prune_job_swallows_errors(settings, runner, svc, monkeypatch) -> None:

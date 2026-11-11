@@ -9,6 +9,7 @@ import pytest
 from lanscape_atlas.bluetooth.match import (
     Advert,
     Identity,
+    check_canonical,
     identity_of,
     is_static_random,
     normalize_address,
@@ -17,6 +18,7 @@ from lanscape_atlas.bluetooth.match import (
 )
 
 UUID = "00000000-0000-4000-8000-000000000001"
+UUID_HEX = "00000000-0000-4000-8000-0000000000ab"  # has hex letters, for case tests
 UUID_BYTES = bytes.fromhex(UUID.replace("-", ""))
 IBEACON = b"\x02\x15" + UUID_BYTES + (100).to_bytes(2, "big") + (1).to_bytes(2, "big") + b"\xc5"
 
@@ -68,10 +70,71 @@ def test_identity_key_roundtrip(ident: Identity) -> None:
     assert Identity.parse(ident.key()) == ident
 
 
-@pytest.mark.parametrize("key", ["", "address", "foo:bar", "address:", ":x", "ibeacon:"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        "address",
+        "foo:bar",
+        "address:",
+        ":x",
+        "ibeacon:",
+        "address:ZZZ",
+        "address:00:00:5e:00:53",
+        "ibeacon:garbage",
+        f"ibeacon:{UUID}/1",
+        f"ibeacon:{UUID}/1/2/3",
+        "ibeacon:not-a-uuid/1/1",
+        f"ibeacon:{UUID}/65536/1",
+        f"ibeacon:{UUID}/1/65536",
+        f"ibeacon:{UUID}/+1/1",
+        f"ibeacon:{UUID}/ 1/1",
+        f"ibeacon:{UUID}/1/-1",
+        f"ibeacon:{UUID}/1/1\n",
+        f"ibeacon:{{{UUID}}}/1/1",
+    ],
+)
 def test_identity_parse_rejects_garbage(key: str) -> None:
     with pytest.raises(ValueError):
         Identity.parse(key)
+
+
+def test_identity_parse_normalizes_address() -> None:
+    assert Identity.parse("address:00:00:5E:00:53:01") == Identity("address", "00:00:5e:00:53:01")
+
+
+def test_identity_parse_normalizes_ibeacon() -> None:
+    assert Identity.parse(f"ibeacon:{UUID_HEX.upper()}/0/65535") == Identity(
+        "ibeacon", f"{UUID_HEX}/0/65535"
+    )
+
+
+def test_identity_parse_rejects_major_65536() -> None:
+    with pytest.raises(ValueError, match="65536"):
+        Identity.parse(f"ibeacon:{UUID}/65536/0")
+
+
+@pytest.mark.parametrize(
+    "ident",
+    [
+        Identity("address", "00:00:5E:00:53:01"),
+        Identity("address", "garbage"),
+        Identity("ibeacon", f"{UUID_HEX.upper()}/1/1"),
+        Identity("ibeacon", f"{UUID}/01/1"),
+        Identity("bogus", "x"),  # type: ignore[arg-type]
+    ],
+)
+def test_check_canonical_rejects_non_canonical(ident: Identity) -> None:
+    with pytest.raises(ValueError):
+        check_canonical(ident)
+
+
+@pytest.mark.parametrize(
+    "ident",
+    [Identity("address", "00:00:5e:00:53:01"), Identity("ibeacon", f"{UUID}/100/1")],
+)
+def test_check_canonical_accepts_canonical(ident: Identity) -> None:
+    check_canonical(ident)
 
 
 def test_static_random_built_at_runtime() -> None:
