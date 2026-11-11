@@ -15,6 +15,13 @@ HINT_SOURCE: dict[str, str] = {"asusrouter": "dhcp", "mdns": "mdns", "ssdp": "ss
 PRIORITY: tuple[str, ...] = ("mdns", "dhcp", "ssdp", "rdns")
 
 _HEX12 = re.compile(r"^[0-9a-f]{12}$")
+# Matter node IDs: commissionable (rotating) and operational <fabric>-<node>.
+_MATTER_ID = re.compile(r"^[0-9a-f]{16}(-[0-9a-f]{16})?$")
+# mDNS instance-name noise: "<mac>@Name" (raop, sonos), "Name [<mac>]"
+# (workstation), "Name-<uuid or mac hex>" (googlecast, many IoT devices).
+_MDNS_MAC_PREFIX = re.compile(r"^[0-9a-f]{12}@", re.IGNORECASE)
+_MDNS_MAC_SUFFIX = re.compile(r"\s*\[[0-9a-f]{2}(:[0-9a-f]{2}){5}\]$", re.IGNORECASE)
+_MDNS_HEX_SUFFIX = re.compile(r"-[0-9a-f]{12,}$", re.IGNORECASE)
 _JUNK_WORDS = frozenset({"*", "unknown", "localhost"})
 
 
@@ -23,7 +30,7 @@ def is_junk_hostname(name: str | None, *, mac: str | None, ipv4: str | None) -> 
     if name is None:
         return True
     s = name.strip().lower()
-    if not s or s in _JUNK_WORDS or _HEX12.match(s):
+    if not s or s in _JUNK_WORDS or _HEX12.match(s) or _MATTER_ID.match(s):
         return True
     if ipv4 is not None and s == ipv4.strip().lower():
         return True
@@ -37,12 +44,18 @@ def is_junk_hostname(name: str | None, *, mac: str | None, ipv4: str | None) -> 
 
 
 def clean_name(source: str, name: str) -> str:
-    """Strip mDNS service suffixes (from the first ``._``) and a trailing ``.local``."""
+    """Strip mDNS service suffixes (from the first ``._``) and a trailing ``.local``.
+
+    mDNS names also lose MAC/UUID decorations (``<mac>@``, `` [<mac>]``, ``-<hex>``).
+    """
     s = name.strip()
     if source == "mdns":
         idx = s.find("._")
         if idx != -1:
             s = s[:idx]
+        s = _MDNS_MAC_PREFIX.sub("", s)
+        s = _MDNS_MAC_SUFFIX.sub("", s)
+        s = _MDNS_HEX_SUFFIX.sub("", s)
     if s.lower().endswith(".local"):
         s = s[: -len(".local")]
     return s.strip()

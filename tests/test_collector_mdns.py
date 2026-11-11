@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from zeroconf import ServiceStateChange
 
 from conftest import T0
 from lanscape_atlas.collectors import mdns
@@ -13,7 +14,9 @@ from lanscape_atlas.collectors.mdns import (
     MdnsCollector,
     record_to_observation,
 )
+from lanscape_atlas.observation import Observation
 
+MAC = "00:00:5e:00:53:01"
 RECS: list[dict[str, Any]] = json.loads(
     (Path(__file__).parent / "fixtures" / "mdns_records.json").read_text()
 )
@@ -80,7 +83,7 @@ async def test_dedupe_and_cap() -> None:
         c._on_record({**RECS[0], "name": f"n{i}", "addresses": ["192.0.2.5"]})
     obs = await c.collect()
     assert len(obs) == 2000
-    assert obs[0].hostname == "n100" and obs[-1].hostname == "n2099"
+    assert obs[0].attrs["instance"] == "n100" and obs[-1].attrs["instance"] == "n2099"
 
 
 class FakeAZ:
@@ -146,3 +149,106 @@ async def test_start_closes_zeroconf_when_browser_fails(monkeypatch: pytest.Monk
     assert len(FakeAZ.instances) == 2 and FakeAZ.instances[1].closed == 0
     await c.stop()
     assert FakeAZ.instances[1].closed == 1 and FakeBrowser.instances[0].cancelled == 1
+
+
+# ------------------------------------------------- canonical name (live set)
+
+PLUG_IP = "192.0.2.40"
+
+
+def _rec(instance: str, type_: str, ip: str = PLUG_IP, port: int = 80) -> dict[str, Any]:
+    return {
+        "name": f"{instance}.{type_}.local.",
+        "type": f"{type_}.local.",
+        "addresses": [ip],
+        "port": port,
+        "server": None,
+    }
+
+
+def _started() -> MdnsCollector:
+    c = MdnsCollector(clock=lambda: T0)
+    c._started = True
+    return c
+
+
+async def test_hostname_does_not_depend_on_resolve_order() -> None:
+    """Two concurrent _http names plus a rotating _matterc ID: every flush agrees."""
+    recs = [
+        _rec("plug-00005e005301", "_http._tcp"),
+        _rec("plug-den", "_http._tcp"),
+        _rec("D746633F41E690D5", "_matterc._udp", port=5540),
+    ]
+    hostnames = set()
+    for order in (recs, recs[::-1]):
+        c = _started()
+        for r in order:
+            c._on_record(r)
+        hostnames |= {o.hostname for o in await c.collect()}
+    assert hostnames == {"plug"}
+
+
+async def test_raw_instance_kept_in_attrs() -> None:
+    c = _started()
+    c._on_record(_rec("plug-den", "_http._tcp"))
+    (o,) = await c.collect()
+    assert o.attrs["instance"] == "plug-den._http._tcp.local."
+    assert o.hostname == "plug-den"
+
+
+async def test_better_ranked_service_type_wins() -> None:
+    c = _started()
+    c._on_record(_rec("00005E005301@Den Receiver", "_raop._tcp"))
+    c._on_record(_rec("RX-100", "_spotify-connect._tcp"))
+    c._on_record(_rec("Den Receiver 005301", "_airplay._tcp"))
+    assert {o.hostname for o in await c.collect()} == {"Den Receiver 005301"}
+
+
+async def test_names_on_other_ips_do_not_compete() -> None:
+    c = _started()
+    c._on_record(_rec("Alpha", "_airplay._tcp", ip="192.0.2.41"))
+    c._on_record(_rec("Zulu", "_airplay._tcp"))
+    by_ip = {o.ipv4: o.hostname for o in await c.collect()}
+    assert by_ip == {"192.0.2.41": "Alpha", PLUG_IP: "Zulu"}
+
+
+async def test_removed_record_leaves_live_set() -> None:
+    """A rename is a goodbye for the old record and an add for the new one."""
+    c = _started()
+    old = _rec("Alpha", "_airplay._tcp")
+    c._on_record(old)
+    await c.collect()
+    c._handler(None, old["type"], old["name"], ServiceStateChange.Removed)
+    c._on_record(_rec("Zulu", "_airplay._tcp"))
+    assert [o.hostname for o in await c.collect()] == ["Zulu"]
+
+
+async def test_canonical_hostname_truncated() -> None:
+    c = _started()
+    c._on_record(_rec("x" * 400, "_http._tcp"))
+    (o,) = await c.collect()
+    assert o.hostname is not None and len(o.hostname) == 255
+
+
+async def test_only_junk_names_give_no_hostname() -> None:
+    c = _started()
+    c._on_record(_rec("9FDDDC93C0D0B40A-000000000001B669", "_matter._tcp", port=5540))
+    (o,) = await c.collect()
+    assert o.hostname is None
+    assert o.attrs["instance"].startswith("9FDDDC93C0D0B40A")
+
+
+async def test_flushes_with_varying_order_write_one_name(ing: Any, db: Any, clock: Any) -> None:
+    """Regression: mDNS name churn (one collector:mdns batch per flush)."""
+    ing.ingest([Observation("asusrouter", clock(), "wifi", MAC, PLUG_IP, "esp-plug", {})])
+    recs = [_rec("plug-den", "_http._tcp"), _rec("Den Plug", "_hap._tcp", port=0)]
+    c = MdnsCollector(clock=clock)
+    c._started = True
+    for i in range(6):
+        clock.advance(minutes=1)
+        for r in recs if i % 2 else recs[::-1]:
+            c._on_record(r)
+        ing.ingest(await c.collect())
+    assert db.execute("select name from device").fetchone()[0] == "Den Plug"
+    n = db.execute("select count(*) from batch where actor = 'collector:mdns'").fetchone()[0]
+    assert n == 1
