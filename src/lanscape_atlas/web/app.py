@@ -472,7 +472,12 @@ def create_app(
     async def scanner(device_id: int) -> None:
         start_deep_scan(app.state, device_id)
 
-    mcp_server = build_mcp(service, scanner, lambda: app.state.bluetooth)
+    mcp_server = build_mcp(
+        service,
+        scanner,
+        lambda: app.state.bluetooth,
+        candidate_min_rssi=settings.bluetooth.candidate_min_rssi,
+    )
     app.state.mcp = mcp_server
     # Both spellings are served directly: a POST redirect is not reliably followed.
     endpoint = _McpEndpoint(mcp_server)

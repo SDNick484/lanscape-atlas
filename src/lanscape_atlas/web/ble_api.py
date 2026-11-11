@@ -19,7 +19,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from lanscape_atlas.bluetooth.aggregator import Candidate
+from lanscape_atlas.bluetooth.aggregator import Candidate, visible_candidates
 from lanscape_atlas.bluetooth.match import Identity
 from lanscape_atlas.bluetooth.runtime import BluetoothRuntime
 from lanscape_atlas.clock import iso
@@ -131,15 +131,30 @@ def find(request: Request, q: str | None = None) -> list[dict[str, Any]]:
     return [find_row_dict(r) for r in rows]
 
 
-@router.get("/ble/candidates")
-async def candidates(request: Request) -> dict[str, Any]:
-    runtime: BluetoothRuntime | None = request.app.state.bluetooth
+def candidates_payload(
+    runtime: BluetoothRuntime | None, *, min_rssi: int, include_weak: bool
+) -> dict[str, Any]:
+    """The candidate list for the API and MCP. Call on the event loop (reads the aggregator)."""
     if runtime is None:
-        return {"connected": None, "candidates": []}
+        return {"connected": None, "min_rssi": min_rssi, "weak_hidden": 0, "candidates": []}
+    view = visible_candidates(
+        runtime.aggregator.candidates(), min_rssi=min_rssi, include_weak=include_weak
+    )
     return {
         "connected": runtime.status().connected,
-        "candidates": [candidate_dict(c) for c in runtime.aggregator.candidates()],
+        "min_rssi": min_rssi,
+        "weak_hidden": 0 if include_weak else view.weak,
+        "candidates": [candidate_dict(c) for c in view.shown],
     }
+
+
+@router.get("/ble/candidates")
+async def candidates(request: Request, include_weak: bool = False) -> dict[str, Any]:
+    return candidates_payload(
+        request.app.state.bluetooth,
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
+        include_weak=include_weak,
+    )
 
 
 @router.post("/ble/claim")

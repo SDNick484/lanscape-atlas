@@ -43,10 +43,10 @@ class StubRuntime:
         return ClientStatus(self._connected, None, None)
 
 
-def candidate(clock: FixedClock, address: str = ADDR) -> Candidate:
+def candidate(clock: FixedClock, address: str = ADDR, rssi: int = -55) -> Candidate:
     now = clock()
     return Candidate(
-        Identity("address", address), "Tag", -55, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
+        Identity("address", address), "Tag", rssi, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
     )
 
 
@@ -106,7 +106,46 @@ def test_find_row_without_sightings_has_null_last(
 
 def test_candidates_empty_without_ha(client: TestClient, app: FastAPI) -> None:
     app.state.bluetooth = None
-    assert client.get("/api/v1/ble/candidates").json() == {"connected": None, "candidates": []}
+    assert client.get("/api/v1/ble/candidates").json() == {
+        "connected": None,
+        "min_rssi": -80,
+        "weak_hidden": 0,
+        "candidates": [],
+    }
+
+
+WEAK = "00:00:5e:00:53:02"
+STRONG = "00:00:5e:00:53:03"
+
+
+def test_candidates_strongest_first_weak_hidden(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    app.state.bluetooth = StubRuntime(
+        [candidate(clock, WEAK, -90), candidate(clock), candidate(clock, STRONG, -40)]
+    )
+    body = client.get("/api/v1/ble/candidates").json()
+    assert [c["identity"] for c in body["candidates"]] == [f"address:{STRONG}", KEY]
+    assert (body["min_rssi"], body["weak_hidden"]) == (-80, 1)
+    body = client.get("/api/v1/ble/candidates", params={"include_weak": "true"}).json()
+    assert [c["identity"] for c in body["candidates"]] == [
+        f"address:{STRONG}",
+        KEY,
+        f"address:{WEAK}",
+    ]
+    assert body["weak_hidden"] == 0
+
+
+def test_weak_candidate_can_still_be_claimed(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    app.state.bluetooth = StubRuntime([candidate(clock, WEAK, -95)])
+    r = client.post(
+        "/api/v1/ble/claim",
+        json={"identity": f"address:{WEAK}", "new": {"name": "Remote", "type": "remote"}},
+    )
+    assert r.status_code == 200, r.text
+    assert db.execute("select value from ble_identity").fetchone()[0] == WEAK
 
 
 def test_candidates_listed(client: TestClient) -> None:

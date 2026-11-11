@@ -213,7 +213,10 @@ v2 migration are not edited.
   - **intermittent** — heard, but less often (pressed, idle-only, or throttled);
   - **not heard in 24 h**.
 - A search box (same matcher as the device list, by name).
-- **Candidates** section: identity, advert name, nearest scanner, last heard, gap.
+- **Candidates** section: identity, advert name, signal (best RSSI), nearest scanner,
+  last heard, gap; strongest signal first. Candidates below `[bluetooth]
+  candidate_min_rssi` (default -80 dBm; usually a neighbour's) sit behind a "Show N weak"
+  link.
   "Claim" opens a small form: attach to an existing device, or create one with a name
   and type.
 - A banner when the HA connection has been down for more than 2 minutes, with the last
@@ -242,7 +245,9 @@ v2 migration are not edited.
 ### 6.5 HTTP API (bearer-protected, under `/api/v1`)
 
 - `GET /find?q=` — claimed devices with last heard and badge.
-- `GET /ble/candidates`
+- `GET /ble/candidates?include_weak=` — strongest best RSSI first; candidates below
+  `[bluetooth] candidate_min_rssi` (default -80 dBm) only with `include_weak=true`. The
+  response carries `min_rssi` and `weak_hidden`.
 - `POST /ble/claim` — `{identity, device_id}` or `{identity, new: {name, type}}`.
 - `DELETE /ble/identities/{id}` — unclaim.
 - `GET /ble/scanners`, `PUT /ble/scanners/{source}/device` — link or unlink.
@@ -253,7 +258,8 @@ v2 migration are not edited.
 
 - `where_is(query)` — room or scanner, last heard, RSSI, badge, and how stale the
   reading is.
-- `ble_candidates()` — unclaimed sources, newest first.
+- `ble_candidates(include_weak=false)` — unclaimed sources, strongest first, with the
+  same weak filter as the API.
 - `claim_ble(candidate, device_id | new_name)` — actor `claude`, undoable.
 - `INSTRUCTIONS` mentions the three tools and that rotating-address devices are not
   findable.

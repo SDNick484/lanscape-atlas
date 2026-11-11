@@ -659,12 +659,31 @@ async def test_where_is(app: FastAPI, clock: FixedClock) -> None:
 
 async def test_ble_candidates(app: FastAPI, clock: FixedClock) -> None:
     async with _session(app) as c:
-        assert _data(await _call(c, "ble_candidates")) == {"connected": None, "candidates": []}
+        assert _data(await _call(c, "ble_candidates")) == {
+            "connected": None,
+            "min_rssi": -80,
+            "weak_hidden": 0,
+            "candidates": [],
+        }
         _with_candidate(app, clock)
         data = _data(await _call(c, "ble_candidates"))
         assert data["connected"] is True
         assert data["candidates"][0]["identity"] == BLE_KEY
         assert data["candidates"][0]["last_heard"] == "2026-01-01T00:00:00Z"
+
+
+async def test_ble_candidates_weak_filter(app: FastAPI, clock: FixedClock) -> None:
+    from test_ble_api import StubRuntime, candidate
+
+    weak = "00:00:5e:00:53:02"
+    app.state.bluetooth = StubRuntime([candidate(clock, weak, -90), candidate(clock)])
+    async with _session(app) as c:
+        data = _data(await _call(c, "ble_candidates"))
+        assert [x["identity"] for x in data["candidates"]] == [BLE_KEY]
+        assert data["weak_hidden"] == 1
+        data = _data(await _call(c, "ble_candidates", include_weak=True))
+        assert [x["identity"] for x in data["candidates"]] == [BLE_KEY, f"address:{weak}"]
+        assert data["weak_hidden"] == 0
 
 
 async def test_claim_ble_actor_is_claude(app: FastAPI, clock: FixedClock) -> None:

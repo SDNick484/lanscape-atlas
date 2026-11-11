@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 
+from lanscape_atlas.bluetooth.aggregator import visible_candidates
 from lanscape_atlas.service import Service
 from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.service import queries as q
@@ -102,12 +103,19 @@ def _db_context(svc: Service, search: str | None, with_candidates: bool) -> dict
     return {"rows": [_row_view(r, now) for r in rows], "devices": devices, "scanners": scanners}
 
 
-async def _context(request: Request, search: str | None, *, full: bool) -> dict[str, Any]:
+async def _context(
+    request: Request, search: str | None, *, full: bool, weak: bool = False
+) -> dict[str, Any]:
     svc = _service(request)
     runtime = request.app.state.bluetooth
     now = svc.clock()
     # Aggregator: loop only. Copy the candidates before leaving the loop.
-    found = [] if runtime is None else list(runtime.aggregator.candidates())
+    view = visible_candidates(
+        [] if runtime is None else runtime.aggregator.candidates(),
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
+        include_weak=weak,
+    )
+    found = view.shown
     ctx = await run_in_threadpool(_db_context, svc, search, full and bool(found))
     scanners = ctx.pop("scanners")
     candidates = []
@@ -120,6 +128,9 @@ async def _context(request: Request, search: str | None, *, full: bool) -> dict[
         configured=runtime is not None,
         banner=_banner(request, now),
         candidates=candidates,
+        weak_count=view.weak,
+        show_weak=weak,
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
         q=search or "",
         intermittent_hint=INTERMITTENT_HINT,
     )
@@ -140,8 +151,9 @@ async def find_page(
     request: Request,
     q: str | None = None,
     claimed: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    weak: bool = False,
 ) -> Response:
-    ctx = await _context(request, q, full=True)
+    ctx = await _context(request, q, full=True, weak=weak)
     flash = None
     if claimed is not None:
         name = await run_in_threadpool(_device_name, _service(request), claimed)

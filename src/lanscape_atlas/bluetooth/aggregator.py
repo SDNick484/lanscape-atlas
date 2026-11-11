@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import statistics
 from collections import OrderedDict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -50,6 +50,23 @@ class Candidate:
     last_heard: datetime
     adverts: int
     typical_gap_s: float | None
+
+
+@dataclass(frozen=True)
+class CandidateView:
+    shown: list[Candidate]
+    weak: int  # candidates below the threshold, whether shown or not
+
+
+def visible_candidates(
+    candidates: Iterable[Candidate], *, min_rssi: int, include_weak: bool
+) -> CandidateView:
+    """Strongest best RSSI first (ties: most recently heard first); weak ones only on request."""
+    ordered = sorted(candidates, key=lambda c: (-c.best_rssi, -c.last_heard.timestamp()))
+    weak = sum(1 for c in ordered if c.best_rssi < min_rssi)
+    if not include_weak:
+        ordered = [c for c in ordered if c.best_rssi >= min_rssi]
+    return CandidateView(ordered, weak)
 
 
 @dataclass

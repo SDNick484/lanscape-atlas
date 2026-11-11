@@ -33,7 +33,12 @@ from pydantic import ValidationError
 from lanscape_atlas.collectors.nmap import ScanRefused
 from lanscape_atlas.service import Service, StaleWrite, UndoConflict, queries
 from lanscape_atlas.service import ble_queries as bq
-from lanscape_atlas.web.ble_api import age_seconds, candidate_dict, find_row_dict, require_candidate
+from lanscape_atlas.web.ble_api import (
+    age_seconds,
+    candidates_payload,
+    find_row_dict,
+    require_candidate,
+)
 from lanscape_atlas.web.floorplan_api import PlacementsBody, apply_placements
 
 ACTOR = "claude"
@@ -148,13 +153,19 @@ def _cap(limit: int) -> int:
 
 
 def build_mcp(
-    service: Service, scanner: Scanner, bluetooth: BluetoothGetter | None = None
+    service: Service,
+    scanner: Scanner,
+    bluetooth: BluetoothGetter | None = None,
+    *,
+    candidate_min_rssi: int = -80,
 ) -> MCPServer[Any]:
     """An ``MCPServer`` exposing the inventory through exactly the tools in ``TOOL_NAMES``.
 
     ``scanner(device_id)`` starts a background deep scan or raises ``KeyError`` /
     ``ScanRefused``; ``create_app`` passes one built on ``web.deep_scan.start_deep_scan``.
     ``bluetooth()`` returns the ``BluetoothRuntime`` or ``None`` (no Home Assistant).
+    ``candidate_min_rssi`` is ``[bluetooth] candidate_min_rssi``: weaker candidates are
+    listed by ``ble_candidates`` only with ``include_weak``.
     """
     # MCPServer() calls logging.basicConfig(level=INFO) on the root logger; logging
     # setup belongs to the application, so undo that side effect.
@@ -367,18 +378,16 @@ def build_mcp(
         title="List unclaimed Bluetooth devices",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
-    async def ble_candidates() -> dict[str, Any]:
-        """Unclaimed Bluetooth devices heard recently: connected (Home Assistant link up,
-        null when Home Assistant is not configured) and candidates, each with identity
-        (pass to claim_ble), name, best_rssi, source, first_heard, last_heard, adverts and
-        typical_gap_s. Holding a tag next to a scanner makes its best_rssi stand out."""
+    async def ble_candidates(include_weak: bool = False) -> dict[str, Any]:
+        """Unclaimed Bluetooth devices heard recently, strongest signal first: connected
+        (Home Assistant link up, null when Home Assistant is not configured), min_rssi,
+        weak_hidden (how many weaker than min_rssi were left out; pass include_weak=true to
+        list them, as far-away ones are usually a neighbour's) and candidates, each with
+        identity (pass to claim_ble), name, best_rssi, source, first_heard, last_heard,
+        adverts and typical_gap_s. Holding a tag next to a scanner makes its best_rssi
+        stand out."""
         runtime = bluetooth() if bluetooth else None
-        if runtime is None:
-            return {"connected": None, "candidates": []}
-        return {
-            "connected": runtime.status().connected,
-            "candidates": [candidate_dict(c) for c in runtime.aggregator.candidates()],
-        }
+        return candidates_payload(runtime, min_rssi=candidate_min_rssi, include_weak=include_weak)
 
     @tool(
         title="Claim a Bluetooth device",

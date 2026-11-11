@@ -154,6 +154,15 @@ def test_bluetooth_defaults(tmp_path: Path) -> None:
     s = load_settings(tmp_path / "missing.toml", env={})
     assert (s.bluetooth.retention_days, s.bluetooth.flush_s) == (14, 60)
     assert s.bluetooth.snapshot_s == 30
+    assert s.bluetooth.candidate_min_rssi == -80
+
+
+def test_bluetooth_candidate_min_rssi(tmp_path: Path) -> None:
+    s = load_settings(_ha(tmp_path, "[bluetooth]\ncandidate_min_rssi = -72\n"), env={})
+    assert s.bluetooth.candidate_min_rssi == -72
+    for bad in ("1", "-128", "-70.5", '"-70"'):
+        with pytest.raises(ValueError, match="candidate_min_rssi"):
+            load_settings(_ha(tmp_path, f"[bluetooth]\ncandidate_min_rssi = {bad}\n"), env={})
 
 
 def test_bluetooth_retention_must_be_positive(tmp_path: Path) -> None:
@@ -178,6 +187,7 @@ def test_bluetooth_retention_must_be_positive(tmp_path: Path) -> None:
 def test_example_config_documents_snapshot_s() -> None:
     text = (Path(__file__).parent.parent / "config.example.toml").read_text()
     assert "snapshot_s = 30" in text
+    assert "candidate_min_rssi = -80" in text
 
 
 def test_settings_repr_hides_ha_token(tmp_path: Path) -> None:

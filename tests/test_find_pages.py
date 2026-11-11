@@ -47,10 +47,12 @@ class StubRuntime:
         return self._status
 
 
-def cand(clock: FixedClock, name: str | None = "Tag", address: str = ADDR) -> Candidate:
+def cand(
+    clock: FixedClock, name: str | None = "Tag", address: str = ADDR, rssi: int = -55
+) -> Candidate:
     now = clock()
     return Candidate(
-        Identity("address", address), name, -55, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
+        Identity("address", address), name, rssi, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
     )
 
 
@@ -529,3 +531,25 @@ def test_candidate_scanner_shown_by_name_and_room(
         f'<span class="mono">{unknown}</span>',
     ]
     assert f'title="{SCANNER}"' in html  # the address is still there on hover
+
+
+def test_candidates_sorted_by_signal_and_weak_behind_a_link(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    weak, strong = "00:00:5e:00:53:02", "00:00:5e:00:53:03"
+    app.state.bluetooth = StubRuntime(
+        [cand(clock, "Far", weak, -91), cand(clock), cand(clock, "Near", strong, -42)]
+    )
+    html = client.get("/find").text
+    assert f"address:{weak}" not in html
+    assert html.index(f"address:{strong}") < html.index(KEY)
+    assert "-42 dBm" in html and "-55 dBm" in html
+    assert 'href="/find?weak=1"' in html and "Show 1 weak" in html
+    shown = client.get("/find", params={"weak": "1"}).text
+    assert shown.index(KEY) < shown.index(f"address:{weak}")
+    assert "-91 dBm" in shown and 'href="/find"' in shown and "Hide weak" in shown
+
+
+def test_no_weak_link_when_nothing_is_weak(client: TestClient) -> None:
+    html = client.get("/find").text
+    assert "Show 0 weak" not in html and "weak=1" not in html

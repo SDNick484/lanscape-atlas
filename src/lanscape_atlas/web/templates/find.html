@@ -17,25 +17,28 @@
 
 {% if configured %}
 <h2>Candidates</h2>
-<p class="muted">Stable Bluetooth devices heard recently and not yet claimed. Pick one, then claim it below.</p>
+<p class="muted">Stable Bluetooth devices heard recently and not yet claimed, strongest signal first. Pick one, then claim it below.
+{% if weak_count and not show_weak %}<a href="{{ root }}/find?weak=1">Show {{ weak_count }} weak</a> (below {{ min_rssi }} dBm, usually a neighbour's).
+{% elif show_weak %}<a href="{{ root }}/find">Hide weak</a> (below {{ min_rssi }} dBm).{% endif %}</p>
 {# One form for every candidate: the device list is rendered once, not once per row. #}
 <form method="post" action="{{ root }}/find/claim" id="claim-form">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <div class="table-wrap">
 <table>
-  <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th></tr></thead>
+  <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Signal</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th></tr></thead>
   <tbody>
   {% for c in candidates %}
   <tr>
     <td><input type="radio" name="identity" value="{{ c.identity }}" id="cand-{{ loop.index }}" aria-label="Select {{ c.identity }}" required></td>
     <td class="mono"><label for="cand-{{ loop.index }}">{{ c.identity }}</label></td>
     <td>{{ c.name or "" }}</td>
+    <td>{{ c.best_rssi }} dBm</td>
     <td class="scanner" title="{{ c.source }}">{% if c.scanner_name %}{{ c.scanner_name }}{% else %}<span class="mono">{{ c.source }}</span>{% endif %}{% if c.scanner_room %} <span class="muted">{{ c.scanner_room }}</span>{% endif %}</td>
     <td>{{ c.age }}</td>
     <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="empty">No candidates right now.</td></tr>
+  <tr><td colspan="7" class="empty">No candidates right now.</td></tr>
   {% endfor %}
   </tbody>
 </table>

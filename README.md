@@ -137,6 +137,7 @@ verify_tls = true
 retention_days = 14   # nightly prune of per-minute sightings
 flush_s = 60          # how often closed minutes are written to the database
 snapshot_s = 30       # how often Home Assistant's latest adverts are re-read (see above)
+candidate_min_rssi = -80  # weaker candidates are hidden behind "Show N weak" (dBm, -127..0)
 ```
 
 Keep `snapshot_s` at 30 or below: the *steady* badge needs a sighting in 48 of the last 60
@@ -168,8 +169,11 @@ exposes the iBeacon ID (UUID, major, minor); the candidate list shows the same i
 Open `/find`. Under **Candidates** are stable devices heard recently that are not yet
 claimed: iBeacons, and addresses that look stable (a known vendor, a static-random
 address, or one heard steadily for 30 minutes). Press a remote's button, or hold a tag
-next to a proxy, and its signal strength stands out. Each candidate shows the scanner
-that heard it by name (and room, once the scanner is linked). Select the candidate, then
+next to a proxy, and its signal strength stands out. Candidates are listed strongest
+signal first; those weaker than `candidate_min_rssi` (default -80 dBm), usually a
+neighbour's, are hidden behind a **Show N weak** link (the API and MCP take
+`include_weak`). Each candidate shows the scanner that heard it by name (and room, once
+the scanner is linked). Select the candidate, then
 under **Claim the selected candidate** either attach it to an existing device or create a
 new one (name and type), and press **Claim**. Claims are in History and can
 be undone; the device page has an **Unclaim** button.
