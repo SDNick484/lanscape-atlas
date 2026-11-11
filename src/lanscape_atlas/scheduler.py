@@ -84,6 +84,8 @@ class CollectorRunner:
         secrets = [settings.api_token or ""]
         if settings.router is not None:
             secrets.append(settings.router.password)
+        if settings.home_assistant is not None:
+            secrets.append(settings.home_assistant.token)
         return cls(
             service,
             ingestor,

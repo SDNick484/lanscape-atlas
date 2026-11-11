@@ -605,6 +605,20 @@ async def test_runner_from_settings_redacts_and_uses_intervals(tmp_path, svc, in
     assert status(db, "arp")["next_run_at"] == "2026-01-01T00:03:20Z"  # 100 s * 2
 
 
+async def test_runner_redacts_ha_token(tmp_path, svc, ing, clock, db):
+    from lanscape_atlas.config import HomeAssistantSettings
+
+    ha_token = "ha-secret-token"
+    s = Settings(
+        data_dir=tmp_path,
+        home_assistant=HomeAssistantSettings(url="http://192.0.2.10:8123", token=ha_token),
+    )
+    r = CollectorRunner.from_settings(s, svc, ing, clock)
+    out = await r.run_once(FakeCollector("arp", exc=OSError(f"auth failed {ha_token}")))
+    assert out.error == "OSError: auth failed ***"
+    assert ha_token not in status(db, "arp")["last_error"]
+
+
 async def test_interval_jobs_fire_at_startup(settings, runner, svc) -> None:
     """M7: interval collectors run once right away, not only after the first interval."""
     from datetime import datetime, timedelta
