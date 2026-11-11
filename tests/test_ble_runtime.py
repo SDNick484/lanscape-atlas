@@ -170,6 +170,55 @@ async def test_reload_from_other_thread_runs_on_loop(make_runtime, svc, make_dev
         await rt.stop()
 
 
+def _shown(rt: BluetoothRuntime, include_weak: bool = True) -> list[str]:
+    from lanscape_atlas.web.ble_api import candidates_payload
+
+    data = candidates_payload(rt, min_rssi=-80, include_weak=include_weak)
+    return [c["identity"] for c in data["candidates"]]
+
+
+async def test_hidden_loaded_at_start(make_runtime, svc) -> None:
+    svc.hide_ble("user", IDENT, "Tag")
+    rt, client = make_runtime()
+    await rt.start()
+    try:
+        client.hear(advert())
+        assert [c.identity for c in rt.aggregator.candidates()] == [IDENT]  # still heard
+        assert rt.is_hidden(IDENT)
+        assert _shown(rt) == []
+    finally:
+        await rt.stop()
+
+
+async def test_hide_reloads_without_restart(make_runtime, svc) -> None:
+    other = Identity("address", "00:00:5e:00:53:02")
+    rt, client = make_runtime()
+    await rt.start()
+    try:
+        client.hear(advert())
+        client.hear(advert(address=other.value))
+        assert sorted(_shown(rt)) == [IDENT.key(), other.key()]
+        assert not rt.is_hidden(IDENT)
+        hid, _ = await asyncio.to_thread(svc.hide_ble, "user", IDENT, "Tag")
+        for _ in range(100):  # the reload hops onto the loop
+            if rt.is_hidden(IDENT):
+                break
+            await asyncio.sleep(0.01)
+        assert _shown(rt) == [other.key()]
+        assert not rt.is_hidden(other)
+        svc.unhide_ble("user", hid)
+        await asyncio.sleep(0)
+        assert sorted(_shown(rt)) == [IDENT.key(), other.key()]
+    finally:
+        await rt.stop()
+
+
+async def test_vendor_lookup_is_the_oui_db(make_runtime) -> None:
+    rt, _ = make_runtime()
+    assert rt.vendor(ADDR) == "ICANN IANA"
+    assert rt.vendor("02:00:5e:00:53:01") is None  # random address
+
+
 async def test_publish_after_stop_is_harmless(make_runtime, svc, make_device, monkeypatch) -> None:
     dev = make_device()
     rt, _ = make_runtime()

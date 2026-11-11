@@ -37,6 +37,7 @@ from lanscape_atlas.web.ble_api import (
     age_seconds,
     candidates_payload,
     find_row_dict,
+    hide_candidate,
     require_candidate,
 )
 from lanscape_atlas.web.floorplan_api import PlacementsBody, apply_placements
@@ -60,6 +61,7 @@ TOOL_NAMES = (
     "where_is",
     "ble_candidates",
     "claim_ble",
+    "hide_ble",
 )
 
 INSTRUCTIONS = (
@@ -69,8 +71,9 @@ INSTRUCTIONS = (
     "recorded as actor 'claude' and can be reverted with undo(batch_id). get_floor_plan lists "
     "rooms and where devices sit; place_devices puts devices in rooms or at points on the plan. "
     "where_is finds where a Bluetooth tag or device was last heard; ble_candidates lists unclaimed "
-    "Bluetooth devices and claim_ble attaches one to a device. Devices that rotate their "
-    "Bluetooth address (most phones and watches) are not findable."
+    "Bluetooth devices, claim_ble attaches one to a device and hide_ble hides a neighbour's "
+    "device that keeps showing up. Devices that rotate their Bluetooth address (most phones "
+    "and watches) are not findable."
 )
 
 Scanner = Callable[[int], Awaitable[None]]
@@ -418,5 +421,20 @@ def build_mcp(
             )
         )
         return {"device_id": did, "batch_id": batch_id}
+
+    @tool(
+        title="Hide a Bluetooth device (not mine)",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, open_world_hint=False
+        ),
+    )
+    async def hide_ble(candidate: str) -> dict[str, Any]:
+        """Hide a candidate from ble_candidates that is not the household's (typically a
+        neighbour's device that keeps showing up), so it is no longer listed. candidate is
+        the identity string from ble_candidates. Only a salted digest and a label (advert
+        name or vendor) are kept. Claiming it later with claim_ble unhides it. Recorded as
+        actor "claude"; returns {"id", "label", "batch_id"}; undo(batch_id) reverts it."""
+        runtime = bluetooth() if bluetooth else None
+        return await hide_candidate(service, runtime, ACTOR, candidate)
 
     return mcp
