@@ -181,6 +181,34 @@ def test_render_without_home_assistant_leaves_it_off(tmp_path: Path) -> None:
     assert load_settings(out, env={}).home_assistant is None
 
 
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("value", ["-70", "-127", "0", "-0", "-090"])
+def test_render_ble_candidate_min_rssi(shell: list[str], value: str, tmp_path: Path) -> None:
+    env = {**BASE_ENV, **HA_ENV, "BLE_CANDIDATE_MIN_RSSI": value}
+    proc, out = render(shell, tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    cfg = tomllib.loads(out.read_text(encoding="utf-8"))
+    assert cfg["bluetooth"]["candidate_min_rssi"] == int(value)
+    assert cfg["bluetooth"]["retention_days"] == 14  # the rest of [bluetooth] is intact
+    assert load_settings(out, env={}).bluetooth.candidate_min_rssi == int(value)
+
+
+def test_render_without_ble_candidate_min_rssi_keeps_the_default(tmp_path: Path) -> None:
+    proc, out = render(["sh"], tmp_path, BASE_ENV)
+    assert proc.returncode == 0, proc.stderr
+    assert tomllib.loads(out.read_text())["bluetooth"]["candidate_min_rssi"] == -80
+    proc, out = render(["sh"], tmp_path, {**BASE_ENV, "BLE_CANDIDATE_MIN_RSSI": ""})
+    assert proc.returncode == 0, proc.stderr
+    assert tomllib.loads(out.read_text())["bluetooth"]["candidate_min_rssi"] == -80
+
+
+def test_setup_env_example_documents_ble_candidate_min_rssi() -> None:
+    text = (ROOT / "deploy" / "setup.env.example").read_text()
+    assert re.search(r"^# BLE_CANDIDATE_MIN_RSSI=-80$", text, re.M)
+    block = text[: text.index("# BLE_CANDIDATE_MIN_RSSI=")].rsplit("\n\n", 1)[-1]
+    assert "-80" in block and "-127" in block and "0" in block
+
+
 def test_setup_env_example_documents_home_assistant() -> None:
     text = (ROOT / "deploy" / "setup.env.example").read_text()
     for key in ("HA_URL", "HA_TOKEN", "HA_VERIFY_TLS"):
@@ -196,6 +224,13 @@ def test_setup_env_example_documents_home_assistant() -> None:
         ({**HA_ENV, "HA_URL": "192.0.2.10:8123"}, "HA_URL"),
         ({**HA_ENV, "HA_URL": "http://192.0.2.10 :8123"}, "HA_URL"),
         ({**HA_ENV, "HA_VERIFY_TLS": "yes"}, "HA_VERIFY_TLS"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "1"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "-128"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "80"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "-8O"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "--80"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "-"}, "BLE_CANDIDATE_MIN_RSSI"),
+        ({"BLE_CANDIDATE_MIN_RSSI": "-80.5"}, "BLE_CANDIDATE_MIN_RSSI"),
         ({"BIND_PORT": "80x"}, "BIND_PORT"),
         ({"ASUSROUTER_INTERVAL_S": "0"}, "ASUSROUTER_INTERVAL_S"),
         ({"API_TOKEN": "short"}, "API_TOKEN"),
