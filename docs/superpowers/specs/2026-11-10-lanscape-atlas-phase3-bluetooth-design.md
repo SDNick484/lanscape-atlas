@@ -188,7 +188,8 @@ v2 migration are not edited.
 - **Claimed.** A claimed item is an atlas device with one or more `ble_identity` rows.
   - Phone: the identity is attached to the phone's existing device (known from Wi-Fi).
   - Remote or headphones: a new device with no interfaces, like a Phase 1 placeholder.
-- **Candidates.** Unclaimed sources live in memory only. Nothing is persisted.
+- **Candidates.** Unclaimed sources live in memory only. Nothing is persisted (except
+  the salted digests of hidden ones, §5.5).
   - A source is a candidate if it is an iBeacon, or a **stable address**: the address
     is static-random (top two bits `11`), or its OUI is in the vendor database, or it
     has been heard over a span of at least 30 minutes (longer than typical rotation).
@@ -202,6 +203,28 @@ v2 migration are not edited.
 - Device `online` stays network-only. Bluetooth never changes it.
 - "Last heard" for a device is its newest `ble_sighting` row: room (or scanner), time,
   RSSI. It is read at query time; there is no `heard_in_place_id` column (§11).
+
+### 5.5 Hidden devices ("Not mine")
+
+Added 2026-11-11 (schema version 4, migration `store/migrations/0004_ble_hidden.sql`).
+
+- A candidate can be hidden: it is left out of every candidate list (page, API, MCP) and
+  of the weak count. Nothing new is recorded about it (it is unclaimed).
+- **`ble_salt`** — one row (`id` 1, CHECK), `salt` BLOB, 32 random bytes made by the
+  migration.
+- **`ble_hidden`** — `id` INTEGER PRIMARY KEY AUTOINCREMENT, `digest` TEXT NOT NULL
+  UNIQUE, `label` TEXT NOT NULL, `hidden_at` TEXT NOT NULL.
+  - `digest` = HMAC-SHA256(salt, identity key `address:…` / `ibeacon:…`), hex. The raw
+    identity is never stored there or in the change log.
+  - `label` = the advert name at hide time, else the OUI vendor of the address, else
+    "Unnamed device"; at most 80 characters.
+- The runtime keeps the digests and salt in memory, reloaded with the identity index
+  (start and `change.applied`).
+- Privacy limit: the salt is stored next to the digests, so anyone holding the database
+  can test whether a *known* identity is hidden. It only stops the list being read back
+  as addresses or beacon ids.
+- Hiding a claimed identity is refused. Claiming a hidden one (API/MCP; the page does not
+  list it) removes its `ble_hidden` row in the claim's batch.
 
 ## 6. Interfaces
 
@@ -218,7 +241,9 @@ v2 migration are not edited.
   candidate_min_rssi` (default -80 dBm; usually a neighbour's) sit behind a "Show N weak"
   link.
   "Claim" opens a small form: attach to an existing device, or create one with a name
-  and type.
+  and type. Each row has a **Not mine** button (§5.5) that submits a separate hide form
+  (`POST /find/hide`, CSRF, keeps the weak view) and returns with "Hidden <label>. Undo it
+  from History or the Status page."
 - A banner when the HA connection has been down for more than 2 minutes, with the last
   error (redacted).
 - Server-rendered with HTMX, polling every 30 s. No new JS library.
@@ -241,6 +266,8 @@ v2 migration are not edited.
 
 - A "Bluetooth scanners" table on the status page: name, source, linked device, room,
   last seen, and a "Link" control with the suggestions from §5.2.
+- A "Hidden Bluetooth devices" table (label, hidden date, **Unhide**) when any are hidden
+  (§5.5).
 
 ### 6.5 HTTP API (bearer-protected, under `/api/v1`)
 
@@ -251,6 +278,10 @@ v2 migration are not edited.
 - `POST /ble/claim` — `{identity, device_id}` or `{identity, new: {name, type}}`.
 - `DELETE /ble/identities/{id}` — unclaim.
 - `GET /ble/scanners`, `PUT /ble/scanners/{source}/device` — link or unlink.
+- `POST /ble/hide` — `{identity}`, a current candidate (else 404); the label is computed
+  server-side. Returns `{id, label, batch_id}`.
+- `GET /ble/hidden` — `[{id, label, hidden_at}]`, newest first.
+- `DELETE /ble/hidden/{id}` — unhide.
 - Errors follow the existing mapping: KeyError → 404, ValueError → 422,
   UndoConflict → 409.
 
@@ -261,7 +292,9 @@ v2 migration are not edited.
 - `ble_candidates(include_weak=false)` — unclaimed sources, strongest first, with the
   same weak filter as the API.
 - `claim_ble(candidate, device_id | new_name)` — actor `claude`, undoable.
-- `INSTRUCTIONS` mentions the three tools and that rotating-address devices are not
+- `hide_ble(candidate)` — hide a neighbour's device that keeps showing up ("Not mine",
+  §5.5); actor `claude`, undoable.
+- `INSTRUCTIONS` mentions the tools and that rotating-address devices are not
   findable.
 
 ## 7. Undo and change log
@@ -272,6 +305,10 @@ v2 migration are not edited.
   batch. Undo deletes both; the device's sightings go with it (cascade).
 - Unclaim deletes the identity row and logs it, so undo re-inserts it with the same id.
   Sightings stay with the device.
+- Hide and unhide log the `ble_hidden` row (digest and label only) as a row-level
+  creation or deletion. A claim of a hidden identity logs that row's deletion in the
+  claim's batch, so one undo restores both. A later claim, unclaim, hide or unhide of
+  the same identity (same digest) blocks undo (409).
 - Collector writes (`ble_sighting`, `ble_scanner.name`, `ble_scanner.last_seen`) are not
   change-logged, like observations.
 - The existing rules hold: undo refuses (409) when a later batch changed the same

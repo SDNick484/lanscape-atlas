@@ -124,6 +124,11 @@ The script writes an active `[home_assistant]` table (URL, token, `verify_tls`) 
 to the same values, and never prints the token, not even with `--dry-run`. Leave `HA_URL`
 empty to turn Bluetooth off again.
 
+To change the weak-signal cut-off of the candidate list (see *Claiming a device*), add
+`BLE_CANDIDATE_MIN_RSSI` (a whole number of dBm from -127 to 0) to `setup.env`; the script
+validates it and writes it as `candidate_min_rssi` in the `[bluetooth]` table. Unset keeps
+the default, -80.
+
 **Manual install.** Edit `config.toml` with `vim`, uncomment the table and fill it in,
 then restart the service:
 
@@ -172,11 +177,22 @@ address, or one heard steadily for 30 minutes). Press a remote's button, or hold
 next to a proxy, and its signal strength stands out. Candidates are listed strongest
 signal first; those weaker than `candidate_min_rssi` (default -80 dBm), usually a
 neighbour's, are hidden behind a **Show N weak** link (the API and MCP take
-`include_weak`). Each candidate shows the scanner that heard it by name (and room, once
+`include_weak`; their candidate list carries `min_rssi` and `weak_hidden`, the number of
+weak candidates left out). Each candidate shows the scanner that heard it by name (and room, once
 the scanner is linked). Select the candidate, then
 under **Claim the selected candidate** either attach it to an existing device or create a
 new one (name and type), and press **Claim**. Claims are in History and can
 be undone; the device page has an **Unclaim** button.
+
+A neighbour's device that keeps showing up can be hidden with its row's **Not mine**
+button. It disappears from the candidate list (and is not counted in **Show N weak**), and
+atlas records nothing about it, as for any unclaimed device. Only a salted digest of its
+identity and a label (its advert name, else the vendor of its address, else "Unnamed
+device") are stored. Hidden devices are listed on the **Status** page under **Hidden
+Bluetooth devices**, each with an **Unhide** button; a hide is also in History and can be
+undone. API: `POST /api/v1/ble/hide` with `{"identity": ...}` (a current candidate),
+`GET /api/v1/ble/hidden` and `DELETE /api/v1/ble/hidden/{id}`. MCP: `hide_ble`. Claiming a
+hidden device through the API or MCP unhides it, in the same undoable batch.
 
 ### Linking scanners
 
@@ -439,7 +455,7 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
 `claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
-`get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`.
+`get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`, `hide_ble`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
 its own batch and can be undone like any other change. Tool output never includes
