@@ -44,7 +44,7 @@
     <td class="scanner" title="{{ c.source }}">{% if c.scanner_name %}{{ c.scanner_name }}{% else %}<span class="mono">{{ c.source }}</span>{% endif %}{% if c.scanner_room %} <span class="muted">{{ c.scanner_room }}</span>{% endif %}</td>
     <td>{{ c.age }}</td>
     <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
-    <td><button type="submit" class="secondary" form="hide-form" name="identity" value="{{ c.identity }}" title="Hide it from this list (e.g. a neighbour's device)">Not mine</button></td>
+    <td><button type="submit" class="secondary" form="hide-form" name="identity" value="{{ c.identity }}" aria-label="Not mine: {{ c.identity }}" title="Hide it from this list (e.g. a neighbour's device)">Not mine</button></td>
   </tr>
   {% else %}
   <tr><td colspan="8" class="empty">{% if weak_count and not show_weak %}No candidates at or above {{ min_rssi }} dBm.{% else %}No candidates right now.{% endif %}</td></tr>

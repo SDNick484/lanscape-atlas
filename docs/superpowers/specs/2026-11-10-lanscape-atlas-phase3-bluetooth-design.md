@@ -215,7 +215,12 @@ Added 2026-11-11 (schema version 4, migration `store/migrations/0004_ble_hidden.
 - **`ble_hidden`** — `id` INTEGER PRIMARY KEY AUTOINCREMENT, `digest` TEXT NOT NULL
   UNIQUE, `label` TEXT NOT NULL, `hidden_at` TEXT NOT NULL.
   - `digest` = HMAC-SHA256(salt, identity key `address:…` / `ibeacon:…`), hex. The raw
-    identity is never stored there or in the change log.
+    identity is never stored in `ble_hidden` or in hide/unhide change rows. An identity
+    that was ever claimed keeps its raw value in that claim's (and unclaim's) change rows,
+    as every claim does.
+  - Undo follows the general rule: an undo is refused (409) when a later live change
+    touched the same identity (by digest), even where re-applying would happen to
+    succeed; undoing in reverse order always works.
   - `label` = the advert name at hide time, else the OUI vendor of the address, else
     "Unnamed device"; at most 80 characters.
 - The runtime keeps the digests and salt in memory, reloaded with the identity index

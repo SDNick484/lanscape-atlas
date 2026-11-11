@@ -188,7 +188,8 @@ A neighbour's device that keeps showing up can be hidden with its row's **Not mi
 button. It disappears from the candidate list (and is not counted in **Show N weak**), and
 atlas records nothing about it, as for any unclaimed device. Only a salted digest of its
 identity and a label (its advert name, else the vendor of its address, else "Unnamed
-device") are stored. Hidden devices are listed on the **Status** page under **Hidden
+device") are stored for the hide (a device you once claimed keeps its address in that
+claim's History entry). Hidden devices are listed on the **Status** page under **Hidden
 Bluetooth devices**, each with an **Unhide** button; a hide is also in History and can be
 undone. API: `POST /api/v1/ble/hide` with `{"identity": ...}` (a current candidate),
 `GET /api/v1/ble/hidden` and `DELETE /api/v1/ble/hidden/{id}`. MCP: `hide_ble`. Claiming a
