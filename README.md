@@ -470,7 +470,9 @@ examples use only:
 Tools:
 
 - `scripts/check_leaks.py` fails on MAC addresses outside the documentation range,
-  private (RFC 1918) IPv4 addresses, and any term from your personal denylist. The
+  128-bit UUIDs other than `00000000-0000-4000-8000-0000000000xx` and the Bluetooth base
+  (`xxxxxxxx-0000-1000-8000-00805f9b34fb`), private (RFC 1918) IPv4 addresses, and any
+  term from your personal denylist. The
   pre-commit hook runs it on staged files; CI runs it on the whole repository.
 - The optional denylist lives **outside the repository** at
   `~/.config/lanscape-atlas/denylist.txt` (one term per line, `#` comments). Put your
@@ -500,8 +502,12 @@ Tools:
   ```
 
   Every address and scanner source becomes `00:00:5e:00:53:xx` and every iBeacon UUID
-  `00000000-0000-4000-8000-0000000000xx`, consistently within the capture. Other manufacturer
-  payloads are copied as they are; review them by hand.
+  `00000000-0000-4000-8000-0000000000xx`, consistently within the capture. That includes the
+  iBeacon frame and the local name inside HA's `raw` hex (a `raw` that does not parse is
+  blanked), MACs inside any string, custom service UUIDs (dashed, or as a bare 32-hex-digit
+  string) and `service_data` keys. Advert local names often contain personal names ("Alex's
+  phone"), so pass `--names` with them too. Other manufacturer payloads and `service_data`
+  values are copied as they are; review them by hand.
 
 Neither tool detects bare 12-hex-digit MACs without separators (for example
 `aabbccddeeff`). Review such values by hand before committing.

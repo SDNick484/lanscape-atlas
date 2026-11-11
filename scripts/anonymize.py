@@ -39,8 +39,18 @@ JSON lines are not accepted. The output is the same list, pretty-printed. Rewrit
   Bluetooth base (``-0000-1000-8000-00805f9b34fb``), maps to
   ``00000000-0000-4000-8000-0000000000xx`` (256 slots; more raises ``ValueError``). The
   iBeacon major, minor and TX power are kept.
-* ``name`` goes through ``--names`` like free text. Other manufacturer payloads and
-  ``service_data`` are copied as they are: review them by hand.
+* ``raw`` (HA's advert bytes as hex) is parsed as Bluetooth AD structures: the UUID of an
+  Apple iBeacon structure (``ff 4c 00 02 15``) is rewritten with the same mapping as
+  ``manufacturer_data``, and local-name structures (types 0x08/0x09) go through ``--names``
+  and the MAC/UUID rewriting below. A ``raw`` that does not parse is blanked (``""``).
+* Every other string value, and every dict key (``service_data`` UUIDs), goes through
+  ``--names``, then every MAC in it maps like ``address`` (style kept), then every dashed UUID
+  maps as above. A string that is exactly a dashless 32-hex-digit UUID token maps to the
+  dashless documentation UUID (case kept), except ``service_data`` and ``manufacturer_data``
+  values, which are payloads.
+* Advert local names often contain personal names ("Alex's phone"): pass ``--names``.
+  Other manufacturer payloads and ``service_data`` values are copied as they are, apart from
+  MACs in them: review them by hand.
 
 The mapping is deterministic per ``Anonymizer`` instance and never written to disk, so keep
 the real input out of the repository. Run ``scripts/check_leaks.py`` on the output.
@@ -69,7 +79,11 @@ _UUID_RE = re.compile(
     r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
     r"(?![0-9A-Fa-f])"
 )
+_HEX32_RE = re.compile(r"[0-9A-Fa-f]{32}")
 _BT_BASE_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+_IBEACON_AD_PREFIX = bytes.fromhex("4c000215")  # Apple company id (LE), iBeacon type, length
+_AD_MANUFACTURER = 0xFF
+_AD_NAMES = (0x08, 0x09)  # shortened / complete local name
 _APPLE_KEY = "76"
 _IBEACON_HEX_PREFIX = "0215"
 _BLE_UUID_FMT = "00000000-0000-4000-8000-0000000000{:02x}"
@@ -170,14 +184,73 @@ class Anonymizer:
             return low[:4] + new + low[36:]
         return value
 
-    def _ble_value(self, value: Any) -> Any:
+    def _sub_ble_mac(self, m: re.Match[str]) -> str:
+        raw = m.group()
+        new = self.ble_address(raw)
+        if "." in raw:
+            d = new.replace(":", "")
+            new = f"{d[0:4]}.{d[4:8]}.{d[8:12]}"
+        elif "-" in raw:
+            new = new.replace(":", "-")
+        return new.upper() if raw.upper() == raw and raw.lower() != raw else new
+
+    def _ble_text(self, text: str, *, payload: bool = False) -> str:
+        """Names, then MACs, then UUIDs; a whole-string dashless UUID token unless a payload."""
+        text = _MAC_RE.sub(self._sub_ble_mac, self.transform_names(text))
+        if not payload and _HEX32_RE.fullmatch(text):
+            new = self.ble_uuid(str(uuid.UUID(hex=text))).replace("-", "")
+            return new.upper() if text.upper() == text and text.lower() != text else new
+        return self._ble_string(text)
+
+    def _ble_value(self, value: Any, *, payload: bool = False) -> Any:
         if isinstance(value, str):
-            return self._ble_string(self.transform_names(value))
+            return self._ble_text(value, payload=payload)
         if isinstance(value, list):
-            return [self._ble_value(v) for v in value]
+            return [self._ble_value(v, payload=payload) for v in value]
         if isinstance(value, dict):
-            return {k: self._ble_value(v) for k, v in value.items()}
+            return {
+                (self._ble_text(k) if isinstance(k, str) else k): self._ble_value(
+                    v, payload=payload
+                )
+                for k, v in value.items()
+            }
         return value
+
+    def _ble_raw(self, value: str) -> str:
+        """Rewrite HA's ``raw`` advert hex; ``""`` if it does not parse as AD structures."""
+        try:
+            data = bytes.fromhex(value)
+        except ValueError:
+            return ""
+        out = bytearray()
+        i = 0
+        while i < len(data):
+            length = data[i]
+            if length == 0:  # padding: only zeros may follow
+                if any(data[i:]):
+                    return ""
+                out += data[i:]
+                break
+            end = i + 1 + length
+            if end > len(data):
+                return ""
+            ad_type, body = data[i + 1], data[i + 2 : end]
+            if ad_type == _AD_MANUFACTURER and body.startswith(_IBEACON_AD_PREFIX):
+                if len(body) < len(_IBEACON_AD_PREFIX) + 16:
+                    return ""
+                real = str(uuid.UUID(bytes=bytes(body[4:20])))
+                body = body[:4] + uuid.UUID(self.ble_uuid(real)).bytes + body[20:]
+            elif ad_type in _AD_NAMES:
+                try:
+                    name = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    return ""
+                body = self._ble_text(name).encode("utf-8")
+                if len(body) > 253:
+                    return ""
+            out += bytes([len(body) + 1, ad_type]) + body
+            i = end
+        return out.hex()
 
     def transform_adverts(self, adverts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Rewrite a list of Home Assistant advert dicts (see the module docstring)."""
@@ -187,6 +260,10 @@ class Anonymizer:
             for k, v in adv.items():
                 if k in ("address", "source") and isinstance(v, str):
                     new[k] = self.ble_address(v)
+                elif k == "raw" and isinstance(v, str):
+                    new[k] = self._ble_raw(v)
+                elif k == "service_data" and isinstance(v, dict):
+                    new[k] = self._ble_value(v, payload=True)
                 elif k == "manufacturer_data" and isinstance(v, dict):
                     new[k] = {
                         mk: self._ble_manufacturer_hex(str(mk), mv) if isinstance(mv, str) else mv

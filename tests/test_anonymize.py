@@ -272,3 +272,115 @@ def test_ble_cli_roundtrip(tmp_path: Path) -> None:
         check=False,
     )
     assert res.returncode == 1 and "list" in res.stderr
+
+
+# ------------------------------------------- BLE: raw frames, MACs in strings, UUID tokens
+
+
+def _ad(ad_type: int, body: bytes) -> bytes:
+    return bytes([len(body) + 1, ad_type]) + body
+
+
+def _raw_frame(uid: str, name: str) -> str:
+    beacon = bytes.fromhex("4c000215") + uuid.UUID(uid).bytes + bytes.fromhex("00010002c5")
+    flags = _ad(0x01, b"\x06")
+    return (flags + _ad(0xFF, beacon) + _ad(0x09, name.encode())).hex()
+
+
+def _parse_ads(hex_text: str) -> list[tuple[int, bytes]]:
+    data, out, i = bytes.fromhex(hex_text), [], 0
+    while i < len(data):
+        n = data[i]
+        out.append((data[i + 1], data[i + 2 : i + 1 + n]))
+        i += 1 + n
+    return out
+
+
+def test_raw_ibeacon_uuid_rewritten_like_manufacturer_data() -> None:
+    real = _real_uuid(1)
+    adv = {
+        "address": mac(*UNI),
+        "source": mac(0x24, 0x6F, 0x28, 0x01, 0x02, 0x03),
+        "name": "Den Remote",
+        "manufacturer_data": {"76": _ibeacon_hex(real)},
+        "raw": _raw_frame(real, "Den Remote"),
+        "time": 1.0,
+    }
+    (out,) = Anonymizer("s", names=["Den Remote"]).transform_adverts([adv])
+    mapped = out["manufacturer_data"]["76"][4:36]
+    ads = dict(_parse_ads(out["raw"]))  # still a valid AD sequence
+    assert ads[0x01] == b"\x06"
+    assert ads[0xFF][:4] == bytes.fromhex("4c000215")
+    assert ads[0xFF][4:20].hex() == mapped  # same mapping as manufacturer_data
+    assert ads[0xFF][20:] == bytes.fromhex("00010002c5")  # major, minor, tx kept
+    assert ads[0x09] == b"host-1"  # the local name inside raw goes through --names too
+    text = json.dumps(out).lower()
+    assert real.replace("-", "") not in text and "den remote" not in text
+    assert "44656e2052656d6f7465" not in text  # "Den Remote" as hex
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["zz", "0201060", "1aff4c000215", "02010605ff4c0002", "020106000001", "07ff4c0002150102"],
+    ids=["not-hex", "odd", "truncated-ad", "short-ad", "junk-after-pad", "short-ibeacon"],
+)
+def test_unparseable_raw_is_blanked(raw: str) -> None:
+    (out,) = Anonymizer("s").transform_adverts(
+        [{"address": mac(*UNI), "source": mac(*UNI), "raw": raw, "time": 1.0}]
+    )
+    assert out["raw"] == ""
+
+
+def test_raw_without_ibeacon_and_none_raw() -> None:
+    plain = (_ad(0x01, b"\x06") + _ad(0xFF, bytes.fromhex("0600010203"))).hex()
+    padded = plain + "0000"
+    out = Anonymizer("s").transform_adverts(
+        [
+            {"address": mac(*UNI), "source": mac(*UNI), "raw": plain},
+            {"address": mac(*UNI), "source": mac(*UNI), "raw": padded},
+            {"address": mac(*UNI), "source": mac(*UNI), "raw": None},
+        ]
+    )
+    assert [o["raw"] for o in out] == [plain, padded, None]
+
+
+def test_macs_in_any_string_value_rewritten_consistently() -> None:
+    tag = mac(0xC1, 0x11, 0x22, 0x33, 0x44, 0x55)  # static random, built at runtime
+    adv = {
+        "address": tag,
+        "source": mac(0x24, 0x6F, 0x28, 0x01, 0x02, 0x03),
+        "name": f"Tag {tag.upper().replace(':', '-')}",
+        "service_data": {"0000feaa-0000-1000-8000-00805f9b34fb": f"{mac(*UNI)}", "x": "0a0b"},
+        "time": 1.0,
+    }
+    (out,) = Anonymizer("s").transform_adverts([adv])
+    assert out["name"] == "Tag " + out["address"].upper().replace(":", "-")
+    sd = out["service_data"]
+    assert sd["0000feaa-0000-1000-8000-00805f9b34fb"].startswith("00:00:5e:00:53:")
+    assert sd["x"] == "0a0b"  # service data hex is left alone
+    assert find_leaks(json.dumps(out), "cap.json", set()) == []
+
+
+def test_uuid_tokens_rewritten_dashless_and_in_keys() -> None:
+    real_dashless = _real_uuid(3).replace("-", "")
+    custom_service = _real_uuid(4)
+    payload = "ab" * 16  # a 16-byte service data payload is not a UUID token
+    adv = {
+        "address": mac(*UNI),
+        "source": mac(*UNI),
+        "service_uuids": [real_dashless.upper(), "0000180f-0000-1000-8000-00805f9b34fb"],
+        "service_data": {custom_service: payload},
+        "time": 1.0,
+    }
+    a = Anonymizer("s")
+    (out,) = a.transform_adverts([adv])
+    token = out["service_uuids"][0]
+    assert re.fullmatch(r"00000000000040008000000000000[0-9A-F]{3}", token)
+    assert token.lower() == a.ble_uuid(_real_uuid(3)).replace("-", "")
+    assert out["service_uuids"][1] == "0000180f-0000-1000-8000-00805f9b34fb"
+    (key,) = out["service_data"]
+    assert key == a.ble_uuid(custom_service)
+    assert out["service_data"][key] == payload
+    text = json.dumps(out).lower()
+    assert real_dashless not in text and custom_service not in text
+    assert find_leaks(json.dumps(out), "cap.json", set()) == []

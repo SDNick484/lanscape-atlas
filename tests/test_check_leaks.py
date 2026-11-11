@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -273,3 +274,38 @@ def test_empty_leak_denylist_env_fails(tmp_git_repo, run_check_leaks, isolated_e
     result = run_check_leaks(tmp_git_repo)
     assert result.returncode != 0
     assert "LANSCAPE_LEAK_DENYLIST" in result.stderr
+
+
+# 128-bit UUIDs: only the documentation UUIDs and the Bluetooth base are allowed. Real-looking
+# ones are built at runtime so this file stays clean.
+REAL_UUID = str(uuid.UUID(int=0x1234_5678_9ABC_4DEF_8123_4567_89AB_CDEF))
+
+
+@pytest.mark.parametrize("text", [REAL_UUID, REAL_UUID.upper(), f"ibeacon:{REAL_UUID}/1/2"])
+def test_real_uuid_flagged(text):
+    (leak,) = find_leaks(f"x = {text!r}", "x.py", set())
+    assert "UUID" in leak
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "00000000-0000-4000-8000-0000000000ab",
+        "00000000-0000-4000-8000-0000000000AB",
+        "0000180f-0000-1000-8000-00805f9b34fb",
+        "0000FEAA-0000-1000-8000-00805F9B34FB",
+        "00000000-0000-4000-8000-000000000001/1/2",
+    ],
+)
+def test_doc_and_bluetooth_base_uuids_allowed(text):
+    assert find_leaks(f"x = {text!r}", "x.py", set()) == []
+
+
+def test_near_doc_uuid_flagged():
+    doc = "00000000-0000-4000-8000-"
+    assert find_leaks(doc + "0000000001ab", "x.py", set())  # built at runtime: keeps
+    assert find_leaks(doc + "1000000000ab", "x.py", set())  # this file clean
+
+
+def test_uuid_flagged_in_ip_exempt_path():
+    assert find_leaks(REAL_UUID, "docs/superpowers/specs/x.md", set())

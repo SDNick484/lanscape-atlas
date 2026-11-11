@@ -11,6 +11,9 @@ The optional denylist (one term per line, ``#`` comments, case-insensitive) is r
 source (e.g. room names) with the same rules and is also fail-closed; terms from all
 sources are merged.
 
+MAC addresses, 128-bit UUIDs (other than the documentation UUIDs and the Bluetooth base) and
+denylist terms are flagged in every file; only the private-IPv4 check has a path allow-list.
+
 Image files (.png .jpg .jpeg .svg .gif .webp) must never be committed, whether found by
 the default ``git ls-files`` scan or passed as explicit paths (pre-commit). Only paths
 under ``docs/screenshots/`` (synthetic renders) are exempt.
@@ -50,6 +53,16 @@ MAC_RE = re.compile(
     r"|(?<![0-9A-Fa-f.])(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])"
 )
 IPV6_CANDIDATE_RE = re.compile(r"[0-9A-Fa-f:.]*::[0-9A-Fa-f:.]*")
+# 128-bit UUIDs (iBeacon UUIDs, custom service UUIDs) identify real devices. Allowed: the
+# documentation UUIDs 00000000-0000-4000-8000-0000000000xx and anything on the Bluetooth
+# base UUID (xxxxxxxx-0000-1000-8000-00805f9b34fb, the 16/32-bit assigned numbers).
+UUID_RE = re.compile(
+    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}"
+    r"-[0-9A-Fa-f]{12}(?![0-9A-Fa-f])"
+)
+ALLOWED_UUID_RE = re.compile(
+    r"00000000-0000-4000-8000-0000000000[0-9a-f]{2}|[0-9a-f]{8}-0000-1000-8000-00805f9b34fb"
+)
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
 
 
@@ -137,6 +150,9 @@ def find_leaks(text: str, path: str, denylist: set[str]) -> list[str]:
             digits = re.sub(r"[^0-9a-f]", "", m.group().lower())
             if digits not in PLACEHOLDER_MACS and not digits.startswith(ALLOWED_MAC_PREFIXES):
                 found.append(f"{path}:{lineno}: MAC address outside documentation range")
+        for m in UUID_RE.finditer(line):
+            if not ALLOWED_UUID_RE.fullmatch(m.group().lower()):
+                found.append(f"{path}:{lineno}: UUID outside the documentation range")
         if check_ips:
             for m in IPV4_RE.finditer(line):
                 if _ip_is_leak(m.group()):
