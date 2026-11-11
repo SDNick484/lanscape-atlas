@@ -31,7 +31,7 @@ class HomeAssistantSettings:
 class BluetoothSettings:
     retention_days: int = 14
     flush_s: int = 60
-    snapshot_s: int = 60  # re-subscribe interval: HA replays its advert history each time
+    snapshot_s: int = 30  # re-subscribe interval: HA replays its advert history each time
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
     bluetooth = BluetoothSettings(
         retention_days=_get(bt, "retention_days", int, 14, "bluetooth."),
         flush_s=_get(bt, "flush_s", int, 60, "bluetooth."),
-        snapshot_s=_get(bt, "snapshot_s", int, 60, "bluetooth."),
+        snapshot_s=_get(bt, "snapshot_s", int, 30, "bluetooth."),
     )
     for key, val in (
         ("retention_days", bluetooth.retention_days),

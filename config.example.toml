@@ -30,11 +30,12 @@ use_ssl = true
 # Optional: Bluetooth sighting retention (days) for the nightly prune, and how often (seconds)
 # atlas re-subscribes to Home Assistant's advert stream. HA only pushes an advert when its
 # payload changes, so each re-subscribe replays HA's latest advert per device (a snapshot);
-# "last heard" is accurate to about one snapshot interval. Keep it at 60 or below (the
-# "steady" badge needs a sighting in 48 of the last 60 minutes).
+# "last heard" is accurate to about one snapshot interval. Keep it at 30 or below (the
+# "steady" badge needs a sighting in 48 of the last 60 minutes; at 60 snapshots drift
+# against minute boundaries and steady devices can look intermittent).
 [bluetooth]
 retention_days = 14
-snapshot_s = 60
+snapshot_s = 30
 
 [collectors.asusrouter]
 enabled = true

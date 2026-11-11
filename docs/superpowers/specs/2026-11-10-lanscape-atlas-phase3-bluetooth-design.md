@@ -29,7 +29,7 @@ The design says plainly what is findable. It does not promise every Bluetooth de
 
 | Kind | How it is matched | What "last heard" means |
 |---|---|---|
-| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (§4.2, default 60 s). Lags if Android battery optimisation throttles the app. |
+| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (§4.2, default 30 s). Lags if Android battery optimisation throttles the app. |
 | Beaconing remote (advertises every few seconds) | Static or public address | Current, to about one snapshot interval. |
 | Press-to-advertise remote | Static or public address | When it was last pressed. |
 | Headphones with a stable address | Static or public address | Last time they were idle and nearby. Many go silent while connected. |
@@ -74,7 +74,7 @@ steady beacon, remote or phone iBeacon therefore produces about one event, ever.
 Registering the subscription replays the current history as one `add` batch right after
 the result. atlas builds on that:
 
-- **Snapshot re-subscribe.** After the handshake, every `snapshot_s` seconds (default 60,
+- **Snapshot re-subscribe.** After the handshake, every `snapshot_s` seconds (default 30,
   §8) atlas sends `unsubscribe_events` for the current advert subscription and then a new
   `bluetooth/subscribe_advertisements`; the replay that follows is the snapshot. Command
   ids keep increasing per connection. Events for a replaced subscription id are ignored. A
@@ -283,7 +283,7 @@ v2 migration are not edited.
 
   [bluetooth]
   retention_days = 14
-  snapshot_s = 60     # advert re-subscribe interval (§4.2)
+  snapshot_s = 30     # advert re-subscribe interval (§4.2); 60 aliases against the per-minute steady badge
   ```
 
 - Storage: at most one row per claimed device per scanner per minute heard. Worst case,

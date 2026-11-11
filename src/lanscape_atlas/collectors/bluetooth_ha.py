@@ -78,7 +78,7 @@ class HaBluetoothClient:
         *,
         backoff_s: tuple[float, ...] = (1, 2, 5, 15, 60),
         handshake_timeout_s: float = 30,
-        snapshot_s: float = 60,
+        snapshot_s: float = 30,
         snapshot_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._settings = settings

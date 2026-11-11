@@ -88,7 +88,7 @@ that stream over HA's WebSocket API; it does not talk to the proxies itself.
 
 Home Assistant only pushes an advert when its content changes (a steady beacon is pushed
 about once), but it replays its latest advert per device whenever a subscription starts.
-So lanscape-atlas re-subscribes every `snapshot_s` seconds (default 60) and reads that
+So lanscape-atlas re-subscribes every `snapshot_s` seconds (default 30) and reads that
 replay as a snapshot. Each advert is placed at the time Home Assistant heard it, corrected
 for any clock difference between the two hosts, and a replayed advert is never counted
 twice. "Last heard" is therefore accurate to about one snapshot interval.
@@ -136,11 +136,12 @@ verify_tls = true
 [bluetooth]
 retention_days = 14   # nightly prune of per-minute sightings
 flush_s = 60          # how often closed minutes are written to the database
-snapshot_s = 60       # how often Home Assistant's latest adverts are re-read (see above)
+snapshot_s = 30       # how often Home Assistant's latest adverts are re-read (see above)
 ```
 
-Keep `snapshot_s` at 60 or below: the *steady* badge needs a sighting in 48 of the last 60
-minutes, so a longer interval makes every device look intermittent.
+Keep `snapshot_s` at 30 or below: the *steady* badge needs a sighting in 48 of the last 60
+minutes, and at 60 the snapshots drift against the minute boundaries, so a device that
+advertises every 20–30 s can miss whole minutes and look intermittent.
 
 The `LANSCAPE_HA_TOKEN` environment variable overrides `token`, but only in the
 environment the service actually runs in: exporting it in your shell does not reach the
@@ -186,7 +187,7 @@ without a room.
 
 | Kind | How it is matched | What "last heard" means |
 |---|---|---|
-| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (default 60 s). Lags if Android battery optimisation throttles the app. |
+| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (default 30 s). Lags if Android battery optimisation throttles the app. |
 | Beaconing remote (advertises every few seconds) | Static or public address | Current, to about one snapshot interval. |
 | Press-to-advertise remote | Static or public address | When it was last pressed. |
 | Headphones with a stable address | Static or public address | Last time they were idle and nearby. Many go silent while connected. |
