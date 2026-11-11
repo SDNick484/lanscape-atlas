@@ -53,6 +53,7 @@ from lanscape_atlas.service import Service, StaleWrite, UndoConflict
 from lanscape_atlas.store.db import migrate, open_db
 from lanscape_atlas.web import floorplan, pages
 from lanscape_atlas.web.api import router as api_router
+from lanscape_atlas.web.ble_api import router as ble_router
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
@@ -166,9 +167,10 @@ async def _undo_conflict(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, UndoConflict)
     if _is_page(request):
         return pages.error_page(request, 409, str(exc))
-    return JSONResponse(
-        {"detail": "conflict", "conflicting": list(exc.conflicting)}, status_code=409
-    )
+    body: dict[str, Any] = {"detail": "conflict", "conflicting": list(exc.conflicting)}
+    if exc.reason:
+        body["reason"] = exc.reason
+    return JSONResponse(body, status_code=409)
 
 
 async def _stale_write(request: Request, exc: Exception) -> Response:
@@ -470,7 +472,7 @@ def create_app(
     async def scanner(device_id: int) -> None:
         start_deep_scan(app.state, device_id)
 
-    mcp_server = build_mcp(service, scanner)
+    mcp_server = build_mcp(service, scanner, lambda: app.state.bluetooth)
     app.state.mcp = mcp_server
     # Both spellings are served directly: a POST redirect is not reliably followed.
     endpoint = _McpEndpoint(mcp_server)
@@ -480,6 +482,7 @@ def create_app(
 
     app.include_router(api_router)
     app.include_router(floorplan_router)
+    app.include_router(ble_router)
     app.include_router(floorplan.router)
     pages.install(app)
     return app
