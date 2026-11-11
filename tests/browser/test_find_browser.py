@@ -17,10 +17,11 @@ from conftest import FixedClock
 from helpers.floorplan_fixtures import dev_position, drag_to_room_centre
 from helpers.plan import SQ_POINTS, png_bytes
 from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, Candidate, MinuteRow
-from lanscape_atlas.bluetooth.match import Identity
+from lanscape_atlas.bluetooth.match import Identity, hidden_digest
 from lanscape_atlas.collectors.bluetooth_ha import ClientStatus
 from lanscape_atlas.config import Settings
 from lanscape_atlas.service import Placement, Service
+from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.web.app import create_app
 
 pytest.importorskip("playwright.sync_api")
@@ -168,11 +169,23 @@ class _Candidates:
 
 
 class _StubRuntime:
-    def __init__(self, items: list[Candidate]) -> None:
+    def __init__(self, items: list[Candidate], svc: Service | None = None) -> None:
         self.aggregator = _Candidates(items)
+        self._svc = svc
 
     def status(self) -> ClientStatus:
         return ClientStatus(True, None, None)
+
+    def is_hidden(self, identity: Identity) -> bool:
+        """Reads the hidden list live (the real runtime reloads it on change.applied)."""
+        if self._svc is None:
+            return False
+        with self._svc.lock:
+            conn = self._svc.conn
+            return hidden_digest(bq.ble_salt(conn), identity) in bq.hidden_digests(conn)
+
+    def vendor(self, address: str) -> str | None:
+        return None
 
 
 def test_shared_claim_form_claims_the_selected_candidate(
@@ -196,3 +209,39 @@ def test_shared_claim_form_claims_the_selected_candidate(
         "SELECT kind, value, device_id FROM ble_identity WHERE device_id = ?", (world.spare,)
     ).fetchone()
     assert (row["kind"], row["value"]) == ("address", tags[1].value)
+
+
+def test_not_mine_hides_the_row_and_enter_still_claims(
+    page: Any, world: World, clock: FixedClock
+) -> None:
+    now = clock()
+    tags = [Identity("address", f"00:00:5e:00:53:{i}") for i in ("41", "42", "43")]
+    names = ["Neighbour tag", "Keys tag", "Other tag"]
+    world.app.state.bluetooth = _StubRuntime(
+        [
+            Candidate(t, n, -50, SCANNER_B, now, now, 3, None)
+            for t, n in zip(tags, names, strict=True)
+        ],
+        world.svc,
+    )
+    page.goto(f"{world.base}/find")
+    assert page.get_by_role("button", name="Not mine").count() == 3
+    # Select another row first: Not mine must hide its own row, not the selected one.
+    page.locator(f"input[type=radio][value='{tags[1].key()}']").check()
+    row = page.locator("tr", has=page.locator(f"input[type=radio][value='{tags[0].key()}']"))
+    row.get_by_role("button", name="Not mine").click()
+    page.wait_for_url("**/find?hidden=*")
+    assert "Hidden Neighbour tag." in page.locator(".flash.ok").inner_text()
+    assert page.locator(f"input[type=radio][value='{tags[0].key()}']").count() == 0
+    assert page.get_by_role("button", name="Not mine").count() == 2
+    # Enter in a claim field submits Claim (the form's default button), not Not mine.
+    page.locator(f"input[type=radio][value='{tags[1].key()}']").check()
+    page.locator("input[name=new_name]").fill("Keys")
+    page.locator("input[name=new_type]").fill("tag")
+    page.locator("input[name=new_type]").press("Enter")
+    page.wait_for_url("**/find?claimed=*")
+    assert "Claimed as Keys" in page.locator(".flash.ok").inner_text()
+    conn = world.svc.conn
+    assert conn.execute("SELECT count(*) FROM ble_hidden").fetchone()[0] == 1
+    claimed = conn.execute("SELECT value FROM ble_identity WHERE value = ?", (tags[1].value,))
+    assert claimed.fetchone() is not None

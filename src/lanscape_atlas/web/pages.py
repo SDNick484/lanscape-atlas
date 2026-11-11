@@ -672,14 +672,20 @@ SCANNER_FLASH = {
 }
 
 
+UNHIDDEN_FLASH = "Unhidden. It is listed on Find again while it is in range."
+
+
 @router.get("/status", response_class=HTMLResponse)
-def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
+def status_page(
+    request: Request, scanner: str | None = None, unhidden: str | None = None
+) -> HTMLResponse:
     svc = _service(request)
     now = svc.clock()
     with svc.lock:
         collectors = q.collector_status(svc.conn)
         counts = q.device_counts(svc.conn)
         scanners = bq.scanners(svc.conn)
+        hidden = bq.hidden(svc.conn)
         devices = (
             q.list_devices(svc.conn, limit=DEVICE_LIMIT, window_min=svc.ip_match_window_min)
             if scanners
@@ -696,7 +702,7 @@ def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
         }
         for s in scanners
     ]
-    msg = SCANNER_FLASH.get(scanner or "")
+    msg = UNHIDDEN_FLASH if unhidden == "1" else SCANNER_FLASH.get(scanner or "")
     return render(
         request,
         "status.html",
@@ -705,6 +711,7 @@ def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
             "collectors": collectors,
             "counts": counts,
             "scanners": rows,
+            "hidden": hidden,
             "flash": ("ok", msg) if msg else None,
         },
     )
@@ -722,6 +729,12 @@ def status_link_scanner(request: Request, scanner_id: PathId, form: Form) -> Res
     batch = _service(request).link_scanner(ACTOR, scanner_id, device_id)
     outcome = "unchanged" if batch == 0 else ("linked" if device_id is not None else "unlinked")
     return _redirect(request, f"/status?scanner={outcome}")
+
+
+@router.post("/status/ble-hidden/{hidden_id}/unhide", response_model=None)
+def status_unhide_ble(request: Request, hidden_id: PathId, form: Form) -> Response:
+    _service(request).unhide_ble(ACTOR, hidden_id)
+    return _redirect(request, "/status?unhidden=1")
 
 
 def install(app: FastAPI) -> None:
