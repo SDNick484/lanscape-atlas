@@ -502,15 +502,15 @@ def last_placement_batch(conn: sqlite3.Connection, device_id: int) -> int:
 
 
 def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:
-    """Newest sighting per device within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
-    out: dict[int, dict[str, Any]] = {}
-    for r in conn.execute(
-        "SELECT device_id, place_id, last_at FROM ble_sighting WHERE last_at >= ?"
-        " ORDER BY last_at DESC, max_rssi DESC, scanner_id ASC",
+    """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
+    rows = conn.execute(
+        "SELECT device_id, place_id, last_at FROM ("
+        " SELECT device_id, place_id, last_at, ROW_NUMBER() OVER ("
+        "  PARTITION BY device_id ORDER BY last_at DESC, max_rssi DESC, scanner_id ASC) AS rn"
+        " FROM ble_sighting) WHERE rn = 1 AND last_at >= ?",
         (iso(now - timedelta(hours=24)),),
-    ):
-        out.setdefault(r["device_id"], {"place_id": r["place_id"], "at": r["last_at"]})
-    return out
+    )
+    return {r["device_id"]: {"place_id": r["place_id"], "at": r["last_at"]} for r in rows}
 
 
 def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any]:

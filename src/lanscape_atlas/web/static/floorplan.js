@@ -291,10 +291,10 @@
     }
     clear(trayEl);
     var needle = filterEl ? filterEl.value.trim().toLowerCase() : "";
-    var groups = rooms.map(function (r) { return { room: r, name: r.name, items: [] }; });
+    var groups = rooms.map(function (r) { return { room: r, name: r.name, items: [], heardOnly: [] }; });
     var byRoom = {};
     groups.forEach(function (g) { byRoom[g.room.id] = g; });
-    var unassigned = { room: null, name: "Unassigned", items: [] };
+    var unassigned = { room: null, name: "Unassigned", items: [], heardOnly: [] };
     var total = 0;
     order.forEach(function (id) {
       var d = devices[id];
@@ -308,19 +308,34 @@
       var g = d.place_id !== null && byRoom[d.place_id] ? byRoom[d.place_id] : unassigned;
       g.items.push(d);
     });
+    // Devices heard in a room that are not already in that room's tray (placed or
+    // trayed elsewhere): a non-draggable "heard" entry in the room they were heard in.
+    order.forEach(function (id) {
+      var d = devices[id];
+      var h = d.heard;
+      var g = h && h.place_id !== null && h.place_id !== undefined ? byRoom[h.place_id] : null;
+      if (!g || (!onPlan(d) && d.place_id === h.place_id)) {
+        return;
+      }
+      if (needle && label(d.name).toLowerCase().indexOf(needle) === -1) {
+        return;
+      }
+      g.heardOnly.push(d);
+    });
     groups.push(unassigned);
     var shown = 0;
     groups.forEach(function (g) {
-      if (!g.items.length) {
+      if (!g.items.length && !g.heardOnly.length) {
         return;
       }
-      shown += g.items.length;
+      shown += g.items.length + g.heardOnly.length;
       var box = document.createElement("div");
       box.className = "fp-group";
       var h = document.createElement("h3");
       h.textContent = g.name;
       var ul = document.createElement("ul");
       g.items.forEach(function (d) { ul.appendChild(trayItem(d, g.room !== null, g.room ? g.room.id : null)); });
+      g.heardOnly.forEach(function (d) { ul.appendChild(heardItem(d)); });
       box.appendChild(h);
       box.appendChild(ul);
       trayEl.appendChild(box);
@@ -331,6 +346,22 @@
       p.textContent = total ? "No devices match the filter." : "Every device is on the plan.";
       trayEl.appendChild(p);
     }
+  }
+
+  function heardItem(d) {
+    var li = document.createElement("li");
+    li.className = "fp-item fp-heard-only";
+    li.setAttribute("data-heard-device", String(d.id));
+    var name = document.createElement("span");
+    name.className = "fp-name";
+    name.textContent = label(d.name);
+    var chip = document.createElement("span");
+    chip.className = "chip heard";
+    chip.title = "Heard here by a Bluetooth scanner";
+    chip.textContent = "heard";
+    li.appendChild(name);
+    li.appendChild(chip);
+    return li;
   }
 
   function trayItem(d, inRoom, roomId) {

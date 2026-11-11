@@ -236,6 +236,7 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fp-group ul { list-style: none; margin: 0; padding: 0; }
 .fp-item { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 6px; cursor: grab; touch-action: none; user-select: none; }
 .fp-item:hover { background: var(--bg); }
+.fp-item.fp-heard-only { cursor: default; touch-action: auto; }
 .fp-item.offline .fp-name { color: var(--muted); }
 .fp-item .fp-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .fp-item.dirty .fp-name::after { content: " •"; color: var(--edge-wifi); }

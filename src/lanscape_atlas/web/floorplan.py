@@ -173,16 +173,33 @@ def _trays(view: dict[str, Any]) -> list[dict[str, Any]]:
             unassigned.append(entry)
         else:
             by_room.setdefault(d["place_id"], []).append(entry)
+    heard_in: dict[int, list[dict[str, Any]]] = {}
+    for d in [*view["placed"], *view["roaming"], *view["unplaced"]]:
+        h = d.get("heard")
+        if h and h["place_id"] is not None:
+            heard_in.setdefault(h["place_id"], []).append(d)
     groups = []
     for r in view["rooms"]:
-        items = by_room.get(r["id"])
-        if items:
-            items.sort(key=lambda e: e["device_id"])
-            groups.append({"room_id": r["id"], "name": r["name"], "devices": items})
+        items = by_room.get(r["id"], [])
+        items.sort(key=lambda e: e["device_id"])
+        trayed = {e["device_id"] for e in items}
+        extra = sorted(
+            (
+                {"device_id": d["device_id"], "name": d["name"], "heard_only": True}
+                for d in heard_in.get(r["id"], [])
+                if d["device_id"] not in trayed
+            ),
+            key=lambda e: e["device_id"],
+        )
+        if items or extra:
+            groups.append(
+                {"room_id": r["id"], "name": r["name"], "devices": items, "heard_only": extra}
+            )
     if unassigned:
         groups.append({"room_id": None, "name": "Unassigned", "devices": unassigned})
     for g in groups:
-        for e in g["devices"]:
+        g.setdefault("heard_only", [])
+        for e in [*g["devices"], *g["heard_only"]]:
             e["label"] = _label(e["name"])
     return groups
 

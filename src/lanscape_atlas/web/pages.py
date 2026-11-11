@@ -689,7 +689,8 @@ def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
     rows = [
         {
             "s": s,
-            "suggested": [(i, names.get(i, f"#{i}")) for i in s.suggestions],
+            "suggested": [(i, names.get(i, f"#{i}")) for i in s.suggestions if i != s.device_id],
+            "linked_suggested": s.device_id in s.suggestions,
             "others": [d for d in devices if d.id not in s.suggestions and d.id != s.device_id],
             "age": ago(max(0, int((now - s.last_seen).total_seconds()))),
         }

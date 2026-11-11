@@ -45,7 +45,7 @@
         <select id="scanner-dev-{{ s.id }}" name="device_id">
           {% for i, n in r.suggested %}<option value="{{ i }}">{{ n }} #{{ i }} (suggested)</option>{% endfor %}
           <option value=""{% if not s.device_id %} selected{% endif %}>— none —</option>
-          {% if s.device_id %}<option value="{{ s.device_id }}" selected>{{ s.device_name or "(unnamed)" }} #{{ s.device_id }}</option>{% endif %}
+          {% if s.device_id %}<option value="{{ s.device_id }}" selected>{{ s.device_name or "(unnamed)" }} #{{ s.device_id }}{% if r.linked_suggested %} (suggested){% endif %}</option>{% endif %}
           {% for d in r.others %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
         </select>
         <button type="submit" class="secondary">Link</button>

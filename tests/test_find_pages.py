@@ -438,3 +438,15 @@ def test_status_link_scanner(
     assert r.status_code == 404
     r = _post(client, f"/status/scanners/{sid}/link", {"device_id": "abc"})
     assert r.status_code == 422
+
+
+def test_status_linked_device_listed_once(
+    client: TestClient, app: FastAPI, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    app.state.service.upsert_scanners({SCANNER: "kitchen"}, app.state.service.clock())
+    esp = make_device(name="Kitchen")  # named like the scanner: would be a suggestion
+    sid = _scanner_id(db)
+    _post(client, f"/status/scanners/{sid}/link", {"device_id": str(esp)})
+    html = client.get("/status").text
+    sel = html.split(f'action="/status/scanners/{sid}/link"', 1)[1].split("</select>", 1)[0]
+    assert sel.count(f'value="{esp}"') == 1
