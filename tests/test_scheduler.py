@@ -683,3 +683,58 @@ async def test_interval_jobs_fire_at_startup(settings, runner, svc) -> None:
         assert (pr.hour, pr.minute) == (4, 41)
     finally:
         await stop_scheduler(sched, cs, runner=runner)
+
+
+async def test_ble_flush_job_registered(tmp_path, runner, svc) -> None:
+    from lanscape_atlas.config import HomeAssistantSettings
+
+    s = Settings(
+        data_dir=tmp_path,
+        home_assistant=HomeAssistantSettings(url="http://192.0.2.10:8123", token="t"),
+        bluetooth=BluetoothSettings(flush_s=42),
+    )
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.started = self.stopped = False
+            self.flushes = 0
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def flush(self) -> int:
+            self.flushes += 1
+            return 0
+
+    rt = FakeRuntime()
+    sched = await start_scheduler(s, runner, [], svc, bluetooth=rt)  # type: ignore[arg-type]
+    try:
+        assert rt.started
+        job = {j.id: j for j in sched.get_jobs()}["ble_flush"]
+        assert isinstance(job.trigger, IntervalTrigger)
+        assert job.trigger.interval.total_seconds() == 42
+        assert job.max_instances == 1 and job.coalesce is True
+        assert job.func == rt.flush
+    finally:
+        await stop_scheduler(sched, [], runner=runner, bluetooth=rt)  # type: ignore[arg-type]
+    assert rt.stopped
+
+
+async def test_no_ble_flush_job_without_runtime(settings, runner, svc) -> None:
+    sched = await start_scheduler(settings, runner, [], svc)
+    try:
+        assert "ble_flush" not in {j.id for j in sched.get_jobs()}
+    finally:
+        await stop_scheduler(sched, [], runner=runner)
+
+
+async def test_record_status_ok_and_error_redacted(runner, db, clock) -> None:
+    runner.record_status("bluetooth", f"boom {TOKEN}")
+    st = status(db, "bluetooth")
+    assert st["last_error"] == "boom ***" and st["consecutive_failures"] == 1
+    runner.record_status("bluetooth", None)
+    st = status(db, "bluetooth")
+    assert st["consecutive_failures"] == 0 and st["last_ok"] == iso(clock())

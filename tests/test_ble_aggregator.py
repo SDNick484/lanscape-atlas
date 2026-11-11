@@ -244,3 +244,29 @@ def test_candidate_fields_use_latest_source_best_rssi_latest_name(clock: FixedCl
     assert cand.source == SRC_A
     assert cand.name == "Tag"
     assert cand.adverts == 3
+
+
+def test_requeue_merges_rows_back_into_buckets(clock: FixedClock) -> None:
+    agg = BleAggregator(clock, known_vendor=lambda _a: False)
+    agg.set_index({Identity("address", ADDR_1): 7})
+    agg.add(adv(rssi=-70))
+    agg.add(adv(rssi=-70))
+    clock.advance(minutes=1)
+    rows = agg.drain_closed()
+    assert len(rows) == 1 and agg.drain_all() == []
+    # new data for the same bucket arrives while the rows are out, then they come back
+    agg.requeue(rows)
+    agg.requeue(rows)
+    (merged,) = agg.drain_all()
+    assert (merged.max_rssi, merged.adverts, merged.last_at) == (-70, 4, rows[0].last_at)
+
+
+def test_requeue_takes_max_rssi_and_latest_last_at(clock: FixedClock) -> None:
+    agg = BleAggregator(clock, known_vendor=lambda _a: False)
+    agg.set_index({Identity("address", ADDR_1): 7})
+    agg.add(adv(rssi=-80))
+    old = agg.drain_all()
+    agg.add(adv(rssi=-50))
+    agg.requeue(old)
+    (merged,) = agg.drain_all()
+    assert (merged.max_rssi, merged.adverts) == (-50, 2)

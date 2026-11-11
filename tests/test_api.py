@@ -390,11 +390,15 @@ def test_lifespan_starts_and_stops_scheduler(
     calls: list[str] = []
     sentinel = object()
 
-    async def fake_start(settings: Any, runner: Any, collectors: Any, service: Any) -> object:
+    async def fake_start(
+        settings: Any, runner: Any, collectors: Any, service: Any, bluetooth: Any = None
+    ) -> object:
         calls.append("start")
         return sentinel
 
-    async def fake_stop(sched: Any, collectors: Any, runner: Any = None) -> None:
+    async def fake_stop(
+        sched: Any, collectors: Any, runner: Any = None, bluetooth: Any = None
+    ) -> None:
         assert sched is sentinel and runner is not None
         calls.append("stop")
 

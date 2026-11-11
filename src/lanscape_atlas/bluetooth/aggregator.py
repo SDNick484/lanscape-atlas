@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import statistics
 from collections import OrderedDict, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -146,6 +146,22 @@ class BleAggregator:
 
     def drain_all(self) -> list[MinuteRow]:
         return self._drain(lambda _minute: True)
+
+    def requeue(self, rows: Sequence[MinuteRow]) -> None:
+        """Merge drained rows back into their buckets (a failed DB write loses nothing).
+
+        Combines with any bucket that has since reappeared: max of ``max_rssi``,
+        sum of ``adverts``, max of ``last_at``.
+        """
+        for r in rows:
+            key = (r.device_id, r.source, r.minute)
+            b = self._buckets.get(key)
+            if b is None:
+                self._buckets[key] = _Bucket(r.max_rssi, r.adverts, r.last_at)
+            else:
+                b.max_rssi = max(b.max_rssi, r.max_rssi)
+                b.adverts += r.adverts
+                b.last_at = max(b.last_at, r.last_at)
 
     def candidates(self) -> list[Candidate]:
         self._expire(self._clock())

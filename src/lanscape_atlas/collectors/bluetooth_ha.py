@@ -67,12 +67,14 @@ class HaBluetoothClient:
         clock: Clock,
         *,
         backoff_s: tuple[float, ...] = (1, 2, 5, 15, 60),
+        handshake_timeout_s: float = 30,
     ) -> None:
         self._settings = settings
         self._on_advert = on_advert
         self._on_scanners = on_scanners
         self._clock = clock
         self._backoff_s = backoff_s or (1.0,)
+        self._handshake_timeout_s = handshake_timeout_s
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._since: datetime | None = None
@@ -162,6 +164,21 @@ class HaBluetoothClient:
         return None  # binary etc.
 
     async def _session(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        # The handshake (auth_required through both subscription results) is bounded; the
+        # deadline is lifted once subscribed, since the advert stream may be quiet.
+        try:
+            async with asyncio.timeout(self._handshake_timeout_s) as handshake:
+                await self._run_session(ws, handshake)
+        except TimeoutError:
+            if handshake.expired():
+                raise _SessionError(
+                    f"handshake timed out after {self._handshake_timeout_s:g}s"
+                ) from None
+            raise
+
+    async def _run_session(
+        self, ws: aiohttp.ClientWebSocketResponse, handshake: asyncio.Timeout
+    ) -> None:
         first = await self._recv(ws)
         if not isinstance(first, dict) or first.get("type") != "auth_required":
             raise _SessionError("unexpected greeting from Home Assistant")
@@ -196,6 +213,7 @@ class HaBluetoothClient:
                     self._failures = 0
                     self._last_error = None
                     self._set_connected(True)
+                    handshake.reschedule(None)
             elif kind == "event":
                 self._handle_event(frame)
             else:

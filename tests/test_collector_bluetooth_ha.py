@@ -46,6 +46,7 @@ class FakeHA:
         self.frames: dict[int, list[Any]] = {}
         self.drop_after_frames: set[int] = set()
         self.subscribed = asyncio.Event()
+        self.silent = False  # accept the socket but never send auth_required
 
     async def handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -53,6 +54,10 @@ class FakeHA:
         idx = self.connections
         self.connections += 1
         self.received.append([])
+        if self.silent:
+            async for _ in ws:
+                pass
+            return ws
         await ws.send_json({"type": "auth_required", "ha_version": "2026.1.0"})
         auth = await ws.receive_json()
         self.auth_messages.append(auth)
@@ -401,3 +406,19 @@ def test_ws_url() -> None:
 
     assert ws_url("http://ha.example:8123") == "ws://ha.example:8123/api/websocket"
     assert ws_url("https://ha.example") == "wss://ha.example/api/websocket"
+
+
+async def test_handshake_timeout_is_an_error_and_retried(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    fake.silent = True
+    client = make_client(server, Sink(), clock, handshake_timeout_s=0.1)
+
+    async def body() -> None:
+        await wait_for(lambda: fake.connections >= 2)  # timed out, backed off, retried
+        err = client.status().last_error
+        assert err is not None and "handshake" in err
+        assert not client.status().connected
+
+    await run(client, body)
