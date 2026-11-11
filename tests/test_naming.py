@@ -87,3 +87,34 @@ def test_pick_name_returns_source():
     from lanscape_atlas.ingest.naming import pick_name
 
     assert pick_name({"dhcp": "nas", "rdns": "x"}, None, IP, macs=set()) == ("nas", "dhcp")
+
+
+# Matter instance names are hex node IDs: commissionable (_matterc) rotate on
+# every advertisement, operational (_matter) are <fabric>-<node>.
+@pytest.mark.parametrize("name", ["D746633F41E690D5", "9FDDDC93C0D0B40A-000000000001B669"])
+def test_matter_ids_are_junk(name):
+    assert is_junk_hostname(name, mac=None, ipv4=None) is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("00005E005301@Den Receiver 005301._raop._tcp.local.", "Den Receiver 005301"),
+        ("00005e005301@media.linux._raop._tcp.local.", "media.linux"),
+        ("pc-0001ABCD [00:00:5e:00:53:01]._workstation._tcp.local.", "pc-0001ABCD"),
+        ("Den-Receiver-0123456789abcdef0123456789abcdef._googlecast._tcp.local.", "Den-Receiver"),
+        ("plug-00005e005301._http._tcp.local.", "plug"),
+        ("pc-0001ABCD._ssh._tcp.local.", "pc-0001ABCD"),
+        ("Living-Room-TV._googlecast._tcp.local", "Living-Room-TV"),
+    ],
+)
+def test_mdns_clean_strips_instance_noise(raw, clean):
+    from lanscape_atlas.ingest.naming import clean_name
+
+    assert clean_name("mdns", raw) == clean
+
+
+def test_hex_suffix_kept_for_other_sources():
+    from lanscape_atlas.ingest.naming import clean_name
+
+    assert clean_name("dhcp", "plug-00005e005301") == "plug-00005e005301"
