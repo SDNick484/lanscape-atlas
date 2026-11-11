@@ -106,11 +106,31 @@ twice. "Last heard" is therefore accurate to about one snapshot interval.
 ### Connecting to Home Assistant
 
 `config.example.toml` ships the `[home_assistant]` table commented out, because a URL
-without a token is a configuration error. Uncomment it and set the URL:
+without a token is a configuration error. How you turn it on depends on how you installed.
+
+**Scripted install (`deploy/setup-alpine.sh`).** The script re-renders `config.toml` from
+`setup.env` on every run, so a hand edit to `config.toml` is overwritten. Add the Home
+Assistant keys to `/etc/lanscape-atlas/setup.env` (mode 0600) with `vim` and re-run the
+script:
+
+```sh
+HA_URL=http://192.0.2.10:8123
+HA_TOKEN=paste-the-token-here
+# HA_VERIFY_TLS=true
+```
+
+The script writes an active `[home_assistant]` table (URL, token, `verify_tls`) into
+`config.toml` (mode 0600, readable only by the service user), checks that it parses back
+to the same values, and never prints the token, not even with `--dry-run`. Leave `HA_URL`
+empty to turn Bluetooth off again.
+
+**Manual install.** Edit `config.toml` with `vim`, uncomment the table and fill it in,
+then restart the service:
 
 ```toml
 [home_assistant]
 url = "http://192.0.2.10:8123"
+token = "paste-the-token-here"
 verify_tls = true
 
 [bluetooth]
@@ -122,14 +142,14 @@ snapshot_s = 60       # how often Home Assistant's latest adverts are re-read (s
 Keep `snapshot_s` at 60 or below: the *steady* badge needs a sighting in 48 of the last 60
 minutes, so a longer interval makes every device look intermittent.
 
-Provide the token through the environment (preferred) rather than in `config.toml`:
+The `LANSCAPE_HA_TOKEN` environment variable overrides `token`, but only in the
+environment the service actually runs in: exporting it in your shell does not reach the
+OpenRC service. Use it only where you control the service environment (for example when
+running `lanscape-atlas serve` by hand); otherwise put the token in `config.toml` or
+`setup.env`.
 
-```sh
-export LANSCAPE_HA_TOKEN='paste-the-token-here'
-```
-
-Edit the file with `vim` and restart the service. Without a `[home_assistant]` table the
-Find page still shows claimed devices from the database but says it needs Home Assistant.
+Without a `[home_assistant]` table the Find page still shows claimed devices from the
+database but says it needs Home Assistant.
 
 ### Android phones
 
@@ -290,8 +310,8 @@ command installs and later upgrades. It needs root, an Alpine container with Ope
 and logrotate entry; it never upgrades packages or restarts other services.
 
 1. Copy `deploy/setup.env.example` to `/etc/lanscape-atlas/setup.env`, fill it in and
-   `chmod 600` it. It holds your router password and API token, so keep it out of the
-   repository.
+   `chmod 600` it. It holds your router password, API token and (for Bluetooth Find)
+   your Home Assistant token, so keep it out of the repository.
 2. Copy the script to the container (for a private repository there is nothing to
    clone from yet) and look before you leap:
 
