@@ -105,7 +105,8 @@ class CollectorRunner:
         interval = self._intervals[name]
         return CRON_BACKOFF_BASE_S if interval is None else float(interval)
 
-    def _redact(self, msg: str) -> str:
+    def redact(self, msg: str) -> str:
+        """Mask configured secrets in ``msg`` and truncate it (the stored/logged form)."""
         # Redact before truncating so a secret cut at the boundary cannot leak.
         for s in self._secrets:
             msg = msg.replace(s, "***")
@@ -116,7 +117,7 @@ class CollectorRunner:
             msg = f"TimeoutError: timed out after {c.timeout_s + TIMEOUT_GRACE_S:g}s"
         else:
             msg = f"{type(e).__name__}: {e}"
-        return self._redact(msg)
+        return self.redact(msg)
 
     @contextmanager
     def _txn(self) -> Iterator[Any]:
@@ -173,7 +174,7 @@ class CollectorRunner:
         if error is None:
             self._record_ok(name)
         else:
-            self._record_failure_named(name, self._redact(error))
+            self._record_failure_named(name, self.redact(error))
 
     async def run_once(self, c: Collector) -> RunOutcome:
         """Collect (with timeout) and ingest. Never raises except ``CancelledError``."""

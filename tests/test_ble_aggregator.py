@@ -266,7 +266,15 @@ def test_requeue_takes_max_rssi_and_latest_last_at(clock: FixedClock) -> None:
     agg.set_index({Identity("address", ADDR_1): 7})
     agg.add(adv(rssi=-80))
     old = agg.drain_all()
+    t_old = old[0].last_at
+    clock.advance(seconds=5)
     agg.add(adv(rssi=-50))
     agg.requeue(old)
     (merged,) = agg.drain_all()
     assert (merged.max_rssi, merged.adverts) == (-50, 2)
+    assert merged.last_at == t_old + timedelta(seconds=5)  # the later one wins
+    # and the other way round: an older requeue never moves last_at back
+    agg.add(adv(rssi=-90))
+    agg.requeue([old[0]])
+    (again,) = agg.drain_all()
+    assert again.last_at == t_old + timedelta(seconds=5)

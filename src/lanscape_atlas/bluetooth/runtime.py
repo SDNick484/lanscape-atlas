@@ -54,6 +54,7 @@ class BluetoothRuntime:
             clock, known_vendor=lambda addr: oui.lookup(addr) is not None
         )
         self._scanners: dict[str, str | None] = {}
+        self._write_lock = asyncio.Lock()
         self._client = client_factory(
             settings.home_assistant, self._on_advert, self._on_scanners, clock
         )
@@ -76,13 +77,13 @@ class BluetoothRuntime:
         self._running = False
         await self._client.stop()
         # Best effort: a failed write requeues the rows, which die with the process.
-        await self._write(self.aggregator.drain_all(), record_status=False)
+        await self._write(self.aggregator.drain_all, record_status=False)
 
     # -- public -----------------------------------------------------------------------------
 
     async def flush(self) -> int:
         """Write closed minutes (and buffered scanner names); returns sighting rows written."""
-        return await self._write(self.aggregator.drain_closed(), record_status=True)
+        return await self._write(self.aggregator.drain_closed, record_status=True)
 
     def status(self) -> ClientStatus:
         return self._client.status()
@@ -93,7 +94,10 @@ class BluetoothRuntime:
         self.aggregator.add(advert)
 
     def _on_scanners(self, scanners: dict[str, str | None]) -> None:
-        self._scanners.update(scanners)
+        for source, name in scanners.items():
+            # A later None (name not reported) never erases a known name.
+            if name is not None or source not in self._scanners:
+                self._scanners[source] = name
 
     def _on_change(self, _event: Event) -> None:
         # May run on any thread (FastAPI threadpool): only hop onto the loop here.
@@ -122,23 +126,49 @@ class BluetoothRuntime:
         self._service.upsert_scanners(scanners, seen_at=self._clock())
         return self._service.record_ble_minutes(rows)
 
-    async def _write(self, rows: list[MinuteRow], *, record_status: bool) -> int:
-        scanners, self._scanners = self._scanners, {}
-        written = 0
-        error: str | None = None
-        try:
-            written = await asyncio.to_thread(self._persist, rows, scanners)
-        except Exception as exc:  # noqa: BLE001 - nothing is lost: requeue and report
-            self.aggregator.requeue(rows)
-            for source, name in scanners.items():
-                # Names that arrived while the write ran are newer; keep them.
-                if name is not None or source not in self._scanners:
-                    self._scanners.setdefault(source, name)
-            error = f"{type(exc).__name__}: {exc}"
-            log.warning("Bluetooth flush failed: %s", error)
-        if record_status:
-            await self._record_status(error)
-        return written
+    async def _write(self, drain: Callable[[], list[MinuteRow]], *, record_status: bool) -> int:
+        """Drain and persist under the write lock (writes never overlap).
+
+        Draining happens inside the lock so a flush cancelled while waiting for it loses
+        nothing. If this coroutine is cancelled (scheduler shutdown) mid-write, the worker
+        thread's write is awaited to completion first (requeued on failure) and only then
+        is the cancellation re-raised.
+        """
+        async with self._write_lock:
+            rows = drain()
+            scanners, self._scanners = self._scanners, {}
+            task = asyncio.ensure_future(asyncio.to_thread(self._persist, rows, scanners))
+            cancelled = False
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                while not task.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait({task})
+            except Exception:  # noqa: BLE001 - reported below from the task
+                pass
+            written = 0
+            error: str | None = None
+            exc = task.exception() if not task.cancelled() else asyncio.CancelledError()
+            if exc is None:
+                written = task.result()
+            else:
+                # Nothing is lost: requeue the rows and put the scanner names back.
+                self.aggregator.requeue(rows)
+                for source, name in scanners.items():
+                    # Names buffered meanwhile are newer; only fill gaps.
+                    if source not in self._scanners or (
+                        self._scanners[source] is None and name is not None
+                    ):
+                        self._scanners[source] = name
+                error = self._runner.redact(f"{type(exc).__name__}: {exc}")
+                log.warning("Bluetooth flush failed: %s", error)
+            if cancelled:
+                raise asyncio.CancelledError
+            if record_status:
+                await self._record_status(error)
+            return written
 
     async def _record_status(self, flush_error: str | None) -> None:
         client = self._client.status()
