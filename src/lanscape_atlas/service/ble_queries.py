@@ -167,6 +167,16 @@ def _mac_plus_two(address: str) -> str | None:
     return ":".join(f"{((n + 2) & _MAC_MASK):012x}"[i : i + 2] for i in range(0, 12, 2))
 
 
+def scanner_labels(conn: sqlite3.Connection) -> dict[str, tuple[str | None, str | None]]:
+    """``source -> (scanner name, room of its linked device)``; either may be None."""
+    rows = conn.execute(
+        "SELECT sc.source, sc.name, p.name AS place_name FROM ble_scanner sc"
+        " LEFT JOIN device d ON d.id = sc.device_id"
+        " LEFT JOIN place p ON p.id = d.place_id"
+    )
+    return {r["source"]: (r["name"], r["place_name"]) for r in rows}
+
+
 def scanners(conn: sqlite3.Connection) -> list[ScannerView]:
     """All scanners with their link and suggested devices to link.
 

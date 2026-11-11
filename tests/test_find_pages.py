@@ -450,3 +450,82 @@ def test_status_linked_device_listed_once(
     html = client.get("/status").text
     sel = html.split(f'action="/status/scanners/{sid}/link"', 1)[1].split("</select>", 1)[0]
     assert sel.count(f'value="{esp}"') == 1
+
+
+# ------------------------------------------------------------- claim form scale (F4)
+
+
+def test_claim_form_renders_each_device_option_once(
+    client: TestClient, app: FastAPI, clock: FixedClock, make_device: Callable[..., int]
+) -> None:
+    app.state.bluetooth = StubRuntime(
+        [cand(clock, address=f"00:00:5e:00:53:{i:02x}") for i in range(0x20, 0x34)]
+    )
+    devices = [make_device(name=f"Device {i}", type="tag") for i in range(50)]
+    html = client.get("/find").text
+    for d in devices:
+        assert html.count(f'<option value="{d}">') == 1, d
+    assert html.count("<select") == 1
+    assert html.count('<form method="post" action="/find/claim"') == 1
+    assert html.count('type="radio" name="identity"') == 20
+    for i in range(0x20, 0x34):
+        assert f'value="address:00:00:5e:00:53:{i:02x}"' in html
+
+
+def test_claim_form_one_csrf_and_still_claims(
+    client: TestClient, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    html = client.get("/find").text
+    assert html.count('name="csrf"') == html.count('<form method="post"')
+    d = make_device(name="Existing", type="tag")
+    r = _post(client, "/find/claim", {"identity": KEY, "device_id": str(d)})
+    assert r.status_code == 303
+    assert db.execute("select device_id from ble_identity").fetchone()[0] == d
+
+
+def test_claim_without_a_selected_candidate_is_422(
+    client: TestClient, make_device: Callable[..., int], db: sqlite3.Connection
+) -> None:
+    d = make_device(name="Existing", type="tag")
+    r = _post(client, "/find/claim", {"device_id": str(d)})
+    assert r.status_code == 422
+    assert "Choose a candidate to claim." in r.text
+    assert db.execute("select count(*) from ble_identity").fetchone()[0] == 0
+
+
+def test_candidate_scanner_shown_by_name_and_room(
+    client: TestClient,
+    app: FastAPI,
+    db: sqlite3.Connection,
+    clock: FixedClock,
+    make_device: Callable[..., int],
+) -> None:
+    _room_scanner(app, db, make_device)  # SCANNER is "kitchen-proxy", linked, in Kitchen
+    named_only = "00:00:5e:00:53:ab"
+    unknown = "00:00:5e:00:53:ac"
+    app.state.service.upsert_scanners({named_only: "hall-proxy"}, clock())
+    items = [
+        cand(clock, address="00:00:5e:00:53:21"),
+        Candidate(
+            Identity("address", "00:00:5e:00:53:22"),
+            None,
+            -60,
+            named_only,
+            clock(),
+            clock(),
+            1,
+            None,
+        ),
+        Candidate(
+            Identity("address", "00:00:5e:00:53:23"), None, -60, unknown, clock(), clock(), 1, None
+        ),
+    ]
+    app.state.bluetooth = StubRuntime(items)
+    html = client.get("/find").text
+    cells = re.findall(r'<td class="scanner"[^>]*>(.*?)</td>', html, re.S)
+    assert [re.sub(r"\s+", " ", c).strip() for c in cells] == [
+        'kitchen-proxy <span class="muted">Kitchen</span>',
+        "hall-proxy",
+        f'<span class="mono">{unknown}</span>',
+    ]
+    assert f'title="{SCANNER}"' in html  # the address is still there on hover

@@ -40,6 +40,7 @@ from lanscape_atlas.web.pages import (
 
 BANNER_AFTER = timedelta(minutes=2)
 STALE_MESSAGE = "That device is no longer in range; nothing was claimed."
+PICK_MESSAGE = "Choose a candidate to claim."
 BADGE_LABELS = {
     "steady": "Steady",
     "intermittent": "Intermittent",
@@ -87,16 +88,18 @@ def _banner(request: Request, now: Any) -> str | None:
     return f"{text} {status.last_error}" if status.last_error else text
 
 
-def _db_context(svc: Service, search: str | None, with_devices: bool) -> dict[str, Any]:
+def _db_context(svc: Service, search: str | None, with_candidates: bool) -> dict[str, Any]:
     now = svc.clock()
+    devices: list[Any] = []
+    scanners: dict[str, tuple[str | None, str | None]] = {}
     with svc.lock:
         rows = bq.find(svc.conn, search, now=now)
-        devices = (
-            q.list_devices(svc.conn, limit=DEVICE_LIMIT, window_min=svc.ip_match_window_min)
-            if with_devices
-            else []
-        )
-    return {"rows": [_row_view(r, now) for r in rows], "devices": devices}
+        if with_candidates:
+            devices = q.list_devices(
+                svc.conn, limit=DEVICE_LIMIT, window_min=svc.ip_match_window_min
+            )
+            scanners = bq.scanner_labels(svc.conn)
+    return {"rows": [_row_view(r, now) for r in rows], "devices": devices, "scanners": scanners}
 
 
 async def _context(request: Request, search: str | None, *, full: bool) -> dict[str, Any]:
@@ -106,10 +109,12 @@ async def _context(request: Request, search: str | None, *, full: bool) -> dict[
     # Aggregator: loop only. Copy the candidates before leaving the loop.
     found = [] if runtime is None else list(runtime.aggregator.candidates())
     ctx = await run_in_threadpool(_db_context, svc, search, full and bool(found))
+    scanners = ctx.pop("scanners")
     candidates = []
     for c in found:
         d = candidate_dict(c)
         d["age"] = ago(max(0, int((now - c.last_heard).total_seconds())))
+        d["scanner_name"], d["scanner_room"] = scanners.get(c.source, (None, None))
         candidates.append(d)
     ctx.update(
         configured=runtime is not None,
@@ -178,8 +183,11 @@ async def find_claim(request: Request, form: Form) -> Response:
     runtime = request.app.state.bluetooth
     try:
         device_id, new_name, new_type = _claim_args(form)
+        key = (_text(form, "identity") or "").strip()
+        if not key:
+            raise ValueError(PICK_MESSAGE)
         try:
-            identity = require_candidate(runtime, _text(form, "identity") or "")
+            identity = require_candidate(runtime, key)
         except ValueError:
             raise ValueError(STALE_MESSAGE) from None
         claimed, _ = await run_in_threadpool(

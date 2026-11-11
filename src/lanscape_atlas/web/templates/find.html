@@ -17,36 +17,22 @@
 
 {% if configured %}
 <h2>Candidates</h2>
-<p class="muted">Stable Bluetooth devices heard recently and not yet claimed. Claim one to track it.</p>
+<p class="muted">Stable Bluetooth devices heard recently and not yet claimed. Pick one, then claim it below.</p>
+{# One form for every candidate: the device list is rendered once, not once per row. #}
+<form method="post" action="{{ root }}/find/claim" id="claim-form">
+<input type="hidden" name="csrf" value="{{ csrf }}">
 <div class="table-wrap">
 <table>
-  <thead><tr><th>Identity</th><th>Advert name</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th><th></th></tr></thead>
+  <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th></tr></thead>
   <tbody>
   {% for c in candidates %}
   <tr>
-    <td class="mono">{{ c.identity }}</td>
+    <td><input type="radio" name="identity" value="{{ c.identity }}" id="cand-{{ loop.index }}" aria-label="Select {{ c.identity }}" required></td>
+    <td class="mono"><label for="cand-{{ loop.index }}">{{ c.identity }}</label></td>
     <td>{{ c.name or "" }}</td>
-    <td class="mono">{{ c.source }}</td>
+    <td class="scanner" title="{{ c.source }}">{% if c.scanner_name %}{{ c.scanner_name }}{% else %}<span class="mono">{{ c.source }}</span>{% endif %}{% if c.scanner_room %} <span class="muted">{{ c.scanner_room }}</span>{% endif %}</td>
     <td>{{ c.age }}</td>
     <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
-    <td>
-      <details><summary>Claim</summary>
-      <form method="post" action="{{ root }}/find/claim" class="card">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <input type="hidden" name="identity" value="{{ c.identity }}">
-        <label class="field"><span>Attach to an existing device</span>
-          <select name="device_id">
-            <option value="">(none)</option>
-            {% for d in devices %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
-          </select>
-        </label>
-        <p class="muted">or create a new device</p>
-        <label class="field"><span>Name</span><input name="new_name" maxlength="200"></label>
-        <label class="field"><span>Type</span><input name="new_type" maxlength="100" placeholder="remote, tag, phone"></label>
-        <div class="actions"><button type="submit">Claim</button></div>
-      </form>
-      </details>
-    </td>
   </tr>
   {% else %}
   <tr><td colspan="6" class="empty">No candidates right now.</td></tr>
@@ -54,5 +40,21 @@
   </tbody>
 </table>
 </div>
+{% if candidates %}
+<fieldset class="card">
+  <legend>Claim the selected candidate</legend>
+  <label class="field"><span>Attach to an existing device</span>
+    <select name="device_id">
+      <option value="">(none)</option>
+      {% for d in devices %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
+    </select>
+  </label>
+  <p class="muted">or create a new device</p>
+  <label class="field"><span>Name</span><input name="new_name" maxlength="200"></label>
+  <label class="field"><span>Type</span><input name="new_type" maxlength="100" placeholder="remote, tag, phone"></label>
+  <div class="actions"><button type="submit">Claim</button></div>
+</fieldset>
+{% endif %}
+</form>
 {% endif %}
 {% endblock %}

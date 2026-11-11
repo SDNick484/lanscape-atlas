@@ -256,3 +256,6 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .strip .hour.heard { background: var(--ok-bg); color: var(--text); }
 .tag.badge-steady { background: var(--ok-bg); border-color: transparent; }
 .tag.badge-intermittent { background: var(--warn-bg); border-color: transparent; }
+/* Find: one shared claim form under the candidate table. */
+fieldset.card { margin: 12px 0 0; min-width: 0; }
+fieldset.card legend { font-weight: 600; padding: 0 4px; }

@@ -167,8 +167,10 @@ exposes the iBeacon ID (UUID, major, minor); the candidate list shows the same i
 Open `/find`. Under **Candidates** are stable devices heard recently that are not yet
 claimed: iBeacons, and addresses that look stable (a known vendor, a static-random
 address, or one heard steadily for 30 minutes). Press a remote's button, or hold a tag
-next to a proxy, and its signal strength stands out. Press **Claim** and either attach it
-to an existing device or create a new one (name and type). Claims are in History and can
+next to a proxy, and its signal strength stands out. Each candidate shows the scanner
+that heard it by name (and room, once the scanner is linked). Select the candidate, then
+under **Claim the selected candidate** either attach it to an existing device or create a
+new one (name and type), and press **Claim**. Claims are in History and can
 be undone; the device page has an **Unclaim** button.
 
 ### Linking scanners

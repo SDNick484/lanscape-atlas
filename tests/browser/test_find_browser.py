@@ -16,8 +16,9 @@ import pytest
 from conftest import FixedClock
 from helpers.floorplan_fixtures import dev_position, drag_to_room_centre
 from helpers.plan import SQ_POINTS, png_bytes
-from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, Candidate, MinuteRow
 from lanscape_atlas.bluetooth.match import Identity
+from lanscape_atlas.collectors.bluetooth_ha import ClientStatus
 from lanscape_atlas.config import Settings
 from lanscape_atlas.service import Placement, Service
 from lanscape_atlas.web.app import create_app
@@ -36,6 +37,7 @@ class World(NamedTuple):
     spare: int
     room_a: int
     room_b: int
+    app: Any
 
 
 @pytest.fixture
@@ -96,7 +98,7 @@ def world(tmp_path: Any, clock: FixedClock) -> Iterator[World]:
         for d in (phone, remote)
     ]
     assert svc.record_ble_minutes(rows) == 2
-    yield World(base, svc, phone, remote, spare, room_a, room_b)
+    yield World(base, svc, phone, remote, spare, room_a, room_b, app)
     server.should_exit = True
     thread.join(timeout=5)
     conn.close()
@@ -155,3 +157,42 @@ def test_real_tray_entry_still_drags(page: Any, world: World) -> None:
     assert page.locator(f"[data-device-id='{world.spare}']").count() == 0
     drag_to_room_centre(page, tray)
     assert page.locator(f"[data-device-id='{world.spare}']").count() == 1
+
+
+class _Candidates:
+    def __init__(self, items: list[Candidate]) -> None:
+        self.items = items
+
+    def candidates(self) -> list[Candidate]:
+        return list(self.items)
+
+
+class _StubRuntime:
+    def __init__(self, items: list[Candidate]) -> None:
+        self.aggregator = _Candidates(items)
+
+    def status(self) -> ClientStatus:
+        return ClientStatus(True, None, None)
+
+
+def test_shared_claim_form_claims_the_selected_candidate(
+    page: Any, world: World, clock: FixedClock
+) -> None:
+    now = clock()
+    tags = [Identity("address", f"00:00:5e:00:53:{i}") for i in ("31", "32")]
+    world.app.state.bluetooth = _StubRuntime(
+        [Candidate(t, None, -50, SCANNER_B, now, now, 3, None) for t in tags]
+    )
+    page.goto(f"{world.base}/find")
+    scanner_cells = page.locator("td.scanner").all_inner_texts()
+    assert [" ".join(c.split()) for c in scanner_cells] == ["ble-proxy-b Room B"] * 2
+    assert page.locator("select[name=device_id]").count() == 1
+    page.locator(f"input[type=radio][value='{tags[1].key()}']").check()
+    page.locator("select[name=device_id]").select_option(str(world.spare))
+    page.get_by_role("button", name="Claim").click()
+    page.wait_for_url("**/find?claimed=*")
+    assert "Claimed as Spare" in page.locator(".flash.ok").inner_text()
+    row = world.svc.conn.execute(
+        "SELECT kind, value, device_id FROM ble_identity WHERE device_id = ?", (world.spare,)
+    ).fetchone()
+    assert (row["kind"], row["value"]) == ("address", tags[1].value)
