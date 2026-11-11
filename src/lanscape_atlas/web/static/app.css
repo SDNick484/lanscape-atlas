@@ -246,3 +246,10 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fp-rooms-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .fp-rooms-list form { flex-wrap: nowrap; }
 .fp-rooms-list input { flex: 1; min-width: 0; }
+
+/* Bluetooth Find / device page */
+.strip { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; list-style: none; padding: 0; margin: 8px 0 16px; }
+.strip .hour { min-height: 28px; overflow: hidden; font-size: 0.65rem; line-height: 1.2; padding: 2px; text-align: center; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
+.strip .hour.heard { background: var(--ok-bg); color: var(--text); }
+.tag.badge-steady { background: var(--ok-bg); border-color: transparent; }
+.tag.badge-intermittent { background: var(--warn-bg); border-color: transparent; }

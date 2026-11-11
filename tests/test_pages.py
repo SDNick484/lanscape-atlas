@@ -15,6 +15,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from conftest import FixedClock
+from lanscape_atlas.bluetooth.aggregator import Candidate
+from lanscape_atlas.bluetooth.match import Identity
 from lanscape_atlas.config import Settings
 from lanscape_atlas.observation import Observation
 from lanscape_atlas.service import Service
@@ -274,6 +276,8 @@ POST_ROUTES = (
     "inbox_name",
     "claim",
     "undo",
+    "find_claim",
+    "ble_unclaim",
 )
 
 
@@ -298,9 +302,33 @@ def _post_case(name: str, service: Service, app: FastAPI) -> tuple[str, dict[str
         a, b = q.list_devices(service.conn, q="office-laptop", limit=10)
         iface = _view(service, b.id).interfaces[0].id
         return f"/interfaces/{iface}/claim", {"device_id": str(a.id)}
+    if name in ("find_claim", "ble_unclaim"):
+        return _ble_case(name, service, app, dev.id)
     assert name == "undo"
     batch = service.update_device("system", dev.id, {"owner": "Sam"})
     return f"/history/{batch}/undo", {}
+
+
+def _ble_case(
+    name: str, service: Service, app: FastAPI, device_id: int
+) -> tuple[str, dict[str, str]]:
+    ident = Identity("address", "00:00:5e:00:53:01")
+    if name == "find_claim":
+
+        class _Agg:
+            def candidates(self) -> list[Candidate]:
+                now = service.clock()
+                return [Candidate(ident, "Tag", -50, "00:00:5e:00:53:aa", now, now, 1, None)]
+
+        class _Runtime:
+            aggregator = _Agg()
+
+        app.state.bluetooth = _Runtime()
+        return "/find/claim", {"identity": ident.key(), "device_id": str(device_id)}
+    service.claim_ble("user", ident, device_id=device_id)
+    with service.lock:
+        iid = int(service.conn.execute("SELECT id FROM ble_identity").fetchone()[0])
+    return f"/devices/{device_id}/ble/{iid}/unclaim", {}
 
 
 def _last_batch(service: Service) -> int:

@@ -37,7 +37,9 @@ from starlette.datastructures import FormData
 
 from lanscape_atlas.collectors.nmap import ScanRefused
 from lanscape_atlas.service import Placement, Service, StaleWrite, UndoConflict
+from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.service import queries as q
+from lanscape_atlas.web.ble_api import ago, where
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
 from lanscape_atlas.web.topology import (
@@ -70,6 +72,7 @@ CHOICE_FIELDS = ("trust", "scan_policy")
 TRUST_CHOICES = ("new", "known", "unwanted")
 SCAN_POLICY_CHOICES = ("normal", "never")
 DEVICE_LIMIT = 1000
+_STRIP_HOURS = 24
 HISTORY_LIMIT = 500
 
 router = APIRouter(include_in_schema=False)
@@ -325,6 +328,7 @@ class DevicePage:
     view: q.DeviceView
     aps: dict[str, tuple[int, str | None]]
     roaming: bool = False
+    ble: dict[str, Any] | None = None
 
 
 def _device_page(
@@ -345,6 +349,7 @@ def _device_page(
             "d": page.view,
             "aps": page.aps,
             "roaming": page.roaming,
+            "ble": page.ble,
             "values": values or current,
             "origs": origs or current,
             "trust_choices": TRUST_CHOICES,
@@ -360,7 +365,28 @@ def _load_view(svc: Service, device_id: int) -> DevicePage:
         view = q.get_device(svc.conn, device_id, window_min=svc.ip_match_window_min)
         aps = q.ap_device_names(svc.conn, (i.ap_node for i in view.interfaces))
         row = svc.conn.execute("SELECT roaming FROM device WHERE id = ?", (device_id,)).fetchone()
-    return DevicePage(view, aps, bool(row[0]))
+        ble = _ble_section(svc, device_id)
+    return DevicePage(view, aps, bool(row[0]), ble)
+
+
+def _ble_section(svc: Service, device_id: int) -> dict[str, Any] | None:
+    """Last heard, the 24 h strip and identities; ``None`` when nothing is claimed.
+
+    The caller holds ``svc.lock``.
+    """
+    idents = bq.identities(svc.conn, device_id)
+    if not idents:
+        return None
+    now = svc.clock()
+    last = bq.last_heard(svc.conn, device_id)
+    strip = bq.hourly_strip(svc.conn, device_id, now=now)
+    heard = None
+    if last is not None:
+        age = max(0, int((now - last.at).total_seconds()))
+        place = f"near {last.place_name}" if last.place_name else where(last)
+        heard = f"{place}, {ago(age)}"
+    cells = [{"hours_ago": _STRIP_HOURS - 1 - i, "label": label} for i, label in enumerate(strip)]
+    return {"last": heard, "strip": cells, "identities": idents}
 
 
 @router.get("/devices/{device_id}", response_class=HTMLResponse)

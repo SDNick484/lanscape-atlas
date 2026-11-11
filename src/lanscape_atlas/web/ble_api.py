@@ -74,6 +74,20 @@ def age_seconds(row: bq.FindRow, now: datetime) -> int | None:
     return max(0, int((now - row.last.at).total_seconds()))
 
 
+def ago(seconds: int) -> str:
+    """Human age: under a minute "just now", under an hour "N min ago", else "H h ago"."""
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    return f"{seconds // 3600} h ago"
+
+
+def where(last: bq.LastHeard) -> str:
+    """The room a sighting was in, else ``near <scanner>``."""
+    return last.place_name or f"near {last.scanner_name or last.scanner_source}"
+
+
 def require_candidate(runtime: BluetoothRuntime | None, key: str) -> Identity:
     """The parsed identity if it is a current candidate; else ``ValueError``."""
     identity = Identity.parse(key)

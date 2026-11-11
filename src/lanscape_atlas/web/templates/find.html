@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Find{% endblock %}
+{% block content %}
+<h1>Find</h1>
+{% if not configured %}
+<p class="card">Bluetooth Find needs Home Assistant. Add a [home_assistant] section to config.toml.</p>
+{% endif %}
+<form class="filters" method="get" action="{{ root }}/find" role="search">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search by name"
+         hx-get="{{ root }}/partials/find" hx-trigger="input changed delay:300ms, search"
+         hx-target="#find-results" hx-swap="innerHTML">
+  <button type="submit" class="secondary">Search</button>
+</form>
+<div id="find-results" hx-get="{{ root }}/partials/find" hx-trigger="every 30s" hx-include="[name='q']" hx-swap="innerHTML">
+{% include "_find_rows.html" %}
+</div>
+
+{% if configured %}
+<h2>Candidates</h2>
+<p class="muted">Stable Bluetooth devices heard recently and not yet claimed. Claim one to track it.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Identity</th><th>Advert name</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th><th></th></tr></thead>
+  <tbody>
+  {% for c in candidates %}
+  <tr>
+    <td class="mono">{{ c.identity }}</td>
+    <td>{{ c.name or "" }}</td>
+    <td class="mono">{{ c.source }}</td>
+    <td>{{ c.age }}</td>
+    <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
+    <td>
+      <details><summary>Claim</summary>
+      <form method="post" action="{{ root }}/find/claim" class="card">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="identity" value="{{ c.identity }}">
+        <label class="field"><span>Attach to an existing device</span>
+          <select name="device_id">
+            <option value="">(none)</option>
+            {% for d in devices %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
+          </select>
+        </label>
+        <p class="muted">or create a new device</p>
+        <label class="field"><span>Name</span><input name="new_name" maxlength="200"></label>
+        <label class="field"><span>Type</span><input name="new_type" maxlength="100" placeholder="remote, tag, phone"></label>
+        <div class="actions"><button type="submit">Claim</button></div>
+      </form>
+      </details>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="empty">No candidates right now.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

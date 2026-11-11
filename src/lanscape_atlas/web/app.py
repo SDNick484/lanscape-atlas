@@ -51,7 +51,7 @@ from lanscape_atlas.oui import OuiDB
 from lanscape_atlas.scheduler import CollectorRunner, start_scheduler, stop_scheduler
 from lanscape_atlas.service import Service, StaleWrite, UndoConflict
 from lanscape_atlas.store.db import migrate, open_db
-from lanscape_atlas.web import floorplan, pages
+from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.ble_api import router as ble_router
 from lanscape_atlas.web.deep_scan import start_deep_scan
@@ -484,5 +484,6 @@ def create_app(
     app.include_router(floorplan_router)
     app.include_router(ble_router)
     app.include_router(floorplan.router)
+    app.include_router(find.router)
     pages.install(app)
     return app
