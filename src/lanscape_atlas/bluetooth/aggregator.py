@@ -28,6 +28,8 @@ TRACKER_TTL = timedelta(minutes=30)
 _GAP_WINDOW = 20  # inter-advert intervals kept for the median
 # ble_sighting.minute format (UTC); strings in it compare chronologically.
 BLE_MINUTE_FMT = "%Y-%m-%dT%H:%MZ"
+HIDDEN_LABEL_MAX = 80
+UNNAMED_LABEL = "Unnamed device"
 
 
 @dataclass(frozen=True)
@@ -59,14 +61,32 @@ class CandidateView:
 
 
 def visible_candidates(
-    candidates: Iterable[Candidate], *, min_rssi: int, include_weak: bool
+    candidates: Iterable[Candidate],
+    *,
+    min_rssi: int,
+    include_weak: bool,
+    exclude: Callable[[Identity], bool] | None = None,
 ) -> CandidateView:
-    """Strongest best RSSI first (ties: most recently heard first); weak ones only on request."""
-    ordered = sorted(candidates, key=lambda c: (-c.best_rssi, -c.last_heard.timestamp()))
+    """Strongest best RSSI first (ties: most recently heard first); weak ones only on request.
+
+    Candidates ``exclude`` matches (hidden as "Not mine") are dropped first: never shown and
+    not counted as weak.
+    """
+    kept = candidates if exclude is None else (c for c in candidates if not exclude(c.identity))
+    ordered = sorted(kept, key=lambda c: (-c.best_rssi, -c.last_heard.timestamp()))
     weak = sum(1 for c in ordered if c.best_rssi < min_rssi)
     if not include_weak:
         ordered = [c for c in ordered if c.best_rssi >= min_rssi]
     return CandidateView(ordered, weak)
+
+
+def hide_label(candidate: Candidate, vendor: Callable[[str], str | None]) -> str:
+    """Label kept for a hidden candidate: its advert name, else the address's OUI vendor,
+    else "Unnamed device"; at most ``HIDDEN_LABEL_MAX`` characters."""
+    label = (candidate.name or "").strip()
+    if not label and candidate.identity.kind == "address":
+        label = (vendor(candidate.identity.value) or "").strip()
+    return (label or UNNAMED_LABEL)[:HIDDEN_LABEL_MAX]
 
 
 @dataclass

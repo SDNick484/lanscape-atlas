@@ -1,4 +1,4 @@
-"""Read-only Bluetooth queries: last heard, find rows, badges, hourly strip, scanners.
+"""Read-only Bluetooth queries: last heard, find rows, badges, hourly strip, scanners, hidden.
 
 Like ``queries``, the functions take the shared connection, never write, and rely on the
 caller holding ``service.lock``. Sighting timestamps are ISO text (``clock.iso``), which
@@ -55,6 +55,13 @@ class ScannerView:
     place_name: str | None
     last_seen: datetime
     suggestions: list[int]
+
+
+@dataclass(frozen=True)
+class HiddenView:
+    id: int
+    label: str
+    hidden_at: str
 
 
 def last_heard(conn: sqlite3.Connection, device_id: int) -> LastHeard | None:
@@ -235,3 +242,24 @@ def scanners(conn: sqlite3.Connection) -> list[ScannerView]:
             )
         )
     return out
+
+
+def ble_salt(conn: sqlite3.Connection) -> bytes:
+    """The per-database salt for hidden-identity digests (``match.hidden_digest``)."""
+    row = conn.execute("SELECT salt FROM ble_salt WHERE id = 1").fetchone()
+    if row is None:
+        raise RuntimeError("ble_salt has no row; is the schema older than v4?")
+    return bytes(row[0])
+
+
+def hidden_digests(conn: sqlite3.Connection) -> set[str]:
+    """Digests of every hidden ("Not mine") identity."""
+    return {str(r[0]) for r in conn.execute("SELECT digest FROM ble_hidden")}
+
+
+def hidden(conn: sqlite3.Connection) -> list[HiddenView]:
+    """Hidden identities as the Status page and API list them, newest first."""
+    rows = conn.execute(
+        "SELECT id, label, hidden_at FROM ble_hidden ORDER BY hidden_at DESC, id DESC"
+    )
+    return [HiddenView(r["id"], r["label"], r["hidden_at"]) for r in rows]
