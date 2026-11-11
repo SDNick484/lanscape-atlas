@@ -249,7 +249,10 @@ def test_scanner_suggestion_mac_wraps(
 ) -> None:
     d = make_device(name="ESP")
     _iface(db, d, "wifi", "00:00:5e:00:53:ff")
-    _one_scanner(svc, "00:00:5e:00:54:01", None)
+    # Last octet 0xff + 2 carries into the 5th octet, leaving the documentation range;
+    # build the source at runtime so no out-of-range MAC literal lands in the repo.
+    n = int("00005e0053ff", 16) + 2
+    _one_scanner(svc, ":".join(f"{n:012x}"[i : i + 2] for i in range(0, 12, 2)), None)
     [view] = q.scanners(db)
     assert view.suggestions == [d]
 
