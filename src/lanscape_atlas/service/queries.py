@@ -12,9 +12,10 @@ import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from lanscape_atlas.clock import iso
 from lanscape_atlas.netutil import normalize_mac, valid_ipv4
 
 # Interface kinds whose address is a MAC. "unknown" is a MAC seen without a link
@@ -500,6 +501,18 @@ def last_placement_batch(conn: sqlite3.Connection, device_id: int) -> int:
     return int(row[0]) if row is not None and row[0] is not None else 0
 
 
+def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:
+    """Newest sighting per device within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
+    out: dict[int, dict[str, Any]] = {}
+    for r in conn.execute(
+        "SELECT device_id, place_id, last_at FROM ble_sighting WHERE last_at >= ?"
+        " ORDER BY last_at DESC, max_rssi DESC, scanner_id ASC",
+        (iso(now - timedelta(hours=24)),),
+    ):
+        out.setdefault(r["device_id"], {"place_id": r["place_id"], "at": r["last_at"]})
+    return out
+
+
 def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any]:
     """Everything the floor plan page needs, read-only.
 
@@ -510,10 +523,13 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
     carries its ``place_id`` (the room id, or None) so the page can group the tray by room.
     Each device carries ``last_batch`` (see ``last_placement_batch``) so the page can
     send it back as ``based_on``. Exposes plan metadata only, never the file path or
-    image bytes. ``now`` is accepted for symmetry with other views; online state is the
-    stored ``device.online`` flag.
+    image bytes. Online state is the stored ``device.online`` flag. Every device entry
+    whose newest Bluetooth sighting is at most 24 h old (``now`` is the reference) also
+    carries ``heard: {"place_id", "at"}`` (``place_id`` is None for an unlinked scanner);
+    the sighting is chosen like ``ble_queries.last_heard`` (newest, then stronger, then
+    lower scanner id), but for all devices in one query.
     """
-    del now
+    heard = _heard_by_device(conn, now)
     plan_row = conn.execute(
         "SELECT width, height, file_name, updated_at FROM floor_plan WHERE id = 1"
     ).fetchone()
@@ -558,7 +574,9 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
         _PLACEMENT_FIELDS,
     )
     for r in rows:
-        base = {"device_id": r["id"], "name": r["name"]}
+        base: dict[str, Any] = {"device_id": r["id"], "name": r["name"]}
+        if r["id"] in heard:
+            base["heard"] = heard[r["id"]]
         if r["place_id"] is not None and r["roaming"]:
             roaming.append(
                 {

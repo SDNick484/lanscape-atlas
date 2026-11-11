@@ -665,15 +665,62 @@ def topology_placeholder(request: Request, body: PlaceholderBody) -> dict[str, i
 # ------------------------------------------------------------------- status
 
 
+SCANNER_FLASH = {
+    "linked": "Scanner linked.",
+    "unlinked": "Scanner unlinked.",
+    "unchanged": "No change.",
+}
+
+
 @router.get("/status", response_class=HTMLResponse)
-def status_page(request: Request) -> HTMLResponse:
+def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
     svc = _service(request)
+    now = svc.clock()
     with svc.lock:
         collectors = q.collector_status(svc.conn)
         counts = q.device_counts(svc.conn)
+        scanners = bq.scanners(svc.conn)
+        devices = (
+            q.list_devices(svc.conn, limit=DEVICE_LIMIT, window_min=svc.ip_match_window_min)
+            if scanners
+            else []
+        )
+    names = {d.id: d.name or "(unnamed)" for d in devices}
+    rows = [
+        {
+            "s": s,
+            "suggested": [(i, names.get(i, f"#{i}")) for i in s.suggestions],
+            "others": [d for d in devices if d.id not in s.suggestions and d.id != s.device_id],
+            "age": ago(max(0, int((now - s.last_seen).total_seconds()))),
+        }
+        for s in scanners
+    ]
+    msg = SCANNER_FLASH.get(scanner or "")
     return render(
-        request, "status.html", {"nav": "status", "collectors": collectors, "counts": counts}
+        request,
+        "status.html",
+        {
+            "nav": "status",
+            "collectors": collectors,
+            "counts": counts,
+            "scanners": rows,
+            "flash": ("ok", msg) if msg else None,
+        },
     )
+
+
+@router.post("/status/scanners/{scanner_id}/link", response_model=None)
+def status_link_scanner(request: Request, scanner_id: PathId, form: Form) -> Response:
+    raw = _text(form, "device_id") or ""
+    try:
+        device_id = int(raw) if raw.strip() else None
+    except ValueError:
+        raise ValueError("device_id must be a number or empty") from None
+    if device_id is not None and not 1 <= device_id <= MAX_ID:
+        raise ValueError("device_id out of range")
+    batch = _service(request).link_scanner(ACTOR, scanner_id, device_id)
+    outcome = "unchanged" if batch == 0 else ("linked" if device_id is not None else "unlinked")
+    return _redirect(request, f"/status?scanner={outcome}")
 
 
 def install(app: FastAPI) -> None:

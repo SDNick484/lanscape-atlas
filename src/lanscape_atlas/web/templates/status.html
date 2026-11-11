@@ -1,5 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Status{% endblock %}
+{% block title %}Status{% if scanners %}
+<h2>Bluetooth scanners</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Scanner</th><th>Source</th><th>Linked device</th><th>Room</th><th>Last seen</th><th>Link</th></tr></thead>
+  <tbody>
+  {% for r in scanners %}{% set s = r.s %}
+  <tr id="scanner-{{ s.id }}">
+    <td>{{ s.name or "(unnamed)" }}</td>
+    <td class="mono">{{ s.source }}</td>
+    <td>{% if s.device_id %}<a href="{{ root }}/devices/{{ s.device_id }}">{{ s.device_name or "(unnamed)" }}</a>{% else %}<span class="muted">not linked</span>{% endif %}</td>
+    <td>{{ s.place_name or "" }}</td>
+    <td class="mono">{{ r.age }}</td>
+    <td>
+      <form class="inline" method="post" action="{{ root }}/status/scanners/{{ s.id }}/link">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="sr-only" for="scanner-dev-{{ s.id }}">Device for {{ s.name or s.source }}</label>
+        <select id="scanner-dev-{{ s.id }}" name="device_id">
+          {% for i, n in r.suggested %}<option value="{{ i }}">{{ n }} #{{ i }} (suggested)</option>{% endfor %}
+          <option value=""{% if not s.device_id %} selected{% endif %}>— none —</option>
+          {% if s.device_id %}<option value="{{ s.device_id }}" selected>{{ s.device_name or "(unnamed)" }} #{{ s.device_id }}</option>{% endif %}
+          {% for d in r.others %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="secondary">Link</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}
 {% block content %}
 <h1>Status</h1>
 <p class="stats">
@@ -25,4 +57,36 @@
   </tbody>
 </table>
 </div>
+{% if scanners %}
+<h2>Bluetooth scanners</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Scanner</th><th>Source</th><th>Linked device</th><th>Room</th><th>Last seen</th><th>Link</th></tr></thead>
+  <tbody>
+  {% for r in scanners %}{% set s = r.s %}
+  <tr id="scanner-{{ s.id }}">
+    <td>{{ s.name or "(unnamed)" }}</td>
+    <td class="mono">{{ s.source }}</td>
+    <td>{% if s.device_id %}<a href="{{ root }}/devices/{{ s.device_id }}">{{ s.device_name or "(unnamed)" }}</a>{% else %}<span class="muted">not linked</span>{% endif %}</td>
+    <td>{{ s.place_name or "" }}</td>
+    <td class="mono">{{ r.age }}</td>
+    <td>
+      <form class="inline" method="post" action="{{ root }}/status/scanners/{{ s.id }}/link">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="sr-only" for="scanner-dev-{{ s.id }}">Device for {{ s.name or s.source }}</label>
+        <select id="scanner-dev-{{ s.id }}" name="device_id">
+          {% for i, n in r.suggested %}<option value="{{ i }}">{{ n }} #{{ i }} (suggested)</option>{% endfor %}
+          <option value=""{% if not s.device_id %} selected{% endif %}>— none —</option>
+          {% if s.device_id %}<option value="{{ s.device_id }}" selected>{{ s.device_name or "(unnamed)" }} #{{ s.device_id }}</option>{% endif %}
+          {% for d in r.others %}<option value="{{ d.id }}">{{ d.name or "(unnamed)" }} #{{ d.id }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="secondary">Link</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 {% endblock %}

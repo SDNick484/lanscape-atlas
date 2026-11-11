@@ -278,6 +278,7 @@ POST_ROUTES = (
     "undo",
     "find_claim",
     "ble_unclaim",
+    "scanner_link",
 )
 
 
@@ -302,6 +303,11 @@ def _post_case(name: str, service: Service, app: FastAPI) -> tuple[str, dict[str
         a, b = q.list_devices(service.conn, q="office-laptop", limit=10)
         iface = _view(service, b.id).interfaces[0].id
         return f"/interfaces/{iface}/claim", {"device_id": str(a.id)}
+    if name == "scanner_link":
+        service.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, service.clock())
+        with service.lock:
+            sid = int(service.conn.execute("SELECT id FROM ble_scanner").fetchone()[0])
+        return f"/status/scanners/{sid}/link", {"device_id": str(dev.id)}
     if name in ("find_claim", "ble_unclaim"):
         return _ble_case(name, service, app, dev.id)
     assert name == "undo"

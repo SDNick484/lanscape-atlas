@@ -103,3 +103,75 @@ def test_unplaced_entry_without_room_has_none_place_id(svc, db, make_device, clo
     view = floor_plan_view(db, now=clock())
     assert [u["device_id"] for u in view["unplaced"]] == [dev]
     assert view["unplaced"][0]["place_id"] is None
+
+
+def _hear(svc, device, at, scanner_id_room=None):
+    from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+
+    svc.record_ble_minutes(
+        [
+            MinuteRow(
+                device_id=device,
+                source="00:00:5e:00:53:aa",
+                minute=at.strftime(BLE_MINUTE_FMT),
+                max_rssi=-60,
+                adverts=3,
+                last_at=at,
+            )
+        ]
+    )
+
+
+def _room_scanner(svc, db, make_device, room_name="Room A"):
+    esp = make_device(name="Proxy")
+    svc.set_place("user", esp, room_name)
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, svc.clock())
+    sid = db.execute("select id from ble_scanner").fetchone()[0]
+    svc.link_scanner("user", sid, esp)
+
+
+def test_floor_plan_view_includes_heard(svc, db, make_device, clock):
+    from datetime import timedelta
+
+    room = save_square_room(svc)
+    _room_scanner(svc, db, make_device)
+    fixed = make_device(name="Dev A")
+    phone = make_device(name="Phone A")
+    loose = make_device(name="Dev B")
+    silent = make_device(name="Dev C")
+    svc.place_devices("user", [Placement(fixed, room, 0.3, 0.3, False)], based_on={fixed: 0})
+    svc.place_devices("user", [Placement(phone, room, None, None, True)], based_on={phone: 0})
+    at = clock() - timedelta(hours=1)
+    for d in (fixed, phone, loose):
+        _hear(svc, d, at)
+    view = floor_plan_view(db, now=clock())
+    expect = {"place_id": room, "at": iso(at)}
+    assert view["placed"][0]["heard"] == expect
+    assert view["roaming"][0]["heard"] == expect
+    by_id = {u["device_id"]: u for u in view["unplaced"]}
+    assert by_id[loose]["heard"] == expect
+    assert "heard" not in by_id[silent]
+
+
+def test_floor_plan_view_heard_unlinked_scanner_has_null_place(svc, db, make_device, clock):
+    from datetime import timedelta
+
+    dev = make_device(name="Dev A")
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, clock())
+    at = clock() - timedelta(minutes=5)
+    _hear(svc, dev, at)
+    heard = floor_plan_view(db, now=clock())["unplaced"][0]["heard"]
+    assert heard == {"place_id": None, "at": iso(at)}
+
+
+def test_floor_plan_view_heard_absent_after_24h(svc, db, make_device, clock):
+    from datetime import timedelta
+
+    on_edge = make_device(name="Dev A")
+    stale = make_device(name="Dev B")
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, clock())
+    _hear(svc, on_edge, clock() - timedelta(hours=24))
+    _hear(svc, stale, clock() - timedelta(hours=24, minutes=1))
+    by_id = {u["device_id"]: u for u in floor_plan_view(db, now=clock())["unplaced"]}
+    assert "heard" in by_id[on_edge]
+    assert "heard" not in by_id[stale]

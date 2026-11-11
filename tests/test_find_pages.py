@@ -382,3 +382,59 @@ def _claimed_other(app: FastAPI, make_device: Callable[..., int]) -> int:
     d = make_device(name="Other", type="tag")
     app.state.service.claim_ble("user", Identity("address", ADDR), device_id=d)
     return d
+
+
+# ------------------------------------------------------------ status scanners
+
+
+def _scanner_id(db: sqlite3.Connection) -> int:
+    return int(db.execute("select id from ble_scanner where source = ?", (SCANNER,)).fetchone()[0])
+
+
+def test_status_without_scanners_has_no_table(client: TestClient) -> None:
+    assert "Bluetooth scanners" not in client.get("/status").text
+
+
+def test_status_lists_scanners_with_suggestions(
+    client: TestClient, app: FastAPI, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    app.state.service.upsert_scanners({SCANNER: "<b>kitchen</b>"}, app.state.service.clock())
+    match = make_device(name="<B>Kitchen</B>")
+    other = make_device(name="Other")
+    html = client.get("/status").text
+    assert "Bluetooth scanners" in html
+    assert "<b>kitchen</b>" not in html and "&lt;b&gt;kitchen&lt;/b&gt;" in html
+    sid = _scanner_id(db)
+    assert f'action="/status/scanners/{sid}/link"' in html
+    sel = html.split(f'action="/status/scanners/{sid}/link"', 1)[1].split("</select>", 1)[0]
+    assert sel.index(f'value="{match}"') < sel.index('value=""') < sel.index(f'value="{other}"')
+    assert "suggested" in sel.split(f'value="{match}"', 1)[1].split("</option>", 1)[0]
+
+
+def test_status_link_scanner(
+    client: TestClient, app: FastAPI, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    app.state.service.upsert_scanners({SCANNER: "kitchen"}, app.state.service.clock())
+    esp = make_device(name="Proxy")
+    sid = _scanner_id(db)
+    r = _post(client, f"/status/scanners/{sid}/link", {"device_id": str(esp)})
+    assert r.status_code == 303 and r.headers["location"].endswith("/status?scanner=linked")
+    assert db.execute("select device_id from ble_scanner").fetchone()[0] == esp
+    assert r.headers["location"].endswith("/status?scanner=linked")
+    page = client.get(r.headers["location"]).text
+    assert "Scanner linked." in page and "Proxy" in page
+    # Unchanged: a flash, no new batch.
+    r = _post(client, f"/status/scanners/{sid}/link", {"device_id": str(esp)})
+    assert r.status_code == 303 and r.headers["location"].endswith("/status?scanner=unchanged")
+    assert "No change." in client.get(r.headers["location"]).text
+    # Unlink with the empty choice.
+    r = _post(client, f"/status/scanners/{sid}/link", {"device_id": ""})
+    assert r.status_code == 303
+    assert db.execute("select device_id from ble_scanner").fetchone()[0] is None
+    # Unknown scanner / device: the HTML 404.
+    r = _post(client, "/status/scanners/9999/link", {"device_id": ""})
+    assert r.status_code == 404 and "text/html" in r.headers["content-type"]
+    r = _post(client, f"/status/scanners/{sid}/link", {"device_id": "9999"})
+    assert r.status_code == 404
+    r = _post(client, f"/status/scanners/{sid}/link", {"device_id": "abc"})
+    assert r.status_code == 422

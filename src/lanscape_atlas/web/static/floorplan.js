@@ -123,6 +123,7 @@
       set_by: d.set_by || null,
       set_at: d.set_at || null,
       last_batch: d.last_batch || 0,
+      heard: d.heard && typeof d.heard === "object" ? d.heard : null,
     };
     Object.keys(extra).forEach(function (k) { dev[k] = extra[k]; });
     devices[dev.id] = dev;
@@ -209,7 +210,9 @@
         return;
       }
       var pts = poly.map(function (p) { return (p[0] * W).toFixed(2) + "," + (p[1] * H).toFixed(2); });
-      gRooms.appendChild(svgEl("polygon", { "class": "fp-room", "data-room-id": r.id, points: pts.join(" ") }));
+      var sel = selected !== null ? devices[selected] : null;
+      var heardHere = !!(sel && sel.heard && sel.heard.place_id === r.id);
+      gRooms.appendChild(svgEl("polygon", { "class": "fp-room" + (heardHere ? " room--heard" : ""), "data-room-id": r.id, points: pts.join(" ") }));
       var cx = 0, cy = 0;
       poly.forEach(function (p) { cx += p[0]; cy += p[1]; });
       var text = svgEl("text", {
@@ -317,7 +320,7 @@
       var h = document.createElement("h3");
       h.textContent = g.name;
       var ul = document.createElement("ul");
-      g.items.forEach(function (d) { ul.appendChild(trayItem(d, g.room !== null)); });
+      g.items.forEach(function (d) { ul.appendChild(trayItem(d, g.room !== null, g.room ? g.room.id : null)); });
       box.appendChild(h);
       box.appendChild(ul);
       trayEl.appendChild(box);
@@ -330,7 +333,7 @@
     }
   }
 
-  function trayItem(d, inRoom) {
+  function trayItem(d, inRoom, roomId) {
     var li = document.createElement("li");
     li.className = "fp-item" + (dirty[d.id] ? " dirty" : "") + (d.online ? "" : " offline");
     li.setAttribute("data-tray-device", String(d.id));
@@ -338,6 +341,13 @@
     name.className = "fp-name";
     name.textContent = label(d.name);
     li.appendChild(name);
+    if (roomId !== null && d.heard && d.heard.place_id === roomId) {
+      var chip = document.createElement("span");
+      chip.className = "chip heard";
+      chip.title = "Heard here by a Bluetooth scanner";
+      chip.textContent = "heard";
+      li.appendChild(chip);
+    }
     if (d.roaming && !dirty[d.id] && d.set_by) {
       var stamp = document.createElement("small");
       stamp.className = "set-by";
@@ -375,6 +385,20 @@
       if (x !== null && devices[x]) { updateMarker(devices[x]); }
     });
     showSelected();
+    updateHeardRoom();
+  }
+
+  // Highlight the room the selected device was last heard in (clear it otherwise).
+  function updateHeardRoom() {
+    if (!svg) {
+      return;
+    }
+    var sel = selected !== null ? devices[selected] : null;
+    var want = sel && sel.heard && sel.heard.place_id !== null ? String(sel.heard.place_id) : null;
+    var polys = svg.querySelectorAll("polygon.fp-room");
+    for (var i = 0; i < polys.length; i += 1) {
+      polys[i].classList.toggle("room--heard", want !== null && polys[i].getAttribute("data-room-id") === want);
+    }
   }
 
   function showSelected() {

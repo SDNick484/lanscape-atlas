@@ -486,3 +486,32 @@ def test_device_page_roaming_needs_room(
     assert r.status_code == 422 and _is_html(r)
     assert "room" in r.text and "flash error" in r.text
     assert _device_row(db, seeded_device)["roaming"] == 0
+
+
+def test_floorplan_page_renders_heard_chip(
+    client: TestClient, svc: Service, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    from datetime import timedelta
+
+    from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+
+    room = save_square_room(svc)
+    esp = make_device(name="Proxy")
+    svc.set_place("user", esp, "Room A")
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, svc.clock())
+    sid = db.execute("select id from ble_scanner").fetchone()[0]
+    svc.link_scanner("user", sid, esp)
+    heard = make_device(name="Keys")
+    quiet = make_device(name="Quiet")
+    svc.place_devices("user", [Placement(heard, room, None, None, True)], based_on={heard: 0})
+    svc.place_devices("user", [Placement(quiet, room, None, None, True)], based_on={quiet: 0})
+    at = svc.clock() - timedelta(minutes=3)
+    svc.record_ble_minutes(
+        [MinuteRow(heard, "00:00:5e:00:53:aa", at.strftime(BLE_MINUTE_FMT), -50, 2, at)]
+    )
+    html = client.get("/floorplan").text
+    assert _data_block(html)["roaming"][0]["heard"]["place_id"] == room
+    keys = html.split(f'data-tray-device="{heard}"', 1)[1].split("</li>", 1)[0]
+    assert 'class="chip heard"' in keys
+    quiet_li = html.split(f'data-tray-device="{quiet}"', 1)[1].split("</li>", 1)[0]
+    assert "chip heard" not in quiet_li
