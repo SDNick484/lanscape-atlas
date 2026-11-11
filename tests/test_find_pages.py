@@ -402,7 +402,7 @@ def test_status_lists_scanners_with_suggestions(
     match = make_device(name="<B>Kitchen</B>")
     other = make_device(name="Other")
     html = client.get("/status").text
-    assert "Bluetooth scanners" in html
+    assert html.count("Bluetooth scanners") == 1  # once, in the body (not in the title block)
     assert "<b>kitchen</b>" not in html and "&lt;b&gt;kitchen&lt;/b&gt;" in html
     sid = _scanner_id(db)
     assert f'action="/status/scanners/{sid}/link"' in html
