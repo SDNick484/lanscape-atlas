@@ -1,0 +1,347 @@
+[
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1000.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -79,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1015.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -83,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1030.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -61,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1045.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1060.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -79,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1075.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -83,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1090.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -61,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1105.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:20",
+  "rssi": -70,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Tag A",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1120.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:21",
+  "rssi": -66,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Tag B",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1135.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:02",
+  "rssi": -74,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000200050006c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1150.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1165.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -79,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1180.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -83,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1195.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -61,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1210.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1225.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -79,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1240.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -83,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1255.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -61,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1270.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:20",
+  "rssi": -70,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Tag A",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1285.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:21",
+  "rssi": -66,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Tag B",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1300.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:02",
+  "rssi": -74,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000200050006c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1315.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1330.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -79,
+  "source": "00:00:5e:00:53:a2",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1345.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -83,
+  "source": "00:00:5e:00:53:a1",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1360.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -61,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1375.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:30",
+  "rssi": -90,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1390.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:01",
+  "rssi": -55,
+  "source": "00:00:5e:00:53:a1",
+  "name": null,
+  "manufacturer_data": {
+   "76": "02150000000000004000800000000000000100010001c5"
+  },
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1405.0,
+  "connectable": false
+ },
+ {
+  "address": "00:00:5e:00:53:10",
+  "rssi": -58,
+  "source": "00:00:5e:00:53:a2",
+  "name": "Remote",
+  "manufacturer_data": {},
+  "service_data": {},
+  "service_uuids": [],
+  "time": 1420.0,
+  "connectable": false
+ }
+]

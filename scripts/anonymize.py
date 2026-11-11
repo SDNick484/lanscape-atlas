@@ -2,7 +2,7 @@
 """Rewrite a real network capture into documentation-range values.
 
 Usage:
-    python scripts/anonymize.py --seed S [--names FILE] in_file > out_file
+    python scripts/anonymize.py --seed S [--names FILE] [--ble] in_file > out_file
 
 Reads ``in_file`` and writes the rewritten text to stdout. Exits 1 with a message on
 stderr if the capture has more distinct addresses than the documentation ranges hold.
@@ -24,6 +24,24 @@ What is rewritten
   those strings, case-insensitively and on word edges, to ``host-<n>`` (n counts from 1 in
   order of first sight in the names file).
 
+Bluetooth advert captures (``--ble``)
+-------------------------------------
+``--ble`` reads a Home Assistant advert capture: ONE JSON LIST of advert dicts, the objects
+``bluetooth/subscribe_advertisements`` delivers (``address``, ``source``, ``rssi``, ``name``,
+``manufacturer_data`` as ``{"<company id>": "<hex>"}``, optionally ``service_uuids``, ``time``).
+JSON lines are not accepted. The output is the same list, pretty-printed. Rewritten:
+
+* ``address`` and ``source`` (the scanner) map to ``00:00:5e:00:53:xx`` (one shared pool of
+  256, one mapping per capture), static-random addresses included. The random bit is NOT
+  kept: the output carries no real address or address type.
+* Every iBeacon UUID (the 16 bytes inside the Apple, company ``76``, ``0215...`` frame of
+  ``manufacturer_data``) and every other full UUID in a string value, except those on the
+  Bluetooth base (``-0000-1000-8000-00805f9b34fb``), maps to
+  ``00000000-0000-4000-8000-0000000000xx`` (256 slots; more raises ``ValueError``). The
+  iBeacon major, minor and TX power are kept.
+* ``name`` goes through ``--names`` like free text. Other manufacturer payloads and
+  ``service_data`` are copied as they are: review them by hand.
+
 The mapping is deterministic per ``Anonymizer`` instance and never written to disk, so keep
 the real input out of the repository. Run ``scripts/check_leaks.py`` on the output.
 """
@@ -33,9 +51,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import ipaddress
+import json
 import re
 import sys
+import uuid
 from pathlib import Path
+from typing import Any
 
 _MAC_RE = re.compile(
     r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2})"
@@ -44,6 +65,14 @@ _MAC_RE = re.compile(
 )
 _IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
 
+_UUID_RE = re.compile(
+    r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+    r"(?![0-9A-Fa-f])"
+)
+_BT_BASE_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+_APPLE_KEY = "76"
+_IBEACON_HEX_PREFIX = "0215"
+_BLE_UUID_FMT = "00000000-0000-4000-8000-0000000000{:02x}"
 _DOC_NETS = ("192.0.2", "198.51.100", "203.0.113")
 _UNCHANGED = (
     ipaddress.ip_network("127.0.0.0/8"),
@@ -66,6 +95,8 @@ class Anonymizer:
         self.seed = seed
         self._macs: dict[str, str] = {}
         self._mac_used: dict[bool, set[int]] = {False: set(), True: set()}
+        self._ble_addrs: dict[str, str] = {}
+        self._ble_uuids: dict[str, str] = {}
         self._ips: dict[str, str] = {}
         self._ip_used: list[set[int]] = [set(), set(), set()]
         self._net = 0
@@ -95,6 +126,75 @@ class Anonymizer:
         prefix = "02:00:5e:00:53" if random else "00:00:5e:00:53"
         out = f"{prefix}:{slot:02x}"
         self._macs[digits] = out
+        return out
+
+    # ------------------------------------------------------------ Bluetooth
+    def ble_address(self, real: str) -> str:
+        """Map a Bluetooth address (or scanner source) to ``00:00:5e:00:53:xx``."""
+        digits = _plain_mac(real)
+        if digits not in self._ble_addrs:
+            slot = self._ble_slot("address", digits, len(self._ble_addrs), self._ble_addrs)
+            self._ble_addrs[digits] = f"00:00:5e:00:53:{slot:02x}"
+        return self._ble_addrs[digits]
+
+    def ble_uuid(self, real: str) -> str:
+        """Map a UUID to ``00000000-0000-4000-8000-0000000000xx``."""
+        key = str(uuid.UUID(real.strip()))
+        if key not in self._ble_uuids:
+            slot = self._ble_slot("uuid", key, len(self._ble_uuids), self._ble_uuids)
+            self._ble_uuids[key] = _BLE_UUID_FMT.format(slot)
+        return self._ble_uuids[key]
+
+    def _ble_slot(self, what: str, key: str, used_count: int, table: dict[str, str]) -> int:
+        if used_count >= 256:
+            raise ValueError(f"Bluetooth {what} capacity exceeded: more than 256 distinct values")
+        taken = {int(v[-2:], 16) for v in table.values()}
+        slot = hashlib.sha256(f"{self.seed}\0{what}\0{key}".encode()).digest()[0]
+        while slot in taken:
+            slot = (slot + 1) % 256
+        return slot
+
+    def _ble_string(self, text: str) -> str:
+        def sub(m: re.Match[str]) -> str:
+            if m.group().lower().endswith(_BT_BASE_SUFFIX):
+                return m.group()
+            return self.ble_uuid(m.group())
+
+        return _UUID_RE.sub(sub, text)
+
+    def _ble_manufacturer_hex(self, key: str, value: str) -> str:
+        low = value.lower()
+        if key == _APPLE_KEY and low.startswith(_IBEACON_HEX_PREFIX) and len(low) >= 44:
+            raw = low[4:36]
+            new = self.ble_uuid(str(uuid.UUID(hex=raw))).replace("-", "")
+            return low[:4] + new + low[36:]
+        return value
+
+    def _ble_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._ble_string(self.transform_names(value))
+        if isinstance(value, list):
+            return [self._ble_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._ble_value(v) for k, v in value.items()}
+        return value
+
+    def transform_adverts(self, adverts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Rewrite a list of Home Assistant advert dicts (see the module docstring)."""
+        out: list[dict[str, Any]] = []
+        for adv in adverts:
+            new: dict[str, Any] = {}
+            for k, v in adv.items():
+                if k in ("address", "source") and isinstance(v, str):
+                    new[k] = self.ble_address(v)
+                elif k == "manufacturer_data" and isinstance(v, dict):
+                    new[k] = {
+                        mk: self._ble_manufacturer_hex(str(mk), mv) if isinstance(mv, str) else mv
+                        for mk, mv in v.items()
+                    }
+                else:
+                    new[k] = self._ble_value(v)
+            out.append(new)
         return out
 
     # ----------------------------------------------------------------- IPv4
@@ -148,11 +248,15 @@ class Anonymizer:
         except ipaddress.AddressValueError:
             return m.group()  # e.g. 999.1.1.1 or 01.2.3.4: not an address
 
-    def transform_text(self, text: str) -> str:
+    def transform_names(self, text: str) -> str:
         if self._names:
             alts = "|".join(re.escape(n) for n in sorted(set(self._names), key=len, reverse=True))
             pat = re.compile(rf"(?<![A-Za-z0-9])(?:{alts})(?![A-Za-z0-9])", re.IGNORECASE)
             text = pat.sub(lambda m: self.hostname(m.group()), text)
+        return text
+
+    def transform_text(self, text: str) -> str:
+        text = self.transform_names(text)
         text = _MAC_RE.sub(self._sub_mac, text)
         return _IPV4_RE.sub(self._sub_ip, text)
 
@@ -161,6 +265,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Rewrite a capture into documentation-range values.")
     ap.add_argument("--seed", required=True, help="salt for the stable MAC mapping")
     ap.add_argument("--names", type=Path, help="file of real hostnames, one per line")
+    ap.add_argument(
+        "--ble",
+        action="store_true",
+        help="in_file is a JSON list of Home Assistant Bluetooth advert dicts",
+    )
     ap.add_argument("in_file", type=Path)
     args = ap.parse_args(argv)
     try:
@@ -172,8 +281,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"anonymize: {exc}", file=sys.stderr)
         return 1
     try:
-        out = Anonymizer(args.seed, names).transform_text(text)
-    except ValueError as exc:
+        anon = Anonymizer(args.seed, names)
+        if args.ble:
+            data = json.loads(text)
+            if not isinstance(data, list) or not all(isinstance(d, dict) for d in data):
+                raise ValueError("--ble expects a JSON list of advert objects")
+            out = json.dumps(anon.transform_adverts(data), indent=1) + "\n"
+        else:
+            out = anon.transform_text(text)
+    except ValueError as exc:  # includes json.JSONDecodeError
         print(f"anonymize: {exc}", file=sys.stderr)
         return 1
     sys.stdout.write(out)

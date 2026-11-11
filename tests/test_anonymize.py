@@ -6,9 +6,13 @@ leak checker.
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -157,3 +161,114 @@ def test_cli_overflow_exits_1(tmp_path: Path) -> None:
     )
     assert res.returncode == 1
     assert "capacity" in res.stderr.lower()
+
+
+# ---------------------------------------------------------------- BLE capture mode
+
+
+def _ibeacon_hex(uid: str, major: int = 1, minor: int = 2) -> str:
+    return (
+        "0215" + uid.replace("-", "") + f"{major:04x}{minor:04x}" + "c5"
+    )  # Apple iBeacon frame, tx power 0xc5
+
+
+def _real_uuid(n: int) -> str:
+    return str(uuid.UUID(int=0x1234_5678_9ABC_4DEF_8123_4567_89AB_0000 + n))
+
+
+def _ble_capture() -> list[dict[str, Any]]:
+    scanner = mac(0x24, 0x6F, 0x28, 0x01, 0x02, 0x03).upper()
+    tag = mac(0xC1, 0x11, 0x22, 0x33, 0x44, 0x55)  # static random, built at runtime
+    return [
+        {
+            "address": mac(0xA8, 0xBB, 0xCC, 0x11, 0x22, 0x33),
+            "rssi": -60,
+            "source": scanner,
+            "name": "Den Remote",
+            "manufacturer_data": {"76": _ibeacon_hex(_real_uuid(1))},
+            "service_uuids": ["0000180f-0000-1000-8000-00805f9b34fb", _real_uuid(2)],
+            "time": 100.5,
+        },
+        {
+            "address": tag,
+            "rssi": -71,
+            "source": scanner,
+            "name": None,
+            "manufacturer_data": {"76": _ibeacon_hex(_real_uuid(1), 9, 9), "6": "0109"},
+            "time": 101.5,
+        },
+        {
+            "address": mac(0xA8, 0xBB, 0xCC, 0x11, 0x22, 0x33),
+            "rssi": -64,
+            "source": mac(0x24, 0x6F, 0x28, 0x0A, 0x0B, 0x0C),
+            "manufacturer_data": {},
+            "time": 102.5,
+        },
+    ]
+
+
+def test_anonymize_rewrites_ble_addresses_and_uuids() -> None:
+    cap = _ble_capture()
+    a = Anonymizer("s", names=["Den Remote"])
+    out = a.transform_adverts(cap)
+    assert len(out) == 3
+    # every address and source lands in the public documentation range, static random too
+    for adv in out:
+        assert adv["address"].startswith("00:00:5e:00:53:")
+        assert adv["source"].startswith("00:00:5e:00:53:")
+    # consistent: same input, same output, within and across the capture
+    assert out[0]["address"] == out[2]["address"]
+    assert out[0]["source"] == out[1]["source"] != out[2]["source"]
+    assert out[0]["address"] != out[1]["address"]
+    # the iBeacon UUID inside manufacturer hex is rewritten consistently, major/minor kept
+    h0, h1 = out[0]["manufacturer_data"]["76"], out[1]["manufacturer_data"]["76"]
+    assert h0.startswith("0215" + "00000000" + "0000" + "4000" + "8000" + "0000000000")
+    assert h0[4:36] == h1[4:36]
+    assert h0[36:] == "00010002c5" and h1[36:] == "00090009c5"
+    assert len(h0) == len(_ibeacon_hex(_real_uuid(1)))
+    # other manufacturer payloads and the Bluetooth base UUID are untouched
+    assert out[1]["manufacturer_data"]["6"] == "0109"
+    assert out[0]["service_uuids"][0] == "0000180f-0000-1000-8000-00805f9b34fb"
+    assert re.fullmatch(
+        r"00000000-0000-4000-8000-0000000000[0-9a-f]{2}", out[0]["service_uuids"][1]
+    )
+    assert out[0]["name"] == "host-1" and out[1]["name"] is None
+    assert out[0]["rssi"] == -60 and out[0]["time"] == 100.5
+    # the real values are gone from the serialised result
+    text = json.dumps(out).lower()
+    for real in ("a8:bb", "24:6f", "c1:11", "12345678", _real_uuid(1).replace("-", "")):
+        assert real not in text
+    assert Anonymizer("s", names=["Den Remote"]).transform_adverts(cap) == out
+    assert find_leaks(text, "cap.json", set()) == []
+
+
+def test_ble_uuid_capacity() -> None:
+    a = Anonymizer("s")
+    for i in range(256):
+        a.ble_uuid(_real_uuid(i))
+    with pytest.raises(ValueError, match="capacity"):
+        a.ble_uuid(_real_uuid(256))
+
+
+def test_ble_cli_roundtrip(tmp_path: Path) -> None:
+    src = tmp_path / "adverts.json"
+    src.write_text(json.dumps(_ble_capture()))
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT), "--seed", "x", "--ble", str(src)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out[0]["address"].startswith("00:00:5e:00:53:")
+    assert find_leaks(res.stdout, "out.json", set()) == []
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"not": "a list"}')
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT), "--seed", "x", "--ble", str(bad)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 1 and "list" in res.stderr

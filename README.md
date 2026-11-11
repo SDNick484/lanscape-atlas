@@ -30,6 +30,8 @@ ranges, not a real network.
   in the same process.
 - **Vendor lookup** from a local IEEE OUI file; no network call at lookup time.
 - **Floor plan** (Phase 2): upload a plan, draw rooms, place devices. See below.
+- **Bluetooth Find** (Phase 3): where was my remote or phone last heard, by room, from
+  ESP32 Bluetooth proxies through Home Assistant. See below.
 
 ## Floor plan
 
@@ -70,6 +72,113 @@ Put real room names in a denylist file and point `LANSCAPE_LEAK_DENYLIST` (or
 scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
 before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
 directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
+
+## Bluetooth (Find)
+
+The **Find** page (`/find`) answers "where did I last hear this?" for Bluetooth devices
+you have claimed: the room, how long ago, how strong, and a findability badge. The same
+answer is on the device page, on the floor plan (the room a selected device was last heard
+in is highlighted, and the device appears as a "heard" entry in that room's list) and over
+MCP (`where_is`). Bluetooth never moves a device on the plan; it only reports where it was
+heard.
+
+Sightings come from Home Assistant's Bluetooth integration, which already merges the
+adverts of every ESP32 Bluetooth proxy and local adapter. lanscape-atlas subscribes to
+that stream over HA's WebSocket API; it does not talk to the proxies itself.
+
+### Prerequisites
+
+- Home Assistant with the **Bluetooth** integration and at least one proxy (ESPHome
+  Bluetooth proxy, or a local adapter).
+- A **long-lived access token** from an **administrator** account (profile page, *Security*,
+  *Long-lived access tokens*). Home Assistant only allows the `bluetooth/subscribe_advertisements`
+  command for administrators, so a token from a non-admin user is refused. The token is a
+  secret: it can control your whole Home Assistant. Keep it out of the repository and out of
+  logs; lanscape-atlas redacts it from its own output.
+
+### Connecting to Home Assistant
+
+`config.example.toml` ships the `[home_assistant]` table commented out, because a URL
+without a token is a configuration error. Uncomment it and set the URL:
+
+```toml
+[home_assistant]
+url = "http://192.0.2.10:8123"
+verify_tls = true
+
+[bluetooth]
+retention_days = 14   # nightly prune of per-minute sightings
+flush_s = 60          # how often closed minutes are written to the database
+```
+
+Provide the token through the environment (preferred) rather than in `config.toml`:
+
+```sh
+export LANSCAPE_HA_TOKEN='paste-the-token-here'
+```
+
+Edit the file with `vim` and restart the service. Without a `[home_assistant]` table the
+Find page still shows claimed devices from the database but says it needs Home Assistant.
+
+### Android phones
+
+A phone is only findable while something advertises. Install the Home Assistant Companion
+app and, under *Settings*, *Companion app*, *Manage sensors*, turn on **BLE Transmitter**.
+Pick an advertise mode (*Balanced* is a reasonable start; *Low latency* is faster but uses
+more battery) and leave *Transmit power* at its default. Then exempt the app from battery
+optimisation (Android *Settings*, *Apps*, Home Assistant, *Battery*, *Unrestricted*);
+otherwise Android throttles the app and "last heard" lags by many minutes. The sensor
+exposes the iBeacon ID (UUID, major, minor); the candidate list shows the same identity as
+`<uuid>/<major>/<minor>`.
+
+### Claiming a device
+
+Open `/find`. Under **Candidates** are stable devices heard recently that are not yet
+claimed: iBeacons, and addresses that look stable (a known vendor, a static-random
+address, or one heard steadily for 30 minutes). Press a remote's button, or hold a tag
+next to a proxy, and its signal strength stands out. Press **Claim** and either attach it
+to an existing device or create a new one (name and type). Claims are in History and can
+be undone; the device page has an **Unclaim** button.
+
+### Linking scanners
+
+Room-level location comes from where each proxy is. On the **Status** page, under
+**Bluetooth scanners**, link each proxy to the atlas device it runs on, then give that
+device a room on the floor plan. The page suggests devices whose name matches the proxy
+or whose Wi-Fi MAC plus 2 equals the proxy's Bluetooth address (an ESP32's Bluetooth MAC
+is usually its Wi-Fi MAC plus 2). An unlinked scanner still records sightings, but
+without a room.
+
+### What is findable
+
+| Kind | How it is matched | What "last heard" means |
+|---|---|---|
+| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, typically within 1-2 min. Lags if Android battery optimisation throttles the app. |
+| Beaconing remote (advertises every few seconds) | Static or public address | Current. |
+| Press-to-advertise remote | Static or public address | When it was last pressed. |
+| Headphones with a stable address | Static or public address | Last time they were idle and nearby. Many go silent while connected. |
+| Anything with a rotating address | Not matched | Not findable. Never shown. |
+
+The Find page badge (steady, intermittent, not heard in 24 hours) comes from observed
+behaviour, so you can see which devices are reliable.
+
+### ESPHome example
+
+`deploy/esphome/ble-proxy.example.yaml` is a generic classic-ESP32 proxy: passive scanning
+with a moderate duty cycle (a Wi-Fi ESP32 shares one radio), and only `!secret` references
+for credentials. It is a reference. Adopt your proxies in Home Assistant's ESPHome
+integration and keep the real per-proxy YAML and `secrets.yaml` there, not in this
+repository.
+
+### Limitations
+
+- Each sighting is attributed to the one scanner that owns the advert in Home Assistant, so
+  the "room" is that scanner's room. A device between two rooms flips when ownership
+  changes; switching is coarse, not trilateration.
+- Home Assistant must be reachable. While the link is down the Find page shows a banner and
+  no new sightings are recorded; adverts are not buffered.
+- Devices that rotate their address (iPhones, AirPods and most modern phones and earbuds)
+  cannot be matched and are not findable.
 
 ## Requirements
 
@@ -289,7 +398,7 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
 `claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
-`get_floor_plan`, `place_devices`.
+`get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
 its own batch and can be undone like any other change. Tool output never includes
@@ -349,6 +458,17 @@ Tools:
   `host-2`, and so on. Hostnames are not detected automatically, so list them.
   Keep the real capture and names file out of the repository.
 
+  For a Home Assistant Bluetooth advert capture (one JSON list of the advert objects
+  `bluetooth/subscribe_advertisements` delivers; JSON lines are not accepted) add `--ble`:
+
+  ```sh
+  python scripts/anonymize.py --seed SOME_SEED --ble capture.json > ha_adverts.json
+  ```
+
+  Every address and scanner source becomes `00:00:5e:00:53:xx` and every iBeacon UUID
+  `00000000-0000-4000-8000-0000000000xx`, consistently within the capture. Other manufacturer
+  payloads are copied as they are; review them by hand.
+
 Neither tool detects bare 12-hex-digit MACs without separators (for example
 `aabbccddeeff`). Review such values by hand before committing.
 
@@ -366,7 +486,7 @@ Neither tool detects bare 12-hex-digit MACs without separators (for example
 | Phase | Scope |
 |---|---|
 | 2 (done) | Floor plan: upload an image or SVG, draw rooms, drag devices onto them |
-| 3 | Bluetooth presence via ESP32/ESPHome Bluetooth proxies, with rough room location |
+| 3 (done) | Bluetooth "Find" via Home Assistant and ESP32/ESPHome Bluetooth proxies, with rough room location |
 | 4 | MQTT / Home Assistant publishing and new-device notifications |
 | 5 | Z-Wave devices via Hubitat or Home Assistant |
 

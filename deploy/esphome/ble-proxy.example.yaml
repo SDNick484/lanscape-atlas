@@ -1,0 +1,39 @@
+# Example ESPHome configuration for a Bluetooth proxy that lanscape-atlas can use through
+# Home Assistant. This is a reference only: adopt the proxy in the ESPHome integration of
+# Home Assistant and keep your real per-proxy YAML there. Secrets stay in ESPHome's
+# secrets.yaml, never in this repository.
+#
+# Classic ESP32 (esp32dev). A classic ESP32 handles Bluetooth and Wi-Fi on one radio, so
+# passive scanning (active: false) with a window shorter than the interval leaves time
+# for Wi-Fi.
+
+esphome:
+  name: ble-proxy-example
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 120ms
+    active: false
+
+bluetooth_proxy:
+  active: false
