@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
 from lanscape_atlas.bluetooth.match import Identity
@@ -141,6 +141,26 @@ def test_badge_intermittent_at_47_minutes(
     _claim(svc, d)
     _fill_minutes(svc, d, 47)
     assert q.badge(db, d, now=NOW) == "intermittent"
+
+
+def test_badge_window_lower_edge_excluded_at_minus_60(
+    svc: Service, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    d = make_device(name="Keys")
+    _claim(svc, d)
+    _fill_minutes(svc, d, 47)
+    _hear(svc, d, NOW - timedelta(minutes=60))
+    assert q.badge(db, d, now=NOW) == "intermittent"
+
+
+def test_badge_window_lower_edge_included_at_minus_59(
+    svc: Service, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    d = make_device(name="Keys")
+    _claim(svc, d)
+    _fill_minutes(svc, d, 47)
+    _hear(svc, d, NOW - timedelta(minutes=59))
+    assert q.badge(db, d, now=NOW) == "steady"
 
 
 def test_badge_counts_distinct_minutes_across_scanners(
@@ -288,3 +308,16 @@ def test_identities(svc: Service, db: sqlite3.Connection, make_device: Callable[
         "value": "00:00:5e:00:53:01",
     }
     assert set(row) == {"id", "kind", "value", "created_at"}
+
+
+def test_hourly_strip_non_utc_now_matches_utc(
+    svc: Service, db: sqlite3.Connection, make_device: Callable[..., int]
+) -> None:
+    d = make_device(name="Keys")
+    _claim(svc, d)
+    _hear(svc, d, NOW - timedelta(minutes=3))
+    _hear(svc, d, NOW - timedelta(hours=5))
+    local = NOW.astimezone(timezone(timedelta(hours=-8)))
+    assert local.hour != NOW.hour
+    assert q.hourly_strip(db, d, now=local) == q.hourly_strip(db, d, now=NOW)
+    assert q.badge(db, d, now=local) == q.badge(db, d, now=NOW)

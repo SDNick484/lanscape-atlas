@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT
@@ -85,6 +85,7 @@ def last_heard(conn: sqlite3.Connection, device_id: int) -> LastHeard | None:
 def _badge(
     conn: sqlite3.Connection, device_id: int, last: LastHeard | None, now: datetime
 ) -> Badge:
+    now = now.astimezone(UTC)
     if last is None or last.at < now - timedelta(hours=24):
         return "not_heard_24h"
     end = last.at.strftime(BLE_MINUTE_FMT)
@@ -126,7 +127,7 @@ def hourly_strip(conn: sqlite3.Connection, device_id: int, *, now: datetime) -> 
 
     Each is the place (or ``near <scanner>``) with the most adverts that hour.
     """
-    end_hour = now.replace(minute=0, second=0, microsecond=0)
+    end_hour = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
     start = end_hour - timedelta(hours=_STRIP_HOURS - 1)
     rows = conn.execute(
         "SELECT substr(s.minute, 1, 13) AS hour, s.adverts, p.name AS place_name,"
