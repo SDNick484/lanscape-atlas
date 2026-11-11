@@ -422,3 +422,18 @@ async def test_handshake_timeout_is_an_error_and_retried(
         assert not client.status().connected
 
     await run(client, body)
+
+
+async def test_since_is_start_time_before_any_connection(clock: FixedClock) -> None:
+    settings = HomeAssistantSettings(url="http://127.0.0.1:1", token=TOKEN)
+    sink = Sink()
+    client = HaBluetoothClient(settings, sink.on_advert, sink.on_scanners, clock, backoff_s=(30,))
+    assert client.status().since is None  # not started
+    await client.start()
+    started = clock()
+    try:
+        await wait_for(lambda: client.status().last_error is not None)
+        status = client.status()
+        assert not status.connected and status.since == started
+    finally:
+        await client.stop()

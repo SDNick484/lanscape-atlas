@@ -283,10 +283,29 @@ def test_banner_after_two_minutes_down(client: TestClient, app: FastAPI, clock: 
 def test_no_banner_within_two_minutes(client: TestClient, app: FastAPI, clock: FixedClock) -> None:
     _down(app, clock, 1)
     assert "unreachable" not in client.get("/find").text
-    app.state.bluetooth = StubRuntime([], ClientStatus(False, None, "x"))
+    app.state.bluetooth = StubRuntime([], ClientStatus(False, None, "x"))  # not started
     assert "unreachable" not in client.get("/find").text
     app.state.bluetooth = StubRuntime([], ClientStatus(True, clock() - timedelta(hours=1), None))
     assert "unreachable" not in client.get("/find").text
+
+
+def test_never_connected_banner_counts_from_start(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    started = clock()  # what HaBluetoothClient.start() stamps as since
+    app.state.bluetooth = StubRuntime([], ClientStatus(False, started, "auth_invalid: ***"))
+    clock.advance(minutes=1)
+    assert "unreachable" not in client.get("/find").text
+    clock.advance(minutes=2)
+    html = client.get("/find").text
+    assert "Home Assistant is unreachable" in html and "auth_invalid: ***" in html
+
+
+def test_claimed_param_out_of_range(client: TestClient) -> None:
+    # Same convention as other page ids: out of range is a 422 HTML error, never a 500.
+    for bad in (str(2**63), "0", "-1"):
+        r = client.get("/find", params={"claimed": bad})
+        assert r.status_code == 422 and "text/html" in r.headers["content-type"]
 
 
 def test_find_says_not_configured(client: TestClient, app: FastAPI) -> None:
@@ -319,8 +338,11 @@ def test_device_page_last_heard_and_strip(
     _hear(app, d, clock() - timedelta(minutes=4))
     html = client.get(f"/devices/{d}").text
     assert "Last heard near Kitchen, 4 min ago" in html
-    assert len(re.findall(r'class="hour', html)) == 24
-    assert "Kitchen" in html.split('id="device-ble"')[1]
+    cells = re.findall(r'<li class="hour[^"]*" title="([^"]*)"', html)
+    assert len(cells) == 24
+    # The clock is 00:00, so 4 minutes ago falls in the previous hour (index 22).
+    assert cells[22] == "1 h ago: Kitchen"
+    assert all(c.endswith("not heard") for i, c in enumerate(cells) if i != 22)
     assert KEY in html and "Unclaim" in html
 
 

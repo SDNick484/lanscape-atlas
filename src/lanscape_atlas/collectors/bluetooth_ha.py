@@ -86,6 +86,8 @@ class HaBluetoothClient:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
+        if self._since is None:
+            self._since = self._clock()  # the disconnected state begins at start
         self._task = asyncio.create_task(self._run(), name="ha-bluetooth")
 
     async def stop(self) -> None:

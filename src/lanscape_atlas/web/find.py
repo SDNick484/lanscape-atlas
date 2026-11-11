@@ -5,18 +5,17 @@ the aggregator is not thread-safe, so candidates are copied on the event loop an
 all DB work runs in a worker thread. The device-page unclaim is a plain DB write.
 
 The banner shows only when Bluetooth is configured, the HA connection is down and has
-been for more than ``BANNER_AFTER``. ``status().since`` of ``None`` (never connected
-or disconnected yet) counts as "not down long enough": the banner never appears on a
-fresh start, and the status page already shows the collector state.
+been for more than ``BANNER_AFTER``. The client stamps ``since`` at start, so a
+never-connected client counts from startup; ``since is None`` (not started) shows none.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
@@ -132,7 +131,11 @@ def _find_page(
 
 
 @router.get("/find", response_class=HTMLResponse)
-async def find_page(request: Request, q: str | None = None, claimed: int | None = None) -> Response:
+async def find_page(
+    request: Request,
+    q: str | None = None,
+    claimed: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+) -> Response:
     ctx = await _context(request, q, full=True)
     flash = None
     if claimed is not None:
