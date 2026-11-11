@@ -74,6 +74,9 @@ accepted (§2).
 
 `remove` events are ignored for storage. "Last heard" comes from the last advert.
 
+Minutes are bucketed by atlas's clock at receipt, not HA's `time` field, so HA clock skew
+cannot misfile a sighting.
+
 ### 4.3 Components
 
 - **`collectors/bluetooth_ha.py` — `HaBluetoothClient`.** Long-lived, like the mDNS
@@ -85,7 +88,7 @@ accepted (§2).
   - `identity_of(advert) -> Identity | None`: the iBeacon if present, else the address.
   - `is_stable_address(address, span, oui)` (§5.3).
 - **`bluetooth/aggregator.py` — `BleAggregator`.** In memory. Keyed by
-  `(device_id, scanner_source, minute)`. Keeps max RSSI, advert count, last time. Also
+  `(device_id, scanner_id, minute)`. Keeps max RSSI, advert count, last time. Also
   holds the candidate list (§5.3). Bounded (§8).
 - **Flush job (`ble_flush`, every 60 s).** Drains closed minutes from the aggregator
   and calls `Service.record_ble_minutes(rows)` under `Service.lock`, in one
@@ -114,20 +117,21 @@ v2 migration are not edited.
   - `created_at` TEXT NOT NULL
   - UNIQUE (kind, value). A device can have several identities.
 - **`ble_scanner`** — every scanner HA reports.
-  - `source` TEXT PRIMARY KEY (the scanner's Bluetooth MAC as HA gives it)
+  - `id` INTEGER PRIMARY KEY AUTOINCREMENT (the change log keys rows by integer id)
+  - `source` TEXT NOT NULL UNIQUE (the scanner's Bluetooth MAC as HA gives it)
   - `name` TEXT (from HA; collector-written)
   - `device_id` INTEGER REFERENCES device(id) ON DELETE SET NULL — the atlas device the
     scanner is linked to; NULL until linked
   - `first_seen`, `last_seen` TEXT NOT NULL
 - **`ble_sighting`** — per-minute aggregate, claimed devices only.
   - `device_id` INTEGER NOT NULL REFERENCES device(id) ON DELETE CASCADE
-  - `scanner_source` TEXT NOT NULL
+  - `scanner_id` INTEGER NOT NULL REFERENCES ble_scanner(id) ON DELETE CASCADE
   - `minute` TEXT NOT NULL (UTC, `YYYY-MM-DDTHH:MMZ`)
   - `place_id` INTEGER REFERENCES place(id) ON DELETE SET NULL — the scanner's room at
     write time (§5.2)
   - `max_rssi` INTEGER NOT NULL, `adverts` INTEGER NOT NULL, `last_at` TEXT NOT NULL
-  - PRIMARY KEY (device_id, scanner_source, minute), WITHOUT ROWID
-  - Index on (device_id, last_at) for "last heard".
+  - PRIMARY KEY (device_id, scanner_id, minute), WITHOUT ROWID
+  - Index on (device_id, last_at) for "last heard", and on (minute) for the prune job.
 
 ### 5.2 Rooms
 

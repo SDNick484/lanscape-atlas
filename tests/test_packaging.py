@@ -45,3 +45,4 @@ def test_migration_files_are_packaged() -> None:
     assert cfg["packages"] == ["src/lanscape_atlas"]
     assert not cfg.get("exclude") and not cfg.get("only-include")
     assert (ROOT / "src/lanscape_atlas/store/migrations/0002_floor_plan.sql").is_file()
+    assert (ROOT / "src/lanscape_atlas/store/migrations/0003_bluetooth.sql").is_file()
