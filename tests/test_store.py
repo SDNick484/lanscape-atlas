@@ -28,7 +28,7 @@ def _iface(conn: sqlite3.Connection, dev: int, address: str = MAC, kind: str = "
 
 def test_migrate_creates_tables(tmp_path):
     conn = open_db(tmp_path / "a.db")
-    assert migrate(conn) == 3
+    assert migrate(conn) == 4
     names = {r[0] for r in conn.execute("select name from sqlite_master where type='table'")}
     assert {
         "device",
@@ -50,7 +50,7 @@ def test_migrate_idempotent(tmp_path):
     conn = open_db(tmp_path / "a.db")
     migrate(conn)
     _device(conn)
-    assert migrate(conn) == 3
+    assert migrate(conn) == 4
     assert conn.execute("select count(*) from device").fetchone()[0] == 1
 
 
@@ -64,7 +64,7 @@ def test_wal_and_fk(tmp_path):
 
 def test_memory_db(tmp_path):
     conn = open_db(":memory:")
-    assert migrate(conn) == 3
+    assert migrate(conn) == 4
 
 
 def test_interface_unique(db):
@@ -241,7 +241,7 @@ def test_future_version_refused(tmp_path):
 
 
 def test_fixtures(db, clock):
-    assert db.execute("pragma user_version").fetchone()[0] == 3
+    assert db.execute("pragma user_version").fetchone()[0] == 4
     assert clock().isoformat() == "2026-01-01T00:00:00+00:00"
     clock.advance(minutes=2, seconds=30)
     assert clock().isoformat() == "2026-01-01T00:02:30+00:00"
