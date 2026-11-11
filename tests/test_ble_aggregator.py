@@ -22,7 +22,7 @@ BEACON_UUID = "00000000-0000-4000-8000-000000000001"
 
 
 def _static_random() -> str:
-    addr = "c2:00:5e:00:53:05"
+    addr = f"{0xC0 | 0x02:02x}:00:5e:00:53:05"  # top two bits set at runtime
     assert is_static_random(addr)
     return addr
 
