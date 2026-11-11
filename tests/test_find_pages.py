@@ -553,3 +553,29 @@ def test_candidates_sorted_by_signal_and_weak_behind_a_link(
 def test_no_weak_link_when_nothing_is_weak(client: TestClient) -> None:
     html = client.get("/find").text
     assert "Show 0 weak" not in html and "weak=1" not in html
+
+
+def test_claim_error_in_weak_view_keeps_the_weak_candidate(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    weak = "00:00:5e:00:53:02"
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", weak, -91)])
+    page = client.get("/find", params={"weak": "1"}).text
+    assert 'name="weak" value="1"' in page  # the claim form carries the view
+    r = _post(client, "/find/claim", {"identity": f"address:{weak}", "weak": "1"})
+    assert r.status_code == 422
+    assert f"address:{weak}" in r.text and "Hide weak" in r.text
+    assert "Claim the selected candidate" in r.text
+
+
+def test_only_weak_candidates_says_so(client: TestClient, app: FastAPI, clock: FixedClock) -> None:
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", "00:00:5e:00:53:02", -91)])
+    html = client.get("/find").text
+    assert "No candidates at or above -80 dBm." in html and "No candidates right now." not in html
+
+
+def test_search_keeps_the_weak_view(client: TestClient, app: FastAPI, clock: FixedClock) -> None:
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", "00:00:5e:00:53:02", -91)])
+    html = client.get("/find", params={"weak": "1"}).text
+    search_form = html[html.index('role="search"') - 200 : html.index("</form>")]
+    assert 'name="weak" value="1"' in search_form

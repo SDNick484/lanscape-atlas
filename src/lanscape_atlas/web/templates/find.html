@@ -9,6 +9,7 @@
   <input type="search" name="q" value="{{ q }}" placeholder="Search by name"
          hx-get="{{ root }}/partials/find" hx-trigger="input changed delay:300ms, search"
          hx-target="#find-results" hx-swap="innerHTML">
+  {% if show_weak %}<input type="hidden" name="weak" value="1">{% endif %}
   <button type="submit" class="secondary">Search</button>
 </form>
 <div id="find-results" hx-get="{{ root }}/partials/find" hx-trigger="every 30s" hx-include="[name='q']" hx-swap="innerHTML">
@@ -23,6 +24,7 @@
 {# One form for every candidate: the device list is rendered once, not once per row. #}
 <form method="post" action="{{ root }}/find/claim" id="claim-form">
 <input type="hidden" name="csrf" value="{{ csrf }}">
+{% if show_weak %}<input type="hidden" name="weak" value="1">{% endif %}
 <div class="table-wrap">
 <table>
   <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Signal</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th></tr></thead>
@@ -38,7 +40,7 @@
     <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="empty">No candidates right now.</td></tr>
+  <tr><td colspan="7" class="empty">{% if weak_count and not show_weak %}No candidates at or above {{ min_rssi }} dBm.{% else %}No candidates right now.{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table>

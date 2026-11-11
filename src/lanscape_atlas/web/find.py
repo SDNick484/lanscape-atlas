@@ -163,6 +163,7 @@ async def find_page(
 
 @router.get("/partials/find", response_class=HTMLResponse)
 async def find_partial(request: Request, q: str | None = None) -> Response:
+    # Claimed rows only; the candidate list is not part of the partial.
     ctx = await _context(request, q, full=False)
     return render(request, "_find_rows.html", ctx)
 
@@ -208,7 +209,9 @@ async def find_claim(request: Request, form: Form) -> Response:
             )
         )
     except ValueError as e:
-        ctx = await _context(request, None, full=True)
+        # Re-render the view the form came from, so a weak candidate stays listed.
+        weak = (_text(form, "weak") or "") == "1"
+        ctx = await _context(request, None, full=True, weak=weak)
         return _find_page(request, ctx, ("error", _message(e)), 422)
     return _redirect(request, f"/find?claimed={claimed}")
 
