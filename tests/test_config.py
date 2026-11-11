@@ -108,3 +108,80 @@ def test_allowed_hosts_setting(tmp_path: Path) -> None:
         p.write_text(bad)
         with pytest.raises(ValueError, match="allowed_hosts"):
             load_settings(p, env={})
+
+
+def _ha(tmp_path: Path, body: str) -> Path:
+    p = tmp_path / "c.toml"
+    p.write_text(body)
+    return p
+
+
+def test_home_assistant_absent_is_none(tmp_path: Path) -> None:
+    assert load_settings(tmp_path / "missing.toml", env={}).home_assistant is None
+    p = _ha(tmp_path, '[home_assistant]\nurl = ""\n')
+    assert load_settings(p, env={}).home_assistant is None
+
+
+def test_home_assistant_loaded(tmp_path: Path) -> None:
+    p = _ha(
+        tmp_path,
+        '[home_assistant]\nurl = "http://192.0.2.10:8123/"\ntoken = "tok"\nverify_tls = false\n',
+    )
+    ha = load_settings(p, env={}).home_assistant
+    assert ha is not None
+    assert (ha.url, ha.token, ha.verify_tls) == ("http://192.0.2.10:8123", "tok", False)
+
+
+def test_ha_token_env_overrides_file(tmp_path: Path) -> None:
+    p = _ha(tmp_path, '[home_assistant]\nurl = "https://192.0.2.10:8123"\ntoken = "file"\n')
+    ha = load_settings(p, env={"LANSCAPE_HA_TOKEN": "envtok"}).home_assistant
+    assert ha is not None and ha.token == "envtok"
+
+
+def test_ha_url_must_be_http_or_https(tmp_path: Path) -> None:
+    p = _ha(tmp_path, '[home_assistant]\nurl = "ftp://192.0.2.10"\ntoken = "t"\n')
+    with pytest.raises(ValueError, match="home_assistant.url"):
+        load_settings(p, env={})
+
+
+def test_ha_url_without_token_is_error(tmp_path: Path) -> None:
+    p = _ha(tmp_path, '[home_assistant]\nurl = "http://192.0.2.10:8123"\ntoken = ""\n')
+    with pytest.raises(ValueError, match="home_assistant.token"):
+        load_settings(p, env={"LANSCAPE_HA_TOKEN": ""})
+
+
+def test_bluetooth_defaults(tmp_path: Path) -> None:
+    s = load_settings(tmp_path / "missing.toml", env={})
+    assert (s.bluetooth.retention_days, s.bluetooth.flush_s) == (14, 60)
+    assert s.bluetooth.snapshot_s == 30
+
+
+def test_bluetooth_retention_must_be_positive(tmp_path: Path) -> None:
+    for body in (
+        "[bluetooth]\nretention_days = 0\n",
+        "[bluetooth]\nretention_days = -3\n",
+        "[bluetooth]\nflush_s = 0\n",
+        '[bluetooth]\nretention_days = "7"\n',
+        "[bluetooth]\nsnapshot_s = 0\n",
+        "[bluetooth]\nsnapshot_s = -60\n",
+        "[bluetooth]\nsnapshot_s = 1.5\n",
+    ):
+        with pytest.raises(ValueError, match="bluetooth"):
+            load_settings(_ha(tmp_path, body), env={})
+    s = load_settings(
+        _ha(tmp_path, "[bluetooth]\nretention_days = 7\nflush_s = 30\nsnapshot_s = 45\n"), env={}
+    )
+    assert (s.bluetooth.retention_days, s.bluetooth.flush_s) == (7, 30)
+    assert s.bluetooth.snapshot_s == 45
+
+
+def test_example_config_documents_snapshot_s() -> None:
+    text = (Path(__file__).parent.parent / "config.example.toml").read_text()
+    assert "snapshot_s = 30" in text
+
+
+def test_settings_repr_hides_ha_token(tmp_path: Path) -> None:
+    p = _ha(tmp_path, '[home_assistant]\nurl = "http://192.0.2.10:8123"\ntoken = "s3cret-ha"\n')
+    s = load_settings(p, env={})
+    assert s.home_assistant is not None and s.home_assistant.token == "s3cret-ha"
+    assert "s3cret-ha" not in repr(s) and "s3cret-ha" not in repr(s.home_assistant)

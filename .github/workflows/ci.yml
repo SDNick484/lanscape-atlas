@@ -16,3 +16,36 @@ jobs:
       - run: mypy src
       - run: pytest
       - run: python scripts/check_leaks.py
+
+  # Production runs on Alpine (musl, apk's python3) under OpenRC. This job runs the
+  # same suite there. Keep the image and the Python guard in step with the server.
+  # No compiler toolchain is installed, matching deploy/setup-alpine.sh: a dependency
+  # without a musl wheel fails here exactly as it would on the server.
+  alpine:
+    runs-on: ubuntu-latest
+    container: alpine:3.24.1
+    env:
+      ALPINE_PYTHON: "3.14"
+    steps:
+      - name: Install system packages (as deploy/setup-alpine.sh does)
+        run: apk add --no-cache git python3 py3-pip arp-scan nmap
+      - uses: actions/checkout@v4
+      # Steps run as root but the workspace belongs to the runner user, so git refuses it
+      # ("dubious ownership") once checkout's temporary safe.directory entry is gone.
+      # check_leaks.py lists tracked files with `git ls-files`.
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Check python3 matches production
+        run: |
+          python3 -V
+          python3 -c 'import os, sys; want = os.environ["ALPINE_PYTHON"]; got = "%d.%d" % sys.version_info[:2]; sys.exit(0 if got == want else f"python3 is {got}, expected {want}")'
+      - name: Create virtualenv and install
+        run: |
+          python3 -m venv /opt/venv
+          /opt/venv/bin/pip install --disable-pip-version-check -e .[dev]
+          echo /opt/venv/bin >> "$GITHUB_PATH"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy src
+      - run: pytest
+      - run: python scripts/check_leaks.py

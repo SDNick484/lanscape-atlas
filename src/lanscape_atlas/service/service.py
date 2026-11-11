@@ -8,9 +8,12 @@ text so ``None`` and numbers round-trip.
 
 Transactions: the public user-facing writes (``update_device``, ``set_place``,
 ``add_link``, ``remove_link``, ``create_placeholder_device``, ``claim_interface``,
-``undo``) each own one
+``claim_ble``, ``unclaim_ble``, ``link_scanner``, ``undo``) each own one
 ``BEGIN IMMEDIATE`` transaction, hold ``self.lock`` for its duration, and
-publish ``change.applied`` after commit. ``begin_batch`` and
+publish ``change.applied`` after commit. The Bluetooth collector writes
+(``record_ble_minutes``, ``upsert_scanners``) and the prunes
+(``prune_observations``, ``prune_ble``) also own one transaction each but are
+not change-logged and publish nothing. ``begin_batch`` and
 ``record_collector_field`` do NOT open or commit a transaction: the caller
 (the Ingestor) owns the transaction, should hold ``self.lock`` around it, and
 publishes any events itself.
@@ -22,6 +25,14 @@ deleted device's JSON also carries its ``field_source`` rows under
 if any) so undo restores provenance and layout with the row. A claim logs
 ``interface.device_id`` and ``service.device_id`` moves as plain field changes
 (``old_actor``/``old_set_at`` NULL: those columns have no ``field_source``).
+
+Bluetooth: a BLE claim logs the ``ble_identity`` row as a row-level creation
+(after the new device's creation and owned ``name``/``type`` when it claims as a
+new device); an unclaim logs it as a row-level deletion, so undo re-inserts it
+with the same id. ``link_scanner`` is a plain owned field change on
+``ble_scanner.device_id``. ``ble_sighting`` rows are collector data: deleting a
+device (e.g. undoing a claim that created it) deletes its sightings, and undo
+never brings them back.
 """
 
 from __future__ import annotations
@@ -32,9 +43,11 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+from lanscape_atlas.bluetooth.match import Identity, check_canonical
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event, EventBus
 from lanscape_atlas.floorplan.geometry import check_aspect, parse_polygon, point_in_polygon
@@ -71,6 +84,9 @@ _SERVICE_COLUMNS = (
     "last_seen",
 )
 _FLOOR_PLAN_COLUMNS = ("id", "width", "height", "sha256", "file_name", "updated_at")
+_BLE_IDENTITY_COLUMNS = ("id", "device_id", "kind", "value", "created_at")
+# Entities whose ``device_id`` field is logged as a plain field change.
+_DEVICE_REF_ENTITIES = frozenset({"interface", "service", "ble_scanner"})
 _FIELD_SOURCE_KEY = "_field_source"
 # A deleted device's saved topology position ({"x", "y"}), present only if it had one.
 _LAYOUT_KEY = "_layout"
@@ -94,11 +110,16 @@ _DEVICE_COLUMNS = (
 
 
 class UndoConflict(Exception):
-    """Raised when a later, still-live batch changed something the undone batch touched."""
+    """Raised when a later, still-live batch changed something the undone batch touched.
 
-    def __init__(self, conflicting: list[int]) -> None:
-        super().__init__(f"undo conflicts with later batches {conflicting}")
+    ``conflicting`` may be empty when the obstacle is not in the change log (e.g. a
+    device the undo would reference no longer exists); ``reason`` then says why.
+    """
+
+    def __init__(self, conflicting: list[int], reason: str | None = None) -> None:
+        super().__init__(reason or f"undo conflicts with later batches {conflicting}")
         self.conflicting = conflicting
+        self.reason = reason
 
 
 class StaleWrite(Exception):
@@ -133,12 +154,17 @@ _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
     "interface": frozenset({"device_id"}),
     "service": frozenset({"device_id"}),
     "floor_plan": frozenset(_FLOOR_PLAN_COLUMNS) - {"id"},
+    # claim_ble/unclaim_ble write these rows whole (field='*').
+    "ble_identity": frozenset({"device_id", "kind", "value", "created_at"}),
+    # Only link_scanner writes this; name/last_seen are collector data, not logged.
+    "ble_scanner": frozenset({"device_id"}),
 }
 _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "device": _DEVICE_COLUMNS,
     "link": _LINK_COLUMNS,
     "service": _SERVICE_COLUMNS,
     "floor_plan": _FLOOR_PLAN_COLUMNS,
+    "ble_identity": _BLE_IDENTITY_COLUMNS,
 }
 
 
@@ -704,26 +730,39 @@ class Service:
         ``name``/``type`` field changes, so collectors never rename it.
         """
         self._check_actor(actor)
+        self._check_new_device(name, type)
+        with self._write_txn():
+            batch_id = self.begin_batch(actor)
+            device_id = self._create_device(batch_id, actor, name, type)
+        self._publish(batch_id, actor)
+        return device_id, batch_id
+
+    @staticmethod
+    def _check_new_device(name: object, type: object) -> None:
         for label, value in (("name", name), ("type", type)):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{label} must be a non-empty string")
-        with self._write_txn():
-            now = self._now()
-            batch_id = self.begin_batch(actor)
-            cur = self.conn.execute(
-                "INSERT INTO device(trust, first_seen, last_seen) VALUES ('known', ?, ?)",
-                (now, now),
-            )
-            assert cur.lastrowid is not None
-            device_id = cur.lastrowid
-            created = self._device_row(device_id)
-            self._log_change(
-                batch_id, "device", device_id, "*", None, {c: created[c] for c in _DEVICE_COLUMNS}
-            )
-            self._write_field(batch_id, "device", device_id, "name", None, name, actor)
-            self._write_field(batch_id, "device", device_id, "type", None, type, actor)
-        self._publish(batch_id, actor)
-        return device_id, batch_id
+
+    def _create_device(self, batch_id: int, actor: str, name: str, type: str) -> int:
+        """Insert a ``trust='known'`` device into ``batch_id``; returns its id.
+
+        Logs a row-level ``field='*'`` creation then owned ``name``/``type``
+        field changes. Caller owns the transaction and validated the inputs.
+        """
+        now = self._now()
+        cur = self.conn.execute(
+            "INSERT INTO device(trust, first_seen, last_seen) VALUES ('known', ?, ?)",
+            (now, now),
+        )
+        assert cur.lastrowid is not None
+        device_id = cur.lastrowid
+        created = self._device_row(device_id)
+        self._log_change(
+            batch_id, "device", device_id, "*", None, {c: created[c] for c in _DEVICE_COLUMNS}
+        )
+        self._write_field(batch_id, "device", device_id, "name", None, name, actor)
+        self._write_field(batch_id, "device", device_id, "type", None, type, actor)
+        return device_id
 
     def claim_interface(self, actor: str, interface_id: int, device_id: int) -> int:
         """Move an interface (e.g. a phone's random MAC) onto ``device_id``; returns the batch id.
@@ -738,7 +777,8 @@ class Service:
 
         Raises ``KeyError`` for an unknown interface or target, and
         ``ValueError`` if the target already owns the interface, or if the
-        source would be deleted but still has links or a non-null curated field
+        source would be deleted but still has links, Bluetooth identities, a
+        linked Bluetooth scanner, or a non-null curated field
         (name, type, icon, place_id, owner, notes, pos_x, pos_y) whose value
         differs from the target's non-null value (Ruling 42). Curated source
         fields the target lacks are copied onto it, with their provenance, in
@@ -785,13 +825,23 @@ class Service:
         ``trust`` and ``scan_policy`` never block, nor does a curated field whose
         value is NULL. A remaining non-null curated field (user/claude-owned, or a
         ``place_id`` whatever its provenance) is copied when the target's value is
-        NULL, skipped when equal, and refuses the claim when it differs. Links
-        still refuse.
+        NULL, skipped when equal, and refuses the claim when it differs. Links,
+        Bluetooth identities and a linked Bluetooth scanner still refuse.
         """
         if self.conn.execute(
             "SELECT 1 FROM link WHERE a_device_id = ? OR b_device_id = ?", (source, source)
         ).fetchone():
             raise ValueError(f"device {source} has links; remove them before claiming")
+        if self.conn.execute(
+            "SELECT 1 FROM ble_identity WHERE device_id = ?", (source,)
+        ).fetchone():
+            raise ValueError(
+                f"device {source} has Bluetooth identities; unclaim them before claiming"
+            )
+        if self.conn.execute("SELECT 1 FROM ble_scanner WHERE device_id = ?", (source,)).fetchone():
+            raise ValueError(
+                f"device {source} is linked to a Bluetooth scanner; unlink it before claiming"
+            )
         src = self._device_row(source)
         tgt = self._device_row(target)
         owned = {
@@ -862,17 +912,220 @@ class Service:
                     "UPDATE service SET device_id = ? WHERE id = ?", (target, service_id)
                 )
 
-    def prune_observations(self, older_than_days: int) -> int:
-        """Delete observations with ``seen_at`` older than ``older_than_days``; returns the count.
+    # ------------------------------------------------------------------ Bluetooth
 
-        Not logged in ``change`` (observations are raw input, not curated state).
+    def claim_ble(
+        self,
+        actor: str,
+        identity: Identity,
+        *,
+        device_id: int | None = None,
+        new_name: str | None = None,
+        new_type: str | None = None,
+    ) -> tuple[int, int]:
+        """Attach a BLE identity to a device; returns ``(device_id, batch_id)``.
+
+        Exactly one of ``device_id`` (an existing device) or ``new_name`` (with a
+        non-empty ``new_type``: create the device, logged as
+        ``create_placeholder_device`` logs it, in the same batch). The identity
+        row is logged as a row-level ``field='*'`` creation after the device, so
+        undo deletes the identity before the device. Raises ``ValueError`` for a
+        bad actor, a non-canonical identity, a bad target combination or an
+        identity that is already claimed (nothing is written), and ``KeyError``
+        for an unknown ``device_id``.
         """
+        self._check_actor(actor)
+        check_canonical(identity)
+        if (device_id is None) == (new_name is None):
+            raise ValueError("claim needs exactly one of device_id or new_name")
+        if device_id is None:
+            self._check_new_device(new_name, new_type)
+        elif new_type is not None:
+            raise ValueError("new_type is only valid with new_name")
+        elif not isinstance(device_id, int) or isinstance(device_id, bool):
+            raise ValueError(f"device_id must be an int, got {device_id!r}")
+        with self._write_txn():
+            claimed = self.conn.execute(
+                "SELECT id, device_id FROM ble_identity WHERE kind = ? AND value = ?",
+                (identity.kind, identity.value),
+            ).fetchone()
+            if claimed is not None:
+                raise ValueError(
+                    f"{identity.key()} is already claimed by device {claimed['device_id']}"
+                )
+            if device_id is not None:
+                self._device_row(device_id)
+            batch_id = self.begin_batch(actor)
+            if device_id is None:
+                assert new_name is not None and new_type is not None
+                device_id = self._create_device(batch_id, actor, new_name, new_type)
+            cur = self.conn.execute(
+                "INSERT INTO ble_identity(device_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+                (device_id, identity.kind, identity.value, self._now()),
+            )
+            assert cur.lastrowid is not None
+            identity_id = cur.lastrowid
+            self._log_change(
+                batch_id,
+                "ble_identity",
+                identity_id,
+                "*",
+                None,
+                self._row_dict("ble_identity", identity_id),
+            )
+        self._publish(batch_id, actor)
+        return device_id, batch_id
+
+    def unclaim_ble(self, actor: str, identity_id: int) -> int:
+        """Delete a BLE identity; returns the batch id. The device and its sightings stay.
+
+        Logged as a row-level deletion holding the full row, so undo re-inserts
+        it with the same id. Raises ``KeyError`` for an unknown identity.
+        """
+        self._check_actor(actor)
+        with self._write_txn():
+            old = self._row_dict("ble_identity", identity_id)
+            batch_id = self.begin_batch(actor)
+            self._log_change(batch_id, "ble_identity", identity_id, "*", old, None)
+            self._delete_entity("ble_identity", identity_id)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def link_scanner(self, actor: str, scanner_id: int, device_id: int | None) -> int:
+        """Link a BLE scanner to the atlas device it runs on (None unlinks).
+
+        A plain owned field change on ``ble_scanner.device_id``; returns the
+        batch id, or 0 if unchanged. Raises ``KeyError`` for an unknown scanner
+        or device.
+        """
+        self._check_actor(actor)
+        if device_id is not None and (
+            not isinstance(device_id, int) or isinstance(device_id, bool)
+        ):
+            raise ValueError(f"device_id must be an int or None, got {device_id!r}")
+        with self._write_txn():
+            row = self.conn.execute(
+                "SELECT device_id FROM ble_scanner WHERE id = ?", (scanner_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no ble_scanner with id {scanner_id}")
+            if device_id is not None:
+                self._device_row(device_id)
+            old = row["device_id"]
+            if old == device_id:
+                return 0
+            batch_id = self.begin_batch(actor)
+            self._write_field(
+                batch_id, "ble_scanner", scanner_id, "device_id", old, device_id, actor
+            )
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def upsert_scanners(self, scanners: Mapping[str, str | None], seen_at: datetime) -> None:
+        """Record scanners HA reports (source -> name). Not change-logged.
+
+        Creates unknown sources; for known ones updates ``name`` (a None name
+        keeps the stored one) and moves ``last_seen`` forward.
+        """
+        if not scanners:
+            return
+        at = iso(seen_at)
+        with self._write_txn():
+            for source, name in scanners.items():
+                self.conn.execute(
+                    "INSERT INTO ble_scanner(source, name, first_seen, last_seen)"
+                    " VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(source) DO UPDATE SET"
+                    " name = coalesce(excluded.name, name),"
+                    " last_seen = max(last_seen, excluded.last_seen)",
+                    (source, name, at, at),
+                )
+
+    def record_ble_minutes(self, rows: Sequence[MinuteRow]) -> int:
+        """Upsert per-minute sightings in one transaction; returns rows written.
+
+        Not change-logged and publishes nothing. Each row's ``source`` resolves
+        to a ``ble_scanner`` (created with ``name`` NULL if unknown; ``last_seen``
+        moves forward). On the ``(device, scanner, minute)`` key: ``max_rssi`` is
+        the max, ``adverts`` the sum, ``last_at`` the max, and ``place_id`` keeps
+        the first snapshot of the scanner's linked device's room. Rows whose
+        device no longer exists (a claim undone since the minute was drained)
+        are skipped.
+        """
+        if not rows:
+            return 0
+        written = 0
+        with self._write_txn():
+            for r in rows:
+                if (
+                    self.conn.execute(
+                        "SELECT 1 FROM device WHERE id = ?", (r.device_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    continue
+                last_at = iso(r.last_at)
+                self.conn.execute(
+                    "INSERT INTO ble_scanner(source, first_seen, last_seen) VALUES (?, ?, ?)"
+                    " ON CONFLICT(source) DO UPDATE SET"
+                    " last_seen = max(last_seen, excluded.last_seen)",
+                    (r.source, last_at, last_at),
+                )
+                scanner = self.conn.execute(
+                    "SELECT s.id, d.place_id FROM ble_scanner s"
+                    " LEFT JOIN device d ON d.id = s.device_id WHERE s.source = ?",
+                    (r.source,),
+                ).fetchone()
+                self.conn.execute(
+                    "INSERT INTO ble_sighting(device_id, scanner_id, minute, place_id,"
+                    " max_rssi, adverts, last_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(device_id, scanner_id, minute) DO UPDATE SET"
+                    " max_rssi = max(max_rssi, excluded.max_rssi),"
+                    " adverts = adverts + excluded.adverts,"
+                    " last_at = max(last_at, excluded.last_at)",
+                    (
+                        r.device_id,
+                        scanner["id"],
+                        r.minute,
+                        scanner["place_id"],
+                        r.max_rssi,
+                        r.adverts,
+                        last_at,
+                    ),
+                )
+                written += 1
+        return written
+
+    def prune_ble(self, older_than_days: int) -> int:
+        """Delete ``ble_sighting`` rows whose minute is older than the cutoff; returns the count.
+
+        Not logged in ``change`` (sightings are collector data).
+        """
+        self._check_days(older_than_days)
+        cutoff = (
+            (self.clock() - timedelta(days=older_than_days))
+            .astimezone(UTC)
+            .strftime(BLE_MINUTE_FMT)
+        )
+        with self._write_txn():
+            cur = self.conn.execute("DELETE FROM ble_sighting WHERE minute < ?", (cutoff,))
+        return cur.rowcount
+
+    @staticmethod
+    def _check_days(older_than_days: object) -> None:
         if (
             not isinstance(older_than_days, int)
             or isinstance(older_than_days, bool)
             or older_than_days < 0
         ):
             raise ValueError(f"older_than_days must be a non-negative int, got {older_than_days!r}")
+
+    def prune_observations(self, older_than_days: int) -> int:
+        """Delete observations with ``seen_at`` older than ``older_than_days``; returns the count.
+
+        Not logged in ``change`` (observations are raw input, not curated state).
+        """
+        self._check_days(older_than_days)
         cutoff = iso(self.clock() - timedelta(days=older_than_days))
         with self._write_txn():
             cur = self.conn.execute("DELETE FROM observation WHERE seen_at < ?", (cutoff,))
@@ -914,6 +1167,13 @@ class Service:
             conflicting = self._undo_conflicts(batch_id, rows)
             if conflicting:
                 raise UndoConflict(conflicting)
+            for device_id in sorted(self._referenced_devices(rows)):
+                if (
+                    self.conn.execute("SELECT 1 FROM device WHERE id = ?", (device_id,)).fetchone()
+                    is None
+                ):
+                    # Gone without a live batch to blame (deleted outside the change log).
+                    raise UndoConflict([], f"cannot undo: device {device_id} no longer exists")
             cur = self.conn.execute(
                 "INSERT INTO batch(actor, at, undoes_batch_id) VALUES (?, ?, ?)",
                 (actor, self._now(), batch_id),
@@ -1062,21 +1322,71 @@ class Service:
                 ref = _dump(ch.entity_id)
                 collect(
                     "SELECT DISTINCT batch_id FROM change WHERE batch_id > ?"
-                    " AND entity IN ('interface', 'service') AND field = 'device_id'"
-                    " AND (old_value = ? OR new_value = ?)",
+                    " AND entity IN ('interface', 'service', 'ble_scanner')"
+                    " AND field = 'device_id' AND (old_value = ? OR new_value = ?)",
                     (batch_id, ref, ref),
                 )
-                for bid, old_v, new_v in self.conn.execute(
-                    "SELECT batch_id, old_value, new_value FROM change WHERE batch_id > ?"
-                    " AND entity = 'link' AND field = '*'",
-                    (batch_id,),
-                ):
-                    for raw in (old_v, new_v):
-                        link = json.loads(raw) if raw is not None else None
-                        if link and ch.entity_id in (link["a_device_id"], link["b_device_id"]):
-                            if live(int(bid)):
-                                found.add(int(bid))
+                for bid, row in self._later_rows(batch_id, "link"):
+                    if ch.entity_id in (row["a_device_id"], row["b_device_id"]) and live(bid):
+                        found.add(bid)
+                for bid, row in self._later_rows(batch_id, "ble_identity"):
+                    if row["device_id"] == ch.entity_id and live(bid):
+                        found.add(bid)
+            # A BLE identity is unique by (kind, value) across row ids: a later
+            # claim of the same identity blocks re-inserting it.
+            if ch.entity == "ble_identity" and ch.field == "*":
+                mine = ch.old if ch.old is not None else ch.new
+                for bid, row in self._later_rows(batch_id, "ble_identity"):
+                    if (row["kind"], row["value"]) == (mine["kind"], mine["value"]) and live(bid):
+                        found.add(bid)
+        # Undo would re-point a row at a device a later live batch deleted.
+        for device_id in sorted(self._referenced_devices(rows)):
+            collect(
+                "SELECT DISTINCT batch_id FROM change WHERE batch_id > ? AND entity = 'device'"
+                " AND entity_id = ? AND field = '*' AND new_value = 'null'",
+                (batch_id, device_id),
+            )
         return sorted(found)
+
+    @staticmethod
+    def _referenced_devices(rows: list[_Change]) -> set[int]:
+        """Device ids the inverses of ``rows`` would point rows at.
+
+        A re-inserted ``link``/``service``/``ble_identity`` row references its
+        devices; a restored ``device_id`` field references its old value. Devices
+        the same batch deleted are excluded: its undo re-inserts them first.
+        """
+        restored = {
+            ch.entity_id
+            for ch in rows
+            if ch.entity == "device" and ch.field == "*" and ch.old is not None
+        }
+        refs: set[int] = set()
+        for ch in rows:
+            if ch.field == "*" and isinstance(ch.old, dict):
+                if ch.entity == "link":
+                    refs.update((ch.old["a_device_id"], ch.old["b_device_id"]))
+                elif ch.entity in ("service", "ble_identity"):
+                    refs.add(ch.old["device_id"])
+            elif (
+                ch.field == "device_id"
+                and ch.entity in _DEVICE_REF_ENTITIES
+                and isinstance(ch.old, int)
+            ):
+                refs.add(ch.old)
+        return {int(d) for d in refs if d is not None} - restored
+
+    def _later_rows(self, batch_id: int, entity: str) -> Iterator[tuple[int, dict[str, Any]]]:
+        """Yield ``(batch_id, row)`` for each side of later row-level changes on ``entity``."""
+        for bid, old_v, new_v in self.conn.execute(
+            "SELECT batch_id, old_value, new_value FROM change WHERE batch_id > ?"
+            " AND entity = ? AND field = '*'",
+            (batch_id, entity),
+        ).fetchall():
+            for raw in (old_v, new_v):
+                row = json.loads(raw) if raw is not None else None
+                if row:
+                    yield int(bid), row
 
     # -- applying inverses
 
@@ -1219,19 +1529,24 @@ class Service:
         return cur.lastrowid
 
     def _delete_entity(self, entity: str, entity_id: int) -> None:
-        """Delete a device/link/place/service and its field_source rows (same transaction).
+        """Delete a device/link/place/service/ble_identity and its field_source rows.
 
-        Refuses to silently cascade: a device still referenced by links,
-        interfaces or services, or a place still holding devices or a
-        floor/polygon, raises ``ValueError``. (References written by later
-        batches are reported earlier as ``UndoConflict``; these are references
-        the change log does not cover, e.g. discovered data.)
+        Same transaction as the caller. Refuses to silently cascade: a device
+        still referenced by links, interfaces, services, BLE identities or a
+        linked BLE scanner, or a place still holding devices or a floor/polygon,
+        raises ``ValueError``. (References written by later batches are reported
+        earlier as ``UndoConflict``; these are references the change log does
+        not cover, e.g. discovered data.) A device's ``topology_layout`` and
+        ``ble_sighting`` rows are deleted with it.
         """
         if entity == "device":
             for table, where in (
                 ("link", "a_device_id = ? OR b_device_id = ?"),
                 ("interface", "device_id = ? OR device_id = ?"),
                 ("service", "device_id = ? OR device_id = ?"),
+                ("ble_identity", "device_id = ? OR device_id = ?"),
+                # ON DELETE SET NULL would drop the link silently and undo could not restore it.
+                ("ble_scanner", "device_id = ? OR device_id = ?"),
             ):
                 if self.conn.execute(
                     f"SELECT 1 FROM {table} WHERE {where}", (entity_id, entity_id)
@@ -1239,6 +1554,8 @@ class Service:
                     raise ValueError(f"cannot delete device {entity_id}: referenced by {table}")
             # A layout is a preference; callers snapshot it (``_layout``) before deleting.
             self.conn.execute("DELETE FROM topology_layout WHERE device_id = ?", (entity_id,))
+            # Sightings are collector data and are not restored by undo (spec section 7).
+            self.conn.execute("DELETE FROM ble_sighting WHERE device_id = ?", (entity_id,))
         elif entity == "place":
             if self.conn.execute(
                 "SELECT 1 FROM device WHERE place_id = ?", (entity_id,)

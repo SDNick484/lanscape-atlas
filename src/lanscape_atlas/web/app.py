@@ -1,10 +1,11 @@
 """``create_app``: wires the DB, Service, Ingestor and scheduler into one FastAPI app.
 
 Everything lives on ``app.state`` (``conn``, ``events``, ``service``, ``oui``,
-``ingestor``, ``runner``, ``collectors``, ``deep_scan_runner``, ``deep_scan_tasks``,
-``mcp``) so later tasks can mount onto the same app. The web UI (``pages``) is
-installed here; its errors render as HTML, ``/api``/``/mcp`` errors as JSON. The MCP
-server (``lanscape_atlas.mcp_server``) is served at ``/mcp`` (and ``/mcp/``) with the
+``ingestor``, ``runner``, ``collectors``, ``bluetooth`` (None without Home Assistant),
+``deep_scan_runner``, ``deep_scan_tasks``, ``mcp``) so later tasks can mount onto the same
+app. The web UI (``pages``) is installed here; its errors render as HTML,
+``/api``/``/mcp`` errors as JSON. The MCP server
+(``lanscape_atlas.mcp_server``) is served at ``/mcp`` (and ``/mcp/``) with the
 streamable HTTP transport; its session manager runs inside this app's lifespan.
 
 Concurrency (ruling 30): one shared sqlite connection; every DB read in a handler
@@ -38,6 +39,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from lanscape_atlas.bluetooth.runtime import BluetoothRuntime
 from lanscape_atlas.clock import Clock, utcnow
 from lanscape_atlas.collectors import build_collectors
 from lanscape_atlas.collectors.nmap import ScanRefused, run_nmap
@@ -49,8 +51,9 @@ from lanscape_atlas.oui import OuiDB
 from lanscape_atlas.scheduler import CollectorRunner, start_scheduler, stop_scheduler
 from lanscape_atlas.service import Service, StaleWrite, UndoConflict
 from lanscape_atlas.store.db import migrate, open_db
-from lanscape_atlas.web import floorplan, pages
+from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
+from lanscape_atlas.web.ble_api import router as ble_router
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
@@ -164,9 +167,10 @@ async def _undo_conflict(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, UndoConflict)
     if _is_page(request):
         return pages.error_page(request, 409, str(exc))
-    return JSONResponse(
-        {"detail": "conflict", "conflicting": list(exc.conflicting)}, status_code=409
-    )
+    body: dict[str, Any] = {"detail": "conflict", "conflicting": list(exc.conflicting)}
+    if exc.reason:
+        body["reason"] = exc.reason
+    return JSONResponse(body, status_code=409)
 
 
 async def _stale_write(request: Request, exc: Exception) -> Response:
@@ -395,13 +399,20 @@ def create_app(
     )
     runner = CollectorRunner.from_settings(settings, service, ingestor, clock)
     collectors = build_collectors(settings, service)
+    bluetooth = (
+        BluetoothRuntime(service, settings, oui, clock, runner=runner)
+        if settings.home_assistant is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sched = None
         try:
             if start_background:
-                sched = await start_scheduler(settings, runner, collectors, service)
+                sched = await start_scheduler(
+                    settings, runner, collectors, service, bluetooth=bluetooth
+                )
             # Stateless + JSON responses: no per-client session state to lose behind a
             # proxy or on restart, and no long-lived SSE streams to buffer.
             mcp_server.streamable_http_app(
@@ -414,7 +425,7 @@ def create_app(
         finally:
             await _cancel_tasks(app.state.deep_scan_tasks)
             if sched is not None:
-                await stop_scheduler(sched, collectors, runner=runner)
+                await stop_scheduler(sched, collectors, runner=runner, bluetooth=bluetooth)
             if owns_conn:
                 db.close()
 
@@ -436,6 +447,7 @@ def create_app(
     app.state.ingestor = ingestor
     app.state.runner = runner
     app.state.collectors = collectors
+    app.state.bluetooth = bluetooth
     app.state.deep_scan_runner = run_nmap
     # device_id -> in-flight deep scan task (at most one per device).
     app.state.deep_scan_tasks = {}
@@ -460,7 +472,7 @@ def create_app(
     async def scanner(device_id: int) -> None:
         start_deep_scan(app.state, device_id)
 
-    mcp_server = build_mcp(service, scanner)
+    mcp_server = build_mcp(service, scanner, lambda: app.state.bluetooth)
     app.state.mcp = mcp_server
     # Both spellings are served directly: a POST redirect is not reliably followed.
     endpoint = _McpEndpoint(mcp_server)
@@ -470,6 +482,8 @@ def create_app(
 
     app.include_router(api_router)
     app.include_router(floorplan_router)
+    app.include_router(ble_router)
     app.include_router(floorplan.router)
+    app.include_router(find.router)
     pages.install(app)
     return app

@@ -1,5 +1,6 @@
 # lanscape-atlas example configuration. Copy to $LANSCAPE_DATA_DIR/config.toml.
-# Secrets can instead come from LANSCAPE_ROUTER_PASSWORD and LANSCAPE_API_TOKEN.
+# Secrets can instead come from LANSCAPE_ROUTER_PASSWORD, LANSCAPE_HA_TOKEN and
+# LANSCAPE_API_TOKEN.
 data_dir = "/var/lib/lanscape-atlas"
 bind_host = "127.0.0.1"
 bind_port = 8720
@@ -18,6 +19,23 @@ host = "192.0.2.1"
 username = "admin"
 password = ""
 use_ssl = true
+
+# Optional: uncomment to enable Bluetooth via Home Assistant. Left commented here because
+# a non-empty url requires a long-lived access token (here or in LANSCAPE_HA_TOKEN).
+# [home_assistant]
+# url = "http://192.0.2.10:8123"
+# token = ""          # or LANSCAPE_HA_TOKEN
+# verify_tls = true
+
+# Optional: Bluetooth sighting retention (days) for the nightly prune, and how often (seconds)
+# atlas re-subscribes to Home Assistant's advert stream. HA only pushes an advert when its
+# payload changes, so each re-subscribe replays HA's latest advert per device (a snapshot);
+# "last heard" is accurate to about one snapshot interval. Keep it at 30 or below (the
+# "steady" badge needs a sighting in 48 of the last 60 minutes; at 60 snapshots drift
+# against minute boundaries and steady devices can look intermittent).
+[bluetooth]
+retention_days = 14
+snapshot_s = 30
 
 [collectors.asusrouter]
 enabled = true

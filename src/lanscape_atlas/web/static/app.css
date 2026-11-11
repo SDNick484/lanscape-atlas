@@ -210,6 +210,8 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fp-stage img { display: block; width: 100%; height: auto; user-select: none; }
 .fp-svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .fp-room { fill: rgb(47 111 223 / 10%); stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.fp-room.room--heard { fill: rgb(46 160 67 / 28%); stroke: var(--online); stroke-width: 3; }
+.chip.heard { background: var(--ok-bg); border-color: transparent; color: var(--online); }
 .fp-room-label { fill: var(--text); opacity: 0.75; text-anchor: middle; dominant-baseline: middle; font-weight: 600; pointer-events: none; }
 .fp-dev { fill: var(--online); stroke: var(--surface); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: grab; }
 .fp-dev.offline { fill: var(--offline); opacity: 0.6; }
@@ -234,6 +236,7 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fp-group ul { list-style: none; margin: 0; padding: 0; }
 .fp-item { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 6px; cursor: grab; touch-action: none; user-select: none; }
 .fp-item:hover { background: var(--bg); }
+.fp-item.fp-heard-only { cursor: default; touch-action: auto; }
 .fp-item.offline .fp-name { color: var(--muted); }
 .fp-item .fp-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .fp-item.dirty .fp-name::after { content: " •"; color: var(--edge-wifi); }
@@ -246,3 +249,13 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .fp-rooms-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .fp-rooms-list form { flex-wrap: nowrap; }
 .fp-rooms-list input { flex: 1; min-width: 0; }
+
+/* Bluetooth Find / device page */
+.strip { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; list-style: none; padding: 0; margin: 8px 0 16px; }
+.strip .hour { min-height: 28px; overflow: hidden; font-size: 0.65rem; line-height: 1.2; padding: 2px; text-align: center; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
+.strip .hour.heard { background: var(--ok-bg); color: var(--text); }
+.tag.badge-steady { background: var(--ok-bg); border-color: transparent; }
+.tag.badge-intermittent { background: var(--warn-bg); border-color: transparent; }
+/* Find: one shared claim form under the candidate table. */
+fieldset.card { margin: 12px 0 0; min-width: 0; }
+fieldset.card legend { font-weight: 600; padding: 0 4px; }

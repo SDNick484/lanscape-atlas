@@ -37,7 +37,9 @@ from starlette.datastructures import FormData
 
 from lanscape_atlas.collectors.nmap import ScanRefused
 from lanscape_atlas.service import Placement, Service, StaleWrite, UndoConflict
+from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.service import queries as q
+from lanscape_atlas.web.ble_api import ago, where
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
 from lanscape_atlas.web.topology import (
@@ -70,6 +72,7 @@ CHOICE_FIELDS = ("trust", "scan_policy")
 TRUST_CHOICES = ("new", "known", "unwanted")
 SCAN_POLICY_CHOICES = ("normal", "never")
 DEVICE_LIMIT = 1000
+_STRIP_HOURS = 24
 HISTORY_LIMIT = 500
 
 router = APIRouter(include_in_schema=False)
@@ -325,6 +328,7 @@ class DevicePage:
     view: q.DeviceView
     aps: dict[str, tuple[int, str | None]]
     roaming: bool = False
+    ble: dict[str, Any] | None = None
 
 
 def _device_page(
@@ -345,6 +349,7 @@ def _device_page(
             "d": page.view,
             "aps": page.aps,
             "roaming": page.roaming,
+            "ble": page.ble,
             "values": values or current,
             "origs": origs or current,
             "trust_choices": TRUST_CHOICES,
@@ -360,7 +365,28 @@ def _load_view(svc: Service, device_id: int) -> DevicePage:
         view = q.get_device(svc.conn, device_id, window_min=svc.ip_match_window_min)
         aps = q.ap_device_names(svc.conn, (i.ap_node for i in view.interfaces))
         row = svc.conn.execute("SELECT roaming FROM device WHERE id = ?", (device_id,)).fetchone()
-    return DevicePage(view, aps, bool(row[0]))
+        ble = _ble_section(svc, device_id)
+    return DevicePage(view, aps, bool(row[0]), ble)
+
+
+def _ble_section(svc: Service, device_id: int) -> dict[str, Any] | None:
+    """Last heard, the 24 h strip and identities; ``None`` when nothing is claimed.
+
+    The caller holds ``svc.lock``.
+    """
+    idents = bq.identities(svc.conn, device_id)
+    if not idents:
+        return None
+    now = svc.clock()
+    last = bq.last_heard(svc.conn, device_id)
+    strip = bq.hourly_strip(svc.conn, device_id, now=now)
+    heard = None
+    if last is not None:
+        age = max(0, int((now - last.at).total_seconds()))
+        place = f"near {last.place_name}" if last.place_name else where(last)
+        heard = f"{place}, {ago(age)}"
+    cells = [{"hours_ago": _STRIP_HOURS - 1 - i, "label": label} for i, label in enumerate(strip)]
+    return {"last": heard, "strip": cells, "identities": idents}
 
 
 @router.get("/devices/{device_id}", response_class=HTMLResponse)
@@ -583,9 +609,12 @@ def history_undo(request: Request, batch_id: PathId, form: Form) -> Response:
     try:
         _service(request).undo(ACTOR, batch_id)
     except UndoConflict as e:
-        ids = ", ".join(f"#{b}" for b in e.conflicting)
-        msg = f"Cannot undo #{batch_id}: later changes touch the same data ({ids})."
-        msg += " Undo those first."
+        if e.conflicting:
+            ids = ", ".join(f"#{b}" for b in e.conflicting)
+            msg = f"Cannot undo #{batch_id}: later changes touch the same data ({ids})."
+            msg += " Undo those first."
+        else:
+            msg = f"#{batch_id}: {e}"
         return _history_page(request, actor, flash=("error", msg), status_code=409)
     except ValueError as e:
         flash = ("error", f"#{batch_id}: {_message(e)}")
@@ -636,15 +665,63 @@ def topology_placeholder(request: Request, body: PlaceholderBody) -> dict[str, i
 # ------------------------------------------------------------------- status
 
 
+SCANNER_FLASH = {
+    "linked": "Scanner linked.",
+    "unlinked": "Scanner unlinked.",
+    "unchanged": "No change.",
+}
+
+
 @router.get("/status", response_class=HTMLResponse)
-def status_page(request: Request) -> HTMLResponse:
+def status_page(request: Request, scanner: str | None = None) -> HTMLResponse:
     svc = _service(request)
+    now = svc.clock()
     with svc.lock:
         collectors = q.collector_status(svc.conn)
         counts = q.device_counts(svc.conn)
+        scanners = bq.scanners(svc.conn)
+        devices = (
+            q.list_devices(svc.conn, limit=DEVICE_LIMIT, window_min=svc.ip_match_window_min)
+            if scanners
+            else []
+        )
+    names = {d.id: d.name or "(unnamed)" for d in devices}
+    rows = [
+        {
+            "s": s,
+            "suggested": [(i, names.get(i, f"#{i}")) for i in s.suggestions if i != s.device_id],
+            "linked_suggested": s.device_id in s.suggestions,
+            "others": [d for d in devices if d.id not in s.suggestions and d.id != s.device_id],
+            "age": ago(max(0, int((now - s.last_seen).total_seconds()))),
+        }
+        for s in scanners
+    ]
+    msg = SCANNER_FLASH.get(scanner or "")
     return render(
-        request, "status.html", {"nav": "status", "collectors": collectors, "counts": counts}
+        request,
+        "status.html",
+        {
+            "nav": "status",
+            "collectors": collectors,
+            "counts": counts,
+            "scanners": rows,
+            "flash": ("ok", msg) if msg else None,
+        },
     )
+
+
+@router.post("/status/scanners/{scanner_id}/link", response_model=None)
+def status_link_scanner(request: Request, scanner_id: PathId, form: Form) -> Response:
+    raw = _text(form, "device_id") or ""
+    try:
+        device_id = int(raw) if raw.strip() else None
+    except ValueError:
+        raise ValueError("device_id must be a number or empty") from None
+    if device_id is not None and not 1 <= device_id <= MAX_ID:
+        raise ValueError("device_id out of range")
+    batch = _service(request).link_scanner(ACTOR, scanner_id, device_id)
+    outcome = "unchanged" if batch == 0 else ("linked" if device_id is not None else "unlinked")
+    return _redirect(request, f"/status?scanner={outcome}")
 
 
 def install(app: FastAPI) -> None:

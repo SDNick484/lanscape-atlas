@@ -1,6 +1,6 @@
 """MCP server (spec section 8.3): look up, rename and place devices from Claude.
 
-``build_mcp`` registers exactly the twelve tools in ``TOOL_NAMES`` on an SDK
+``build_mcp`` registers exactly the tools in ``TOOL_NAMES`` on an SDK
 ``MCPServer`` (the mcp 2.x name for FastMCP). ``create_app`` mounts it at ``/mcp``
 with the streamable HTTP transport; auth is the app's bearer-token middleware.
 
@@ -17,6 +17,7 @@ with the streamable HTTP transport; auth is the app's bearer-token middleware.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -31,6 +32,8 @@ from pydantic import ValidationError
 
 from lanscape_atlas.collectors.nmap import ScanRefused
 from lanscape_atlas.service import Service, StaleWrite, UndoConflict, queries
+from lanscape_atlas.service import ble_queries as bq
+from lanscape_atlas.web.ble_api import age_seconds, candidate_dict, find_row_dict, require_candidate
 from lanscape_atlas.web.floorplan_api import PlacementsBody, apply_placements
 
 ACTOR = "claude"
@@ -49,6 +52,9 @@ TOOL_NAMES = (
     "undo",
     "get_floor_plan",
     "place_devices",
+    "where_is",
+    "ble_candidates",
+    "claim_ble",
 )
 
 INSTRUCTIONS = (
@@ -56,10 +62,14 @@ INSTRUCTIONS = (
     "list_devices to locate a device, get_device for its full record, and update_device / "
     "set_place / claim_interface to name, place or merge devices. Every change you make is "
     "recorded as actor 'claude' and can be reverted with undo(batch_id). get_floor_plan lists "
-    "rooms and where devices sit; place_devices puts devices in rooms or at points on the plan."
+    "rooms and where devices sit; place_devices puts devices in rooms or at points on the plan. "
+    "where_is finds where a Bluetooth tag or device was last heard; ble_candidates lists unclaimed "
+    "Bluetooth devices and claim_ble attaches one to a device. Devices that rotate their "
+    "Bluetooth address (most phones and watches) are not findable."
 )
 
 Scanner = Callable[[int], Awaitable[None]]
+BluetoothGetter = Callable[[], Any]
 
 _NO_ENTITY = re.compile(r"^no (\w+) with id (-?\d+)$")
 
@@ -67,6 +77,8 @@ _NO_ENTITY = re.compile(r"^no (\w+) with id (-?\d+)$")
 def error_message(exc: BaseException) -> str | None:
     """The plain tool-error text for an expected failure, or ``None`` if unexpected."""
     if isinstance(exc, UndoConflict):
+        if not exc.conflicting and exc.reason:
+            return f"undo conflict: {exc.reason}"
         return f"undo conflict with batches {list(exc.conflicting)}"
     if isinstance(exc, StaleWrite):
         return (
@@ -135,11 +147,14 @@ def _cap(limit: int) -> int:
     return max(1, min(limit, MAX_LIMIT))
 
 
-def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
+def build_mcp(
+    service: Service, scanner: Scanner, bluetooth: BluetoothGetter | None = None
+) -> MCPServer[Any]:
     """An ``MCPServer`` exposing the inventory through exactly the tools in ``TOOL_NAMES``.
 
     ``scanner(device_id)`` starts a background deep scan or raises ``KeyError`` /
     ``ScanRefused``; ``create_app`` passes one built on ``web.deep_scan.start_deep_scan``.
+    ``bluetooth()`` returns the ``BluetoothRuntime`` or ``None`` (no Home Assistant).
     """
     # MCPServer() calls logging.basicConfig(level=INFO) on the root logger; logging
     # setup belongs to the application, so undo that side effect.
@@ -329,5 +344,70 @@ def build_mcp(service: Service, scanner: Scanner) -> MCPServer[Any]:
             raise ValueError(f"invalid placements: {where}: {first['msg']}") from None
         # Service.place_devices takes service.lock itself.
         return {"batch_id": apply_placements(service, ACTOR, body)}
+
+    # ------------------------------------------------------------- bluetooth
+
+    @tool(
+        title="Where is a device",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    def where_is(query: str) -> list[dict[str, Any]]:
+        """Where a Bluetooth-tracked device was last heard. query is a case-insensitive
+        substring of the device name ("" lists every claimed device). Each row: device_id,
+        name, type, badge ("steady", "intermittent" or "not_heard_24h"), age_s (seconds
+        since last heard, null if never) and last (null, or at, rssi, place_name, scanner_name,
+        scanner_source). Only devices with a claimed Bluetooth identity are listed; devices
+        that rotate their address are not findable."""
+        with service.lock:
+            now = service.clock()
+            rows = bq.find(service.conn, query or None, now=now)
+        return [{**find_row_dict(r), "age_s": age_seconds(r, now)} for r in rows]
+
+    @tool(
+        title="List unclaimed Bluetooth devices",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    async def ble_candidates() -> dict[str, Any]:
+        """Unclaimed Bluetooth devices heard recently: connected (Home Assistant link up,
+        null when Home Assistant is not configured) and candidates, each with identity
+        (pass to claim_ble), name, best_rssi, source, first_heard, last_heard, adverts and
+        typical_gap_s. Holding a tag next to a scanner makes its best_rssi stand out."""
+        runtime = bluetooth() if bluetooth else None
+        if runtime is None:
+            return {"connected": None, "candidates": []}
+        return {
+            "connected": runtime.status().connected,
+            "candidates": [candidate_dict(c) for c in runtime.aggregator.candidates()],
+        }
+
+    @tool(
+        title="Claim a Bluetooth device",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, open_world_hint=False
+        ),
+    )
+    async def claim_ble(
+        candidate: str,
+        device_id: int | None = None,
+        new_name: str | None = None,
+        new_type: str = "other",
+    ) -> dict[str, int]:
+        """Attach a candidate from ble_candidates to a device so where_is can find it.
+        Give either device_id (an existing device) or new_name (creates a device of type
+        new_type, default "other"). candidate is the identity string from ble_candidates.
+        Recorded as actor "claude"; returns {"device_id", "batch_id"}; undo(batch_id)
+        reverts it."""
+        runtime = bluetooth() if bluetooth else None
+        identity = require_candidate(runtime, candidate)
+        did, batch_id = await asyncio.to_thread(
+            lambda: service.claim_ble(
+                ACTOR,
+                identity,
+                device_id=device_id,
+                new_name=new_name,
+                new_type=new_type if new_name is not None else None,
+            )
+        )
+        return {"device_id": did, "batch_id": batch_id}
 
     return mcp

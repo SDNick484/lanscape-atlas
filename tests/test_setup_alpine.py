@@ -26,6 +26,8 @@ SCRIPT = ROOT / "deploy" / "setup-alpine.sh"
 # A password that exercises TOML escaping: quote, backslash, dollar, hash, spaces, non-ASCII.
 PASSWORD = 'p"a\\ss $word #1 é'
 TOKEN = "t" * 40
+HA_TOKEN = 'eyJ-ha"long\\lived$token #2'  # quote, backslash, dollar, hash
+HA_ENV = {"HA_URL": "http://192.0.2.10:8123", "HA_TOKEN": HA_TOKEN}
 
 BASE_ENV = {
     "REPO_URL": "git@github.com:example/lanscape-atlas.git",
@@ -146,10 +148,54 @@ def test_render_quoted_values_and_overrides(tmp_path: Path) -> None:
     assert cfg["router"]["use_ssl"] is False
 
 
+@pytest.mark.parametrize("shell", SHELLS)
+def test_render_with_home_assistant(shell: list[str], tmp_path: Path) -> None:
+    proc, out = render(shell, tmp_path, {**BASE_ENV, **HA_ENV})
+    assert proc.returncode == 0, proc.stderr
+    cfg = tomllib.loads(out.read_text(encoding="utf-8"))
+    assert cfg["home_assistant"] == {
+        "url": "http://192.0.2.10:8123",
+        "token": HA_TOKEN,
+        "verify_tls": True,
+    }
+    assert cfg["bluetooth"]["retention_days"] == 14  # the rest of the example is intact
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    settings = load_settings(out, env={})  # the service has no LANSCAPE_HA_TOKEN
+    assert settings.home_assistant is not None
+    assert settings.home_assistant.url == "http://192.0.2.10:8123"
+    assert settings.home_assistant.token == HA_TOKEN
+
+
+def test_render_home_assistant_verify_tls_false(tmp_path: Path) -> None:
+    env = {**BASE_ENV, **HA_ENV, "HA_URL": "https://ha.example:8123", "HA_VERIFY_TLS": "false"}
+    proc, out = render(["sh"], tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    ha = load_settings(out, env={}).home_assistant
+    assert ha is not None and ha.url == "https://ha.example:8123" and ha.verify_tls is False
+
+
+def test_render_without_home_assistant_leaves_it_off(tmp_path: Path) -> None:
+    proc, out = render(["sh"], tmp_path, BASE_ENV)
+    assert proc.returncode == 0, proc.stderr
+    assert "home_assistant" not in tomllib.loads(out.read_text())
+    assert load_settings(out, env={}).home_assistant is None
+
+
+def test_setup_env_example_documents_home_assistant() -> None:
+    text = (ROOT / "deploy" / "setup.env.example").read_text()
+    for key in ("HA_URL", "HA_TOKEN", "HA_VERIFY_TLS"):
+        assert re.search(rf"^#?\s*{key}=", text, re.M), key
+
+
 @pytest.mark.parametrize(
     ("change", "needle"),
     [
         ({"NOT_A_KEY": "x"}, "unknown key"),
+        ({**HA_ENV, "HA_TOKEN": ""}, "HA_TOKEN"),
+        ({"HA_TOKEN": HA_TOKEN}, "HA_URL"),
+        ({**HA_ENV, "HA_URL": "192.0.2.10:8123"}, "HA_URL"),
+        ({**HA_ENV, "HA_URL": "http://192.0.2.10 :8123"}, "HA_URL"),
+        ({**HA_ENV, "HA_VERIFY_TLS": "yes"}, "HA_VERIFY_TLS"),
         ({"BIND_PORT": "80x"}, "BIND_PORT"),
         ({"ASUSROUTER_INTERVAL_S": "0"}, "ASUSROUTER_INTERVAL_S"),
         ({"API_TOKEN": "short"}, "API_TOKEN"),
@@ -185,7 +231,7 @@ def test_env_file_must_be_0600(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_secrets_never_printed(shell: list[str], tmp_path: Path) -> None:
-    env = {**BASE_ENV, "API_TOKEN": TOKEN}
+    env = {**BASE_ENV, **HA_ENV, "API_TOKEN": TOKEN}
     env_file = write_env(tmp_path, env)
     out = tmp_path / "config.toml"
     results = [
@@ -198,6 +244,7 @@ def test_secrets_never_printed(shell: list[str], tmp_path: Path) -> None:
         combined = proc.stdout + proc.stderr
         assert PASSWORD not in combined
         assert TOKEN not in combined
+        assert HA_TOKEN not in combined
 
 
 @pytest.mark.parametrize("shell", SHELLS)

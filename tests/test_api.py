@@ -388,14 +388,21 @@ def test_lifespan_starts_and_stops_scheduler(
     from lanscape_atlas.web import app as app_mod
 
     calls: list[str] = []
+    passed: list[Any] = []
     sentinel = object()
 
-    async def fake_start(settings: Any, runner: Any, collectors: Any, service: Any) -> object:
+    async def fake_start(
+        settings: Any, runner: Any, collectors: Any, service: Any, bluetooth: Any = None
+    ) -> object:
+        passed.append(bluetooth)
         calls.append("start")
         return sentinel
 
-    async def fake_stop(sched: Any, collectors: Any, runner: Any = None) -> None:
+    async def fake_stop(
+        sched: Any, collectors: Any, runner: Any = None, bluetooth: Any = None
+    ) -> None:
         assert sched is sentinel and runner is not None
+        passed.append(bluetooth)
         calls.append("stop")
 
     monkeypatch.setattr(app_mod, "start_scheduler", fake_start)
@@ -404,6 +411,7 @@ def test_lifespan_starts_and_stops_scheduler(
     with TestClient(app):
         assert calls == ["start"]
     assert calls == ["start", "stop"]
+    assert app.state.bluetooth is None and passed == [None, None]
     db.execute("SELECT 1")  # a caller-supplied connection is left open
 
     calls.clear()
@@ -411,6 +419,19 @@ def test_lifespan_starts_and_stops_scheduler(
     with TestClient(app):
         pass
     assert calls == []
+
+    # With [home_assistant] the runtime is passed to both start and stop.
+    from lanscape_atlas.config import HomeAssistantSettings
+
+    calls.clear()
+    passed.clear()
+    ha = HomeAssistantSettings(url="http://192.0.2.10:8123", token="t")
+    app = create_app(Settings(data_dir=tmp_path, home_assistant=ha), conn=db, clock=clock)
+    assert app.state.bluetooth is not None
+    with TestClient(app):
+        pass
+    assert calls == ["start", "stop"]
+    assert passed == [app.state.bluetooth, app.state.bluetooth]
 
 
 def test_shutdown_cancels_pending_deep_scans(app: FastAPI) -> None:

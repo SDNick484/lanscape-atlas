@@ -1,0 +1,21 @@
+{%- if banner %}
+<p class="flash error" role="alert" id="find-banner">{{ banner }}</p>
+{%- endif %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Device</th><th>Where</th><th>Heard</th><th>Signal</th><th>Findability</th></tr></thead>
+  <tbody>
+  {%- for r in rows %}
+  <tr id="find-{{ r.device_id }}">
+    <td><a class="name" href="{{ root }}/devices/{{ r.device_id }}">{{ r.name or "(unnamed)" }}</a>{% if r.type %} <span class="muted">{{ r.type }}</span>{% endif %}</td>
+    <td>{{ r.where or "" }}</td>
+    <td>{{ r.age or "never" }}</td>
+    <td>{% if r.rssi is not none %}<meter min="-100" max="-30" low="-85" high="-65" optimum="-30" value="{{ r.rssi }}" title="{{ r.rssi }} dBm"></meter> <span class="mono">{{ r.rssi }}</span>{% endif %}</td>
+    <td><span class="tag badge-{{ r.badge }}"{% if r.badge == "intermittent" %} title="{{ intermittent_hint }}"{% endif %}>{{ r.badge_label }}</span></td>
+  </tr>
+  {%- else %}
+  <tr><td colspan="5" class="empty">No claimed Bluetooth devices{% if q %} match{% endif %}.</td></tr>
+  {%- endfor %}
+  </tbody>
+</table>
+</div>

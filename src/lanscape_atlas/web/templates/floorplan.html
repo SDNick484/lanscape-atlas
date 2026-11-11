@@ -81,8 +81,12 @@
             <ul>
               {%- for e in g.devices %}
               <li class="fp-item" data-tray-device="{{ e.device_id }}"><span class="fp-name">{{ e.label }}</span>
+                {%- if g.room_id is not none and e.heard and e.heard.place_id == g.room_id %}<span class="chip heard" title="Heard here by a Bluetooth scanner">heard</span>{% endif %}
                 {%- if g.room_id is not none %}<label class="fp-roam"><input type="checkbox" data-roaming-for="{{ e.device_id }}"{% if e.roaming %} checked{% endif %}> roaming</label>{% endif %}
                 {%- if e.roaming and e.set_by %}<small class="set-by">last set by {{ e.set_by }} at {{ e.set_at|ts }}</small>{% endif %}</li>
+              {%- endfor %}
+              {%- for e in g.heard_only %}
+              <li class="fp-item fp-heard-only" data-heard-device="{{ e.device_id }}"><span class="fp-name">{{ e.label }}</span><span class="chip heard" title="Heard here by a Bluetooth scanner">heard</span></li>
               {%- endfor %}
             </ul>
           </div>

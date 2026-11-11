@@ -8,6 +8,7 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,9 @@ EXPECTED = {
     "undo",
     "get_floor_plan",
     "place_devices",
+    "where_is",
+    "ble_candidates",
+    "claim_ble",
 }
 
 
@@ -128,7 +132,7 @@ async def test_tool_names_exact(app: FastAPI) -> None:
     async with _session(app) as client:
         tools = (await client.list_tools()).tools
         assert {t.name for t in tools} == EXPECTED
-        assert len(tools) == 12
+        assert len(tools) == 15
         assert set(TOOL_NAMES) == EXPECTED
         for t in tools:
             assert t.description and len(t.description) > 20, t.name
@@ -586,3 +590,108 @@ def test_instructions_and_docstring_cover_floor_plan_tools() -> None:
     assert "place_devices" in mcp_server.INSTRUCTIONS
     src = Path(mcp_server.__file__).read_text()
     assert "may be omitted" in src and "counts as 0" in src
+
+
+def test_error_message_undo_conflict_without_batches() -> None:
+    from lanscape_atlas.mcp_server import error_message
+    from lanscape_atlas.service import UndoConflict
+
+    assert error_message(UndoConflict([7])) == "undo conflict with batches [7]"
+    exc = UndoConflict([], "cannot undo: device 5 no longer exists")
+    assert error_message(exc) == "undo conflict: cannot undo: device 5 no longer exists"
+
+
+# -------------------------------------------------------------- bluetooth
+
+BLE_ADDR = "00:00:5e:00:53:01"
+BLE_KEY = f"address:{BLE_ADDR}"
+
+
+def _with_candidate(app: FastAPI, clock: FixedClock, *, connected: bool = True) -> None:
+    from test_ble_api import StubRuntime, candidate
+
+    app.state.bluetooth = StubRuntime([candidate(clock)], connected)
+
+
+def test_tool_names_include_ble() -> None:
+    assert {"where_is", "ble_candidates", "claim_ble"} <= set(TOOL_NAMES)
+    from lanscape_atlas.mcp_server import INSTRUCTIONS
+
+    for name in ("where_is", "ble_candidates", "claim_ble"):
+        assert name in INSTRUCTIONS
+    assert "rotate" in INSTRUCTIONS
+
+
+async def test_where_is(app: FastAPI, clock: FixedClock) -> None:
+    from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+    from lanscape_atlas.bluetooth.match import Identity
+
+    svc = app.state.service
+    dev = next(d for d in svc.conn.execute("select id from device limit 2"))["id"]
+    other = next(d for d in svc.conn.execute("select id from device limit 1 offset 1"))["id"]
+    svc.claim_ble("user", Identity("address", BLE_ADDR), device_id=dev)
+    svc.claim_ble("user", Identity("address", "00:00:5e:00:53:02"), device_id=other)
+    heard = clock() - timedelta(seconds=90)
+    svc.record_ble_minutes(
+        [
+            MinuteRow(
+                device_id=dev,
+                source="00:00:5e:00:53:aa",
+                minute=heard.strftime(BLE_MINUTE_FMT),
+                max_rssi=-61,
+                adverts=2,
+                last_at=heard,
+            )
+        ]
+    )
+    async with _session(app) as c:
+        rows = _data(await _call(c, "where_is", query=""))
+        by_id = {r["device_id"]: r for r in rows}
+        assert by_id[dev]["age_s"] == 90 and by_id[dev]["last"]["rssi"] == -61
+        assert by_id[dev]["last"]["at"] == heard.strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert by_id[other]["age_s"] is None and by_id[other]["last"] is None
+        name = by_id[dev]["name"]
+        if name:
+            hit = _data(await _call(c, "where_is", query=name[:3].upper()))
+            assert dev in {r["device_id"] for r in hit}
+        assert _data(await _call(c, "where_is", query="no-such-device-zzz")) == []
+
+
+async def test_ble_candidates(app: FastAPI, clock: FixedClock) -> None:
+    async with _session(app) as c:
+        assert _data(await _call(c, "ble_candidates")) == {"connected": None, "candidates": []}
+        _with_candidate(app, clock)
+        data = _data(await _call(c, "ble_candidates"))
+        assert data["connected"] is True
+        assert data["candidates"][0]["identity"] == BLE_KEY
+        assert data["candidates"][0]["last_heard"] == "2026-01-01T00:00:00Z"
+
+
+async def test_claim_ble_actor_is_claude(app: FastAPI, clock: FixedClock) -> None:
+    _with_candidate(app, clock)
+    async with _session(app) as c:
+        r = _data(await _call(c, "claim_ble", candidate=BLE_KEY, new_name="Keys"))
+        db = app.state.service.conn
+        name, typ = db.execute(
+            "select name, type from device where id = ?", (r["device_id"],)
+        ).fetchone()
+        assert (name, typ) == ("Keys", "other")
+        actor = db.execute("select actor from batch where id = ?", (r["batch_id"],))
+        assert actor.fetchone()[0] == "claude"
+        # Already claimed -> no longer valid? Candidate list is stubbed, so the service says so.
+        again = await _call(c, "claim_ble", candidate=BLE_KEY, new_name="Keys 2")
+        assert again.is_error and "already claimed" in _text(again)
+
+
+async def test_claim_ble_errors(app: FastAPI, clock: FixedClock) -> None:
+    _with_candidate(app, clock)
+    async with _session(app) as c:
+        bad = await _call(c, "claim_ble", candidate="address:00:00:5e:00:53:09", new_name="x")
+        assert bad.is_error and _text(bad) == "no such candidate"
+        junk = await _call(c, "claim_ble", candidate="nonsense", new_name="x")
+        assert junk.is_error
+        both = await _call(c, "claim_ble", candidate=BLE_KEY)
+        assert both.is_error and "exactly one" in _text(both)
+        app.state.bluetooth = None
+        gone = await _call(c, "claim_ble", candidate=BLE_KEY, new_name="x")
+        assert gone.is_error and _text(gone) == "no such candidate"

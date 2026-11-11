@@ -19,7 +19,7 @@ from lanscape_atlas import scheduler as scheduler_mod
 from lanscape_atlas.clock import iso
 from lanscape_atlas.collectors import REGISTRY, build_collectors
 from lanscape_atlas.collectors.arp import ArpCollector
-from lanscape_atlas.config import CollectorSettings, RouterSettings, Settings
+from lanscape_atlas.config import BluetoothSettings, CollectorSettings, RouterSettings, Settings
 from lanscape_atlas.observation import Observation
 from lanscape_atlas.scheduler import (
     CollectorRunner,
@@ -577,6 +577,50 @@ async def test_prune_and_presence_jobs_call_through(settings, runner, svc, monke
         await stop_scheduler(sched, [])
 
 
+async def test_prune_job_prunes_ble(tmp_path, runner, svc, monkeypatch) -> None:
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(svc, "prune_observations", lambda d: calls.append(("obs", d)) or 0)
+    monkeypatch.setattr(svc, "prune_ble", lambda d: calls.append(("ble", d)) or 0)
+    s = Settings(data_dir=tmp_path, bluetooth=BluetoothSettings(retention_days=9))
+    sched = await start_scheduler(s, runner, [], svc)
+    try:
+        j = sched.get_job("prune")
+        await j.func(*j.args)
+        assert calls == [("obs", 30), ("ble", 9)]
+    finally:
+        await stop_scheduler(sched, [])
+
+
+async def test_prune_job_ble_failure_does_not_block_observations(
+    runner, svc, monkeypatch, caplog
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def boom(_d):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(svc, "prune_observations", lambda d: calls.append(("obs", d)) or 0)
+    monkeypatch.setattr(svc, "prune_ble", boom)
+    await scheduler_mod._prune_job(svc, 30, 14)  # must not raise
+    assert calls == [("obs", 30)]
+    assert "BLE sighting prune failed" in caplog.text
+
+
+async def test_prune_job_failing_observation_prune_still_prunes_ble(
+    runner, svc, monkeypatch, caplog
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def boom(_d):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(svc, "prune_observations", boom)
+    monkeypatch.setattr(svc, "prune_ble", lambda d: calls.append(("ble", d)) or 0)
+    await scheduler_mod._prune_job(svc, 30, 14)  # must not raise
+    assert calls == [("ble", 14)]
+    assert "observation prune failed" in caplog.text
+
+
 async def test_prune_job_swallows_errors(settings, runner, svc, monkeypatch) -> None:
     def boom(_d):
         raise RuntimeError("db gone")
@@ -605,6 +649,20 @@ async def test_runner_from_settings_redacts_and_uses_intervals(tmp_path, svc, in
     assert status(db, "arp")["next_run_at"] == "2026-01-01T00:03:20Z"  # 100 s * 2
 
 
+async def test_runner_redacts_ha_token(tmp_path, svc, ing, clock, db):
+    from lanscape_atlas.config import HomeAssistantSettings
+
+    ha_token = "ha-secret-token"
+    s = Settings(
+        data_dir=tmp_path,
+        home_assistant=HomeAssistantSettings(url="http://192.0.2.10:8123", token=ha_token),
+    )
+    r = CollectorRunner.from_settings(s, svc, ing, clock)
+    out = await r.run_once(FakeCollector("arp", exc=OSError(f"auth failed {ha_token}")))
+    assert out.error == "OSError: auth failed ***"
+    assert ha_token not in status(db, "arp")["last_error"]
+
+
 async def test_interval_jobs_fire_at_startup(settings, runner, svc) -> None:
     """M7: interval collectors run once right away, not only after the first interval."""
     from datetime import datetime, timedelta
@@ -625,3 +683,58 @@ async def test_interval_jobs_fire_at_startup(settings, runner, svc) -> None:
         assert (pr.hour, pr.minute) == (4, 41)
     finally:
         await stop_scheduler(sched, cs, runner=runner)
+
+
+async def test_ble_flush_job_registered(tmp_path, runner, svc) -> None:
+    from lanscape_atlas.config import HomeAssistantSettings
+
+    s = Settings(
+        data_dir=tmp_path,
+        home_assistant=HomeAssistantSettings(url="http://192.0.2.10:8123", token="t"),
+        bluetooth=BluetoothSettings(flush_s=42),
+    )
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.started = self.stopped = False
+            self.flushes = 0
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def flush(self) -> int:
+            self.flushes += 1
+            return 0
+
+    rt = FakeRuntime()
+    sched = await start_scheduler(s, runner, [], svc, bluetooth=rt)  # type: ignore[arg-type]
+    try:
+        assert rt.started
+        job = {j.id: j for j in sched.get_jobs()}["ble_flush"]
+        assert isinstance(job.trigger, IntervalTrigger)
+        assert job.trigger.interval.total_seconds() == 42
+        assert job.max_instances == 1 and job.coalesce is True
+        assert job.func == rt.flush
+    finally:
+        await stop_scheduler(sched, [], runner=runner, bluetooth=rt)  # type: ignore[arg-type]
+    assert rt.stopped
+
+
+async def test_no_ble_flush_job_without_runtime(settings, runner, svc) -> None:
+    sched = await start_scheduler(settings, runner, [], svc)
+    try:
+        assert "ble_flush" not in {j.id for j in sched.get_jobs()}
+    finally:
+        await stop_scheduler(sched, [], runner=runner)
+
+
+async def test_record_status_ok_and_error_redacted(runner, db, clock) -> None:
+    runner.record_status("bluetooth", f"boom {TOKEN}")
+    st = status(db, "bluetooth")
+    assert st["last_error"] == "boom ***" and st["consecutive_failures"] == 1
+    runner.record_status("bluetooth", None)
+    st = status(db, "bluetooth")
+    assert st["consecutive_failures"] == 0 and st["last_ok"] == iso(clock())

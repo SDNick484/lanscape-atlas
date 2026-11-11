@@ -21,6 +21,20 @@ class RouterSettings:
 
 
 @dataclass(frozen=True)
+class HomeAssistantSettings:
+    url: str
+    token: str = field(repr=False)
+    verify_tls: bool = True
+
+
+@dataclass(frozen=True)
+class BluetoothSettings:
+    retention_days: int = 14
+    flush_s: int = 60
+    snapshot_s: int = 30  # re-subscribe interval: HA replays its advert history each time
+
+
+@dataclass(frozen=True)
 class CollectorSettings:
     enabled: bool
     interval_s: int | None
@@ -48,6 +62,8 @@ class Settings:
     observation_retention_days: int = 30
     ip_match_window_min: int = 10
     router: RouterSettings | None = None
+    home_assistant: HomeAssistantSettings | None = None
+    bluetooth: BluetoothSettings = field(default_factory=BluetoothSettings)
     collectors: dict[str, CollectorSettings] = field(default_factory=_default_collectors)
     # Extra Host header values the whole app accepts when no api_token is set (DNS-rebinding
     # protection); "name:*" allows any port, "*" turns the check off.
@@ -95,6 +111,38 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
             use_ssl=_get(rt, "use_ssl", bool, True, "router."),
         )
 
+    home_assistant: HomeAssistantSettings | None = None
+    ha = _table(raw, "home_assistant")
+    ha_url = _get(ha, "url", str, "", "home_assistant.").rstrip("/")
+    if ha_url:
+        if not ha_url.startswith(("http://", "https://")):
+            raise ValueError("config key 'home_assistant.url' must start with http:// or https://")
+        ha_token = env.get("LANSCAPE_HA_TOKEN", _get(ha, "token", str, "", "home_assistant."))
+        if not ha_token:
+            raise ValueError(
+                "config key 'home_assistant.token' (or LANSCAPE_HA_TOKEN) is required "
+                "when home_assistant.url is set"
+            )
+        home_assistant = HomeAssistantSettings(
+            url=ha_url,
+            token=ha_token,
+            verify_tls=_get(ha, "verify_tls", bool, True, "home_assistant."),
+        )
+
+    bt = _table(raw, "bluetooth")
+    bluetooth = BluetoothSettings(
+        retention_days=_get(bt, "retention_days", int, 14, "bluetooth."),
+        flush_s=_get(bt, "flush_s", int, 60, "bluetooth."),
+        snapshot_s=_get(bt, "snapshot_s", int, 30, "bluetooth."),
+    )
+    for key, val in (
+        ("retention_days", bluetooth.retention_days),
+        ("flush_s", bluetooth.flush_s),
+        ("snapshot_s", bluetooth.snapshot_s),
+    ):
+        if val < 1:
+            raise ValueError(f"config key 'bluetooth.{key}' must be a positive integer, got {val}")
+
     collectors = _default_collectors()
     for name, ct in _table(raw, "collectors").items():
         if name not in collectors:
@@ -131,6 +179,8 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
         observation_retention_days=_get(raw, "observation_retention_days", int, 30),
         ip_match_window_min=_get(raw, "ip_match_window_min", int, 10),
         router=router,
+        home_assistant=home_assistant,
+        bluetooth=bluetooth,
         collectors=collectors,
         allowed_hosts=tuple(hosts),
     )

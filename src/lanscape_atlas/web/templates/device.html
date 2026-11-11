@@ -64,6 +64,29 @@
 </div>
 </div>
 
+{% if ble %}
+<div class="card" id="device-ble">
+  <h2>Bluetooth</h2>
+  <p>{% if ble.last %}Last heard {{ ble.last }}{% else %}<span class="muted">Not heard yet.</span>{% endif %}</p>
+  <ol class="strip" aria-label="Last 24 hours, oldest first">
+    {%- for c in ble.strip %}
+    <li class="hour{% if c.label %} heard{% endif %}" title="{{ c.hours_ago }} h ago: {{ c.label or 'not heard' }}">{{ c.label or "·" }}</li>
+    {%- endfor %}
+  </ol>
+  <table>
+    <thead><tr><th>Identity</th><th></th></tr></thead>
+    <tbody>
+    {% for i in ble.identities %}
+    <tr><td class="mono">{{ i.kind }}:{{ i.value }}</td>
+    <td><form method="post" action="{{ root }}/devices/{{ d.id }}/ble/{{ i.id }}/unclaim">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="secondary">Unclaim</button></form></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <h2>Interfaces</h2>
 <div class="table-wrap">
 <table>

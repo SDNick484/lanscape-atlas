@@ -16,7 +16,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
@@ -28,6 +28,9 @@ from lanscape_atlas.collectors.base import Collector
 from lanscape_atlas.config import Settings, _default_collectors
 from lanscape_atlas.ingest import Ingestor, IngestResult
 from lanscape_atlas.service import Service
+
+if TYPE_CHECKING:
+    from lanscape_atlas.bluetooth.runtime import BluetoothRuntime
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +87,8 @@ class CollectorRunner:
         secrets = [settings.api_token or ""]
         if settings.router is not None:
             secrets.append(settings.router.password)
+        if settings.home_assistant is not None:
+            secrets.append(settings.home_assistant.token)
         return cls(
             service,
             ingestor,
@@ -94,21 +99,25 @@ class CollectorRunner:
 
     # ------------------------------------------------------------------ helpers
 
-    def _base_delay(self, c: Collector) -> float:
-        if c.name not in self._intervals:
+    def _base_delay(self, name: str) -> float:
+        if name not in self._intervals:
             return DEFAULT_INTERVAL_S
-        interval = self._intervals[c.name]
+        interval = self._intervals[name]
         return CRON_BACKOFF_BASE_S if interval is None else float(interval)
+
+    def redact(self, msg: str) -> str:
+        """Mask configured secrets in ``msg`` and truncate it (the stored/logged form)."""
+        # Redact before truncating so a secret cut at the boundary cannot leak.
+        for s in self._secrets:
+            msg = msg.replace(s, "***")
+        return msg[:MAX_ERROR_LEN]
 
     def _format_error(self, e: BaseException, c: Collector) -> str:
         if isinstance(e, TimeoutError) and not str(e):
             msg = f"TimeoutError: timed out after {c.timeout_s + TIMEOUT_GRACE_S:g}s"
         else:
             msg = f"{type(e).__name__}: {e}"
-        # Redact before truncating so a secret cut at the boundary cannot leak.
-        for s in self._secrets:
-            msg = msg.replace(s, "***")
-        return msg[:MAX_ERROR_LEN]
+        return self.redact(msg)
 
     @contextmanager
     def _txn(self) -> Iterator[Any]:
@@ -134,13 +143,16 @@ class CollectorRunner:
             )
 
     def _record_failure(self, c: Collector, error: str) -> None:
+        self._record_failure_named(c.name, error)
+
+    def _record_failure_named(self, name: str, error: str) -> None:
         now = self.clock()
         with self._txn() as conn:
             row = conn.execute(
-                "SELECT consecutive_failures FROM collector_status WHERE name = ?", (c.name,)
+                "SELECT consecutive_failures FROM collector_status WHERE name = ?", (name,)
             ).fetchone()
             failures = (int(row[0]) if row else 0) + 1
-            next_run = now + timedelta(seconds=next_delay(self._base_delay(c), failures))
+            next_run = now + timedelta(seconds=next_delay(self._base_delay(name), failures))
             conn.execute(
                 "INSERT INTO collector_status(name, last_error, last_error_at,"
                 " consecutive_failures, next_run_at) VALUES (?, ?, ?, ?, ?)"
@@ -148,10 +160,21 @@ class CollectorRunner:
                 " last_error_at = excluded.last_error_at,"
                 " consecutive_failures = excluded.consecutive_failures,"
                 " next_run_at = excluded.next_run_at",
-                (c.name, error, iso(now), failures, iso(next_run)),
+                (name, error, iso(now), failures, iso(next_run)),
             )
 
     # ------------------------------------------------------------------ public
+
+    def record_status(self, name: str, error: str | None) -> None:
+        """Record health for a component that is not run via ``run_once`` (e.g. Bluetooth).
+
+        ``error=None`` is a success (``last_ok``, failures reset); otherwise the message is
+        redacted and truncated and counted as one more failure. Raises on DB errors.
+        """
+        if error is None:
+            self._record_ok(name)
+        else:
+            self._record_failure_named(name, self.redact(error))
 
     async def run_once(self, c: Collector) -> RunOutcome:
         """Collect (with timeout) and ingest. Never raises except ``CancelledError``."""
@@ -241,12 +264,18 @@ class CollectorRunner:
 # ---------------------------------------------------------------------- jobs
 
 
-async def _prune_job(service: Service, days: int) -> None:
+async def _prune_job(service: Service, days: int, ble_days: int) -> None:
+    """Nightly prune; each prune runs even if the other fails."""
     try:
         n = service.prune_observations(days)
         log.info("pruned %d observations older than %d days", n, days)
     except Exception:  # noqa: BLE001
         log.exception("observation prune failed")
+    try:
+        n = service.prune_ble(ble_days)
+        log.info("pruned %d BLE sightings older than %d days", n, ble_days)
+    except Exception:  # noqa: BLE001
+        log.exception("BLE sighting prune failed")
 
 
 async def _presence_job(ingestor: Ingestor) -> None:
@@ -261,6 +290,7 @@ async def start_scheduler(
     runner: CollectorRunner,
     collectors: list[Collector],
     service: Service,
+    bluetooth: BluetoothRuntime | None = None,
 ) -> AsyncIOScheduler:
     """Start long-lived collectors, register all jobs and start the scheduler.
 
@@ -270,6 +300,8 @@ async def start_scheduler(
     for c in collectors:
         # A failure is recorded (with backoff); the job retries start() when next due.
         await runner.ensure_started(c)
+    if bluetooth is not None:
+        await bluetooth.start()
 
     sched = AsyncIOScheduler(timezone=tz)
     common: dict[str, Any] = {"max_instances": 1, "coalesce": True, "replace_existing": True}
@@ -300,7 +332,7 @@ async def start_scheduler(
     sched.add_job(
         _prune_job,
         CronTrigger(hour=PRUNE_HOUR, minute=PRUNE_MINUTE, timezone=tz),
-        args=[service, settings.observation_retention_days],
+        args=[service, settings.observation_retention_days, settings.bluetooth.retention_days],
         id="prune",
         name="prune",
         **common,
@@ -314,6 +346,14 @@ async def start_scheduler(
         next_run_time=now,
         **common,
     )
+    if bluetooth is not None:
+        sched.add_job(
+            bluetooth.flush,
+            IntervalTrigger(seconds=settings.bluetooth.flush_s, timezone=tz),
+            id="ble_flush",
+            name="ble_flush",
+            **common,
+        )
     sched.start()
     return sched
 
@@ -322,8 +362,11 @@ async def stop_scheduler(
     scheduler: AsyncIOScheduler,
     collectors: list[Collector],
     runner: CollectorRunner | None = None,
+    bluetooth: BluetoothRuntime | None = None,
 ) -> None:
     """Shut the scheduler down, then await ``stop()`` on long-lived collectors.
+
+    The Bluetooth runtime (if any) is stopped last: it flushes its open minutes.
 
     Pass the runner so stop errors are logged redacted and started-ness is reset;
     without it only the exception type is logged.
@@ -341,3 +384,5 @@ async def stop_scheduler(
                 await stop()
             except Exception as e:  # noqa: BLE001
                 log.warning("collector %s failed to stop: %s", c.name, type(e).__name__)
+    if bluetooth is not None:
+        await bluetooth.stop()
