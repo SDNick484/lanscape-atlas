@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from lanscape_atlas.bluetooth.aggregator import BleAggregator, MinuteRow
@@ -56,7 +57,11 @@ class BluetoothRuntime:
         self._scanners: dict[str, str | None] = {}
         self._write_lock = asyncio.Lock()
         self._client = client_factory(
-            settings.home_assistant, self._on_advert, self._on_scanners, clock
+            settings.home_assistant,
+            self._on_advert,
+            self._on_scanners,
+            clock,
+            snapshot_s=settings.bluetooth.snapshot_s,
         )
         self._loop: asyncio.AbstractEventLoop | None = None
         self._subscribed = False
@@ -90,8 +95,8 @@ class BluetoothRuntime:
 
     # -- internals --------------------------------------------------------------------------
 
-    def _on_advert(self, advert: Advert) -> None:
-        self.aggregator.add(advert)
+    def _on_advert(self, advert: Advert, at: datetime) -> None:
+        self.aggregator.add(advert, at)
 
     def _on_scanners(self, scanners: dict[str, str | None]) -> None:
         for source, name in scanners.items():

@@ -5,6 +5,14 @@ Connects to ``/api/websocket``, authenticates with a long-lived token and subscr
 (id 2). Parsed adverts and scanner names are handed to callbacks; this module never touches
 the database. The connection is retried forever with a configurable backoff.
 
+HA's advert stream is change-driven: an address is only pushed when its payload
+(manufacturer data, service data, service UUIDs, name) changes, so a steady beacon is pushed
+about once. Subscribing replays HA's history (the latest advert per address). So every
+``snapshot_s`` seconds the advert subscription is replaced (``unsubscribe_events`` then a new
+``bluetooth/subscribe_advertisements``, ids increasing per connection), and the replay that
+follows is the snapshot. Each advert is passed on with its effective time: HA's ``time``
+corrected for clock skew (``bluetooth.skew``), offset tracked per connection.
+
 The token is a secret: it is replaced by ``***`` in every stored error and log message, and
 the auth payload is never logged.
 """
@@ -15,7 +23,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -23,6 +31,7 @@ from typing import Any
 import aiohttp
 
 from lanscape_atlas.bluetooth.match import Advert, normalize_address, parse_advert
+from lanscape_atlas.bluetooth.skew import SkewCorrector
 from lanscape_atlas.clock import Clock
 from lanscape_atlas.config import HomeAssistantSettings
 
@@ -31,6 +40,7 @@ log = logging.getLogger(__name__)
 SCANNERS_ID = 1
 ADVERTS_ID = 2
 HEARTBEAT_S = 30
+MAX_MSG_SIZE = 16 * 1024 * 1024  # one snapshot (HA's whole advert history) is one frame
 _MAX_ERROR = 300
 
 
@@ -62,12 +72,14 @@ class HaBluetoothClient:
     def __init__(
         self,
         settings: HomeAssistantSettings,
-        on_advert: Callable[[Advert], None],
+        on_advert: Callable[[Advert, datetime], None],
         on_scanners: Callable[[dict[str, str | None]], None],
         clock: Clock,
         *,
         backoff_s: tuple[float, ...] = (1, 2, 5, 15, 60),
         handshake_timeout_s: float = 30,
+        snapshot_s: float = 60,
+        snapshot_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._settings = settings
         self._on_advert = on_advert
@@ -75,6 +87,12 @@ class HaBluetoothClient:
         self._clock = clock
         self._backoff_s = backoff_s or (1.0,)
         self._handshake_timeout_s = handshake_timeout_s
+        self._snapshot_s = snapshot_s
+        self._snapshot_sleep = snapshot_sleep
+        # Per-connection state, reset by ``_run_session``.
+        self._skew = SkewCorrector()
+        self._next_id = ADVERTS_ID + 1
+        self._advert_sub = ADVERTS_ID
         self._task: asyncio.Task[None] | None = None
         self._connected = False
         self._since: datetime | None = None
@@ -138,7 +156,10 @@ class HaBluetoothClient:
         verify = self._settings.verify_tls
         async with aiohttp.ClientSession() as session:
             ws = await session.ws_connect(
-                ws_url(self._settings.url), heartbeat=HEARTBEAT_S, ssl=verify
+                ws_url(self._settings.url),
+                heartbeat=HEARTBEAT_S,
+                ssl=verify,
+                max_msg_size=MAX_MSG_SIZE,
             )
             try:
                 await self._session(ws)
@@ -167,7 +188,8 @@ class HaBluetoothClient:
 
     async def _session(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         # The handshake (auth_required through both subscription results) is bounded; the
-        # deadline is lifted once subscribed, since the advert stream may be quiet.
+        # deadline is lifted once subscribed, since the advert stream may be quiet. Snapshot
+        # re-subscribes are not covered by it.
         try:
             async with asyncio.timeout(self._handshake_timeout_s) as handshake:
                 await self._run_session(ws, handshake)
@@ -194,32 +216,78 @@ class HaBluetoothClient:
                 break
             if kind == "auth_invalid":
                 raise _SessionError(f"auth_invalid: {reply.get('message', 'invalid token')}")
+        self._skew.reset()
+        self._next_id = ADVERTS_ID + 1
+        self._advert_sub = ADVERTS_ID
         await ws.send_json({"id": SCANNERS_ID, "type": "bluetooth/subscribe_scanner_details"})
         await ws.send_json({"id": ADVERTS_ID, "type": "bluetooth/subscribe_advertisements"})
         pending = {SCANNERS_ID, ADVERTS_ID}
-        while True:
-            frame = await self._recv(ws)
-            if not isinstance(frame, dict):
-                if frame is not None:
-                    log.debug("Home Assistant Bluetooth: skipping unexpected frame")
-                continue
-            kind = frame.get("type")
-            if kind == "result":
-                cid = frame.get("id")
-                if frame.get("success") is not True:
-                    err = frame.get("error")
-                    msg = err.get("message") if isinstance(err, dict) else None
-                    raise _SessionError(f"command {cid} failed: {msg or 'unknown error'}")
-                pending.discard(cid)
-                if not pending and not self._connected:
-                    self._failures = 0
-                    self._last_error = None
-                    self._set_connected(True)
-                    handshake.reschedule(None)
-            elif kind == "event":
-                self._handle_event(frame)
-            else:
-                log.debug("Home Assistant Bluetooth: skipping unknown message type")
+        snapshots: asyncio.Task[None] | None = None
+        try:
+            while True:
+                frame = await self._recv(ws)
+                if not isinstance(frame, dict):
+                    if frame is not None:
+                        log.debug("Home Assistant Bluetooth: skipping unexpected frame")
+                    continue
+                kind = frame.get("type")
+                if kind == "result":
+                    cid = frame.get("id")
+                    if frame.get("success") is not True:
+                        # Any failed command, the snapshot re-subscribes included: reconnect.
+                        err = frame.get("error")
+                        msg = err.get("message") if isinstance(err, dict) else None
+                        raise _SessionError(f"command {cid} failed: {msg or 'unknown error'}")
+                    if cid in pending:
+                        pending.discard(cid)
+                        if not pending:
+                            self._failures = 0
+                            self._last_error = None
+                            self._set_connected(True)
+                            handshake.reschedule(None)
+                            snapshots = asyncio.create_task(
+                                self._snapshots(ws), name="ha-bluetooth-snapshots"
+                            )
+                elif kind == "event":
+                    self._handle_event(frame)
+                else:
+                    log.debug("Home Assistant Bluetooth: skipping unknown message type")
+        finally:
+            if snapshots is not None:
+                snapshots.cancel()
+                # The session's own error (or cancellation) is what matters here.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await snapshots
+
+    def _take_id(self) -> int:
+        cid = self._next_id
+        self._next_id += 1
+        return cid
+
+    async def _snapshots(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Every ``snapshot_s``: replace the advert subscription; HA replays its history.
+
+        Results are checked by the reader (a failure ends the session). If a send fails the
+        socket is closed so the reader ends the session too.
+        """
+        try:
+            while True:
+                await self._snapshot_sleep(self._snapshot_s)
+                old = self._advert_sub
+                unsub_id, sub_id = self._take_id(), self._take_id()
+                self._advert_sub = sub_id  # from now on, events for ``old`` are ignored
+                await ws.send_json(
+                    {"id": unsub_id, "type": "unsubscribe_events", "subscription": old}
+                )
+                await ws.send_json({"id": sub_id, "type": "bluetooth/subscribe_advertisements"})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the reader reports the closed connection
+            log.warning(
+                "Home Assistant Bluetooth: snapshot failed: %s",
+                self._redact(f"{type(exc).__name__}: {exc}"),
+            )
+            await ws.close()
 
     def _handle_event(self, frame: dict[str, Any]) -> None:
         cid = frame.get("id")
@@ -228,12 +296,18 @@ class HaBluetoothClient:
             return
         add = event.get("add")
         if not isinstance(add, list):
-            return  # "remove" and anything else is ignored
-        if cid == ADVERTS_ID:
+            return  # "remove" and anything else is ignored (as are replaced subscriptions)
+        if cid == self._advert_sub:
+            # One frame is received at one instant: fold the whole batch into the offset
+            # first, so a snapshot's fresh adverts fix the offset for its replayed old ones.
+            receipt = self._clock()
+            adverts = []
             for raw in add:
                 advert = parse_advert(raw)
-                if advert is not None:
-                    self._safe(self._on_advert, advert)
+                if advert is not None and self._skew.observe(receipt, advert.time):
+                    adverts.append(advert)
+            for advert in adverts:
+                self._safe(self._on_advert, advert, self._skew.effective(receipt, advert.time))
         elif cid == SCANNERS_ID:
             scanners: dict[str, str | None] = {}
             for details in add:
@@ -248,9 +322,9 @@ class HaBluetoothClient:
             if scanners:
                 self._safe(self._on_scanners, scanners)
 
-    def _safe(self, fn: Callable[[Any], None], arg: Any) -> None:
+    def _safe(self, fn: Callable[..., None], *args: Any) -> None:
         try:
-            fn(arg)
+            fn(*args)
         except Exception as exc:  # noqa: BLE001 - a bad callback must not kill the connection
             log.warning(
                 "Home Assistant Bluetooth callback failed: %s",

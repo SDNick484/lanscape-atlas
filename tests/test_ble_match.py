@@ -30,6 +30,7 @@ def _advert(mfr: dict[int, bytes] | None = None) -> Advert:
         source="00:00:5e:00:53:aa",
         name=None,
         manufacturer_data=mfr or {},
+        time=1.0,
     )
 
 
@@ -181,6 +182,7 @@ def test_parse_advert_hex_keys() -> None:
         source="00:00:5e:00:53:aa",
         name="Tag",
         manufacturer_data={76: IBEACON},
+        time=1.0,
     )
 
 
@@ -208,7 +210,23 @@ def test_parse_advert_no_name_no_mfr() -> None:
         _raw(manufacturer_data={"apple": "00"}),
         _raw(manufacturer_data={"7.5": "00"}),
         _raw(source="bad"),
+        {k: v for k, v in _raw().items() if k != "time"},
+        _raw(time=None),
+        _raw(time="1.0"),
+        _raw(time=True),
+        _raw(time=float("nan")),
+        _raw(time=float("inf")),
+        _raw(time=float("-inf")),
+        _raw(time=0),
+        _raw(time=-5.0),
     ],
 )
 def test_parse_advert_rejects_malformed(raw: Any) -> None:
     assert parse_advert(raw) is None
+
+
+def test_parse_advert_keeps_ha_time() -> None:
+    adv = parse_advert(_raw(time=1767225600.25))
+    assert adv is not None and adv.time == 1767225600.25
+    adv = parse_advert(_raw(time=1767225600))  # an int is fine too
+    assert adv is not None and adv.time == 1767225600.0 and isinstance(adv.time, float)

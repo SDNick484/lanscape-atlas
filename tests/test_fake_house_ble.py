@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from conftest import FixedClock
 from helpers.plan import save_square_room
 from lanscape_atlas.bluetooth.aggregator import BleAggregator
 from lanscape_atlas.bluetooth.match import Identity, parse_advert
+from lanscape_atlas.bluetooth.skew import SkewCorrector
 from lanscape_atlas.service import Placement, Service
 from lanscape_atlas.service import ble_queries as bq
 
@@ -35,6 +36,8 @@ def test_fixture_shape() -> None:
     assert all(p is not None for p in parsed)
     assert {r["source"] for r in raw} == {SCANNER_A, SCANNER_B}
     assert all(r["address"].startswith("00:00:5e:00:53:") for r in raw)
+    times = [r["time"] for r in raw]  # HA's epoch seconds, in order
+    assert times == sorted(times) and times[0] == datetime(2026, 1, 1, tzinfo=UTC).timestamp()
 
 
 def test_fake_house_find(
@@ -60,10 +63,13 @@ def test_fake_house_find(
 
     agg = BleAggregator(clock, known_vendor=lambda a: a in KNOWN_VENDOR)
     agg.set_index({PHONE: phone, REMOTE: remote})
+    skew = SkewCorrector()  # what the client does per connection
     for raw in adverts():
         adv = parse_advert(raw)
         assert adv is not None
-        agg.add(adv)
+        receipt = clock()
+        assert skew.observe(receipt, adv.time)
+        agg.add(adv, skew.effective(receipt, adv.time))
         clock.advance(seconds=15)
     clock.advance(minutes=2)
     assert svc.record_ble_minutes(agg.drain_closed()) > 0

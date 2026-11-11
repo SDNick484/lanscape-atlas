@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ import pytest
 from lanscape_atlas.bluetooth.match import Advert, Identity
 from lanscape_atlas.bluetooth.runtime import BluetoothRuntime
 from lanscape_atlas.collectors.bluetooth_ha import ClientStatus
-from lanscape_atlas.config import HomeAssistantSettings, Settings
+from lanscape_atlas.config import BluetoothSettings, HomeAssistantSettings, Settings
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event
 from lanscape_atlas.scheduler import CollectorRunner
 from lanscape_atlas.web.app import create_app
@@ -30,6 +31,8 @@ class FakeClient:
     def __init__(self, settings: Any, on_advert: Any, on_scanners: Any, clock: Any, **kw: Any):
         self.on_advert = on_advert
         self.on_scanners = on_scanners
+        self.clock = clock
+        self.kwargs = kw
         self.connected = True
         self.last_error: str | None = None
         self.started = False
@@ -44,9 +47,13 @@ class FakeClient:
     def status(self) -> ClientStatus:
         return ClientStatus(self.connected, None, self.last_error)
 
+    def hear(self, advert: Advert, at: datetime | None = None) -> None:
+        """What the real client does: pass the advert with its effective time."""
+        self.on_advert(advert, at if at is not None else self.clock())
+
 
 def advert(rssi: int = -60, address: str = ADDR, source: str = SCANNER) -> Advert:
-    return Advert(address, rssi, source, None, {})
+    return Advert(address, rssi, source, None, {}, time=1.0)
 
 
 @pytest.fixture
@@ -54,6 +61,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path,
         home_assistant=HomeAssistantSettings(url="http://192.0.2.10:8123", token=TOKEN),
+        bluetooth=BluetoothSettings(snapshot_s=45),
     )
 
 
@@ -92,9 +100,29 @@ async def test_index_loaded_at_start(make_runtime, svc, make_device) -> None:
     await rt.start()
     try:
         assert client.started
-        client.on_advert(advert())
+        client.hear(advert())
         rows = rt.aggregator.drain_all()
         assert [(r.device_id, r.adverts) for r in rows] == [(dev, 1)]
+    finally:
+        await rt.stop()
+
+
+async def test_client_gets_snapshot_interval(make_runtime) -> None:
+    _rt, client = make_runtime()
+    assert client.kwargs == {"snapshot_s": 45}
+
+
+async def test_adverts_bucketed_by_effective_time(make_runtime, svc, make_device, clock) -> None:
+    dev = make_device()
+    svc.claim_ble("user", IDENT, device_id=dev)
+    rt, client = make_runtime()
+    await rt.start()
+    try:
+        clock.advance(minutes=5)
+        client.hear(advert(), clock() - timedelta(minutes=4))  # replayed from HA's history
+        client.hear(advert(), clock() - timedelta(minutes=4))  # replayed again: not counted
+        rows = rt.aggregator.drain_all()
+        assert [(r.minute, r.adverts) for r in rows] == [("2026-01-01T00:01Z", 1)]
     finally:
         await rt.stop()
 
@@ -104,11 +132,11 @@ async def test_index_reloaded_after_claim(make_runtime, svc, make_device) -> Non
     rt, client = make_runtime()
     await rt.start()
     try:
-        client.on_advert(advert())
+        client.hear(advert())
         assert rt.aggregator.drain_all() == []
         svc.claim_ble("user", IDENT, device_id=dev)
         await asyncio.sleep(0)  # the reload is scheduled onto the loop
-        client.on_advert(advert())
+        client.hear(advert())
         assert [r.device_id for r in rt.aggregator.drain_all()] == [dev]
     finally:
         await rt.stop()
@@ -136,7 +164,7 @@ async def test_reload_from_other_thread_runs_on_loop(make_runtime, svc, make_dev
                 break
             await asyncio.sleep(0.01)
         assert reloaded_on == [loop_thread]
-        client.on_advert(advert())
+        client.hear(advert())
         assert [r.device_id for r in rt.aggregator.drain_all()] == [dev]
     finally:
         await rt.stop()
@@ -161,8 +189,8 @@ async def test_flush_writes_closed_minutes(make_runtime, svc, make_device, db, c
     rt, client = make_runtime()
     await rt.start()
     try:
-        client.on_advert(advert(-70))
-        client.on_advert(advert(-50))
+        client.hear(advert(-70))
+        client.hear(advert(-50), clock() + timedelta(seconds=1))  # a later advert
         assert await rt.flush() == 0  # the current minute is still open
         clock.advance(minutes=1)
         assert await rt.flush() == 1
@@ -276,12 +304,12 @@ async def test_cancelled_flush_and_stop_lose_nothing_and_never_overlap(
             state["active"] -= 1
 
     monkeypatch.setattr(svc, "record_ble_minutes", slow)
-    client.on_advert(advert(-70))
+    client.hear(advert(-70))
     clock.advance(minutes=1)
     flush_task = asyncio.create_task(rt.flush())
     while not entered.is_set():
         await asyncio.sleep(0.005)
-    client.on_advert(advert(-60))  # lands in the new, still-open minute
+    client.hear(advert(-60))  # lands in the new, still-open minute
     # What scheduler shutdown does: cancel the running job, then stop the runtime.
     flush_task.cancel()
     stop_task = asyncio.create_task(rt.stop())
@@ -312,7 +340,7 @@ async def test_cancelled_flush_with_failing_write_requeues(
 
     real = svc.record_ble_minutes
     monkeypatch.setattr(svc, "record_ble_minutes", failing)
-    client.on_advert(advert(-70))
+    client.hear(advert(-70))
     clock.advance(minutes=1)
     flush_task = asyncio.create_task(rt.flush())
     while not entered.is_set():
@@ -334,8 +362,8 @@ async def test_failed_write_requeues_and_next_flush_writes_all(
     rt, client = make_runtime()
     await rt.start()
     try:
-        client.on_advert(advert(-70))
-        client.on_advert(advert(-50))
+        client.hear(advert(-70))
+        client.hear(advert(-50), clock() + timedelta(seconds=1))  # a later advert
         clock.advance(minutes=1)
         real = svc.record_ble_minutes
         calls = {"n": 0}
@@ -366,7 +394,7 @@ async def test_stop_flushes_open_minutes(make_runtime, svc, make_device, db) -> 
     svc.claim_ble("user", IDENT, device_id=dev)
     rt, client = make_runtime()
     await rt.start()
-    client.on_advert(advert())
+    client.hear(advert())
     await rt.stop()
     assert client.stopped
     assert [r["device_id"] for r in sightings(db)] == [dev]

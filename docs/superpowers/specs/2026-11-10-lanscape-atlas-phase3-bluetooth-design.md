@@ -29,8 +29,8 @@ The design says plainly what is findable. It does not promise every Bluetooth de
 
 | Kind | How it is matched | What "last heard" means |
 |---|---|---|
-| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, typically within 1–2 min. Lags if Android battery optimisation throttles the app. |
-| Beaconing remote (advertises every few seconds) | Static or public address | Current. |
+| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (§4.2, default 60 s). Lags if Android battery optimisation throttles the app. |
+| Beaconing remote (advertises every few seconds) | Static or public address | Current, to about one snapshot interval. |
 | Press-to-advertise remote | Static or public address | When it was last pressed. |
 | Headphones with a stable address | Static or public address | Last time they were idle and nearby. Many go silent while connected. |
 | Anything with a rotating address | Not matched | Not findable. Never shown. |
@@ -62,9 +62,42 @@ sends two subscriptions:
 - `bluetooth/subscribe_advertisements` (no parameters). Each event is either
   `{"add": [adv, ...]}` or `{"remove": [{"address"}]}`. An `adv` carries `name`,
   `address`, `rssi`, `manufacturer_data` (company id → hex), `service_data`,
-  `service_uuids`, `source` (scanner), `connectable`, `time` (epoch seconds),
-  `tx_power`, `raw`. HA does not throttle it: expect tens of events per second.
+  `service_uuids`, `source` (scanner), `connectable`, `time` (epoch seconds, HA's clock),
+  `tx_power`, `raw`.
 - `bluetooth/subscribe_scanner_details`, to learn each scanner's `source` and name.
+
+**The advert stream is change-driven, not a feed of every advert.** In habluetooth 7.1.2
+(pinned by HA 2026.11.1) every advert updates HA's history (the latest advert per
+address), but the subscription callbacks only run when `manufacturer_data`,
+`service_data`, `service_uuids` or `name` differ from that address's previous advert. A
+steady beacon, remote or phone iBeacon therefore produces about one event, ever.
+Registering the subscription replays the current history as one `add` batch right after
+the result. atlas builds on that:
+
+- **Snapshot re-subscribe.** After the handshake, every `snapshot_s` seconds (default 60,
+  §8) atlas sends `unsubscribe_events` for the current advert subscription and then a new
+  `bluetooth/subscribe_advertisements`; the replay that follows is the snapshot. Command
+  ids keep increasing per connection. Events for a replaced subscription id are ignored. A
+  failed unsubscribe or subscribe result is an error and reconnects with the usual backoff.
+  The scanner-details subscription is not repeated. One snapshot is one WebSocket frame,
+  so the client accepts frames up to 16 MiB. The handshake timeout covers only the initial
+  handshake.
+- **HA's time, corrected for clock skew.** Each advert keeps HA's `time` (an advert with a
+  missing or non-finite time is skipped). Per connection, atlas tracks
+  `offset = min(receipt − time)` over the adverts received on it (fresh at every connect;
+  one frame is received at one instant, so a whole batch is folded in before any of it is
+  used). An advert's **effective time** is `min(receipt, time + offset)`. So a replayed
+  advert keeps its true age instead of looking "heard now", HA clock skew cancels out, and
+  nothing is ever placed after its receipt. An advert stamped more than 24 h ahead of
+  receipt is garbage, not skew, and is dropped so it cannot set the offset.
+- **Per-identity dedupe.** The aggregator remembers the effective time last counted per
+  identity and ignores an advert that is not strictly newer, so each snapshot counts a
+  steady device at most once and a replay of an unchanged advert is never double-counted.
+  Adverts with an effective time older than 24 h are ignored.
+
+"Last heard" for a steady device is therefore accurate to about one snapshot interval,
+and a sighting's advert count is the number of snapshots (plus payload changes) that saw
+it in that minute, not the number of adverts on the air.
 
 HA picks one **owning** scanner per address, by smoothed RSSI with a switch threshold
 and a reclaim deadband. Adverts heard by other scanners do not appear in the stream.
@@ -74,22 +107,28 @@ accepted (§2).
 
 `remove` events are ignored for storage. "Last heard" comes from the last advert.
 
-Minutes are bucketed by atlas's clock at receipt, not HA's `time` field, so HA clock skew
-cannot misfile a sighting.
+Minutes are bucketed by an advert's effective time (HA's `time` corrected for skew, above),
+not by receipt: most adverts arrive in a snapshot replay, up to a snapshot interval (or,
+after a reconnect, much longer) after they were heard. Late rows for a minute that was
+already flushed are fine: `record_ble_minutes` upserts and merges them.
 
 ### 4.3 Components
 
 - **`collectors/bluetooth_ha.py` — `HaBluetoothClient`.** Long-lived, like the mDNS
   collector (`start()`/`stop()`). Owns the WebSocket, reconnects with the runner's
-  existing exponential backoff, and parses events into `Advert` values. No DB access.
+  existing exponential backoff, re-subscribes the advert stream every `snapshot_s`
+  (§4.2), parses events into `Advert` values and hands each on with its effective time
+  (`bluetooth/skew.py`). No DB access.
 - **`bluetooth/match.py`.** Pure functions:
   - `ibeacon(manufacturer_data) -> (uuid, major, minor) | None`: company id 76, data
     prefix `02 15`, then 16 + 2 + 2 bytes.
   - `identity_of(advert) -> Identity | None`: the iBeacon if present, else the address.
   - `is_stable_address(address, span, oui)` (§5.3).
 - **`bluetooth/aggregator.py` — `BleAggregator`.** In memory. Keyed by
-  `(device_id, scanner_id, minute)`. Keeps max RSSI, advert count, last time. Also
-  holds the candidate list (§5.3). Bounded (§8).
+  `(device_id, scanner_id, minute)`, the minute of the effective time. Keeps max RSSI,
+  advert count, last time, and per identity the last effective time counted (replay
+  dedupe, §4.2). Also holds the candidate list (§5.3), whose first/last heard and gaps
+  use effective times. Bounded (§8).
 - **Flush job (`ble_flush`, every 60 s).** Drains closed minutes from the aggregator
   and calls `Service.record_ble_minutes(rows)` under `Service.lock`, in one
   transaction. Records health in `collector_status` under the name `bluetooth`.
@@ -244,16 +283,19 @@ v2 migration are not edited.
 
   [bluetooth]
   retention_days = 14
+  snapshot_s = 60     # advert re-subscribe interval (§4.2)
   ```
 
 - Storage: at most one row per claimed device per scanner per minute heard. Worst case,
   20 claimed devices heard nonstop for 14 days is about 400k rows, roughly 30–40 MB with
   the index. The nightly prune job also deletes `ble_sighting` rows older than
   `retention_days`.
-- Memory bounds: the aggregator holds at most two open minutes. The candidate list is
+- Memory bounds: the aggregator holds the open minute plus any late minutes a replay
+  added since the last flush (each drained by the next flush). The candidate list is
   capped at 500 entries; the pre-candidate tracker (addresses not yet known to be
   stable) at 5,000, evicting least recently heard.
-- Load: JSON parsing of tens of events per second on the event loop. The flush is one
+- Load: one snapshot frame per `snapshot_s` (HA's whole advert history, typically a few
+  hundred adverts) plus payload-change events, parsed on the event loop. The flush is one
   short transaction per minute under `Service.lock`.
 
 ## 9. Privacy
@@ -280,8 +322,11 @@ v2 migration are not edited.
 
 - **Parsing:** iBeacon decode (valid, short, wrong prefix, other company ids); identity
   choice; stable-address rules at their boundaries.
-- **Client:** a fake HA WebSocket server (aiohttp test server) covering auth ok, auth
-  failure, both subscriptions, reconnect after a drop, and token redaction in errors.
+- **Client:** a fake HA WebSocket server (aiohttp test server) modeled on the real stream
+  (per-address history, an event only on a payload change, a history replay after every
+  subscribe), covering auth ok, auth failure, both subscriptions, snapshot re-subscribes
+  and their failures, skew correction, reconnect after a drop, and token redaction in
+  errors.
 - **Aggregator:** max RSSI, counts, minute boundaries, candidate expiry and caps.
 - **Service:** `record_ble_minutes` upserts; room snapshot; prune; claim/unclaim/link
   with undo and redo, using the existing undo test pattern.
@@ -316,4 +361,7 @@ Phase 2 §7's first point stands: a proxy is a fixed device with a room.
   numbers finally.
 - The stable-address heuristic can misclassify a public address whose first byte looks
   random. Check against the owner's real capture (anonymized) during the build.
+- Before release, validate the advert rate, the badge thresholds and the stable-address
+  rule against an anonymized real capture of the snapshot stream (§4.2): with snapshots,
+  counts and gaps reflect snapshots and payload changes, not adverts on the air.
 - Decide whether the 24-hour strip and the badge are computed in SQL or in Python.

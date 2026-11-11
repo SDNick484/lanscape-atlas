@@ -28,8 +28,11 @@ server), FastAPI + Jinja2 + HTMX, mcp 2.x, APScheduler 3.x. No new dependencies.
 - Collectors never touch the DB. Bluetooth never writes `device.place_id`, `pos_x`, `pos_y`,
   `roaming` or `online`.
 - The HA token is a secret: `repr=False`, added to `CollectorRunner` secrets, never logged.
-- Minutes are bucketed by atlas's clock at receipt (`YYYY-MM-DDTHH:MMZ`, UTC), not by HA's
-  `time` field, so HA clock skew cannot misfile a sighting.
+- Minutes are bucketed (`YYYY-MM-DDTHH:MMZ`, UTC) by an advert's effective time: HA's
+  `time` corrected for clock skew per connection (`min(receipt, time + offset)`,
+  `offset = min(receipt − time)`), because HA's stream is change-driven and most adverts
+  arrive in a periodic snapshot replay (spec §4.2, amended in the final fix wave). Replays
+  are deduplicated per identity; adverts older than 24 h are ignored.
 - Write actors stay `user` / `claude` / `system`. Error mapping stays KeyError→404,
   ValueError→422, UndoConflict→409.
 

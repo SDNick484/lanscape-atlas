@@ -2,8 +2,13 @@
 
 Claimed adverts (identity present in the index set via ``set_index``) are folded into
 one row per (device, scanner, minute); a flush job drains closed minutes into the DB.
-Unclaimed adverts feed a bounded candidate list for the Find page. Minutes are
-bucketed by atlas's own clock at receipt (UTC), never by Home Assistant's timestamp.
+Unclaimed adverts feed a bounded candidate list for the Find page.
+
+Every advert comes with its *effective time*: Home Assistant's ``time`` mapped onto atlas's
+clock (``bluetooth.skew``). Minutes are bucketed by it (UTC), not by receipt, because HA's
+stream is change-driven and most adverts arrive as a periodic snapshot replay of HA's
+history. Per identity only an advert strictly newer than the last one counted is used, so a
+replayed advert is never counted twice; adverts older than 24 h are ignored.
 """
 
 from __future__ import annotations
@@ -101,6 +106,8 @@ class BleAggregator:
         self._candidate_cap = candidate_cap
         self._tracker_cap = tracker_cap
         self._index: Mapping[Identity, int] = {}
+        # Effective time of the last advert counted per claimed identity (replay dedupe).
+        self._last_counted: dict[Identity, datetime] = {}
         self._buckets: dict[tuple[int, str, str], _Bucket] = {}
         # Both maps are ordered least- to most-recently heard.
         self._tracker: OrderedDict[Identity, _Seen] = OrderedDict()
@@ -108,33 +115,46 @@ class BleAggregator:
 
     def set_index(self, index: Mapping[Identity, int]) -> None:
         self._index = dict(index)
+        self._last_counted = {i: t for i, t in self._last_counted.items() if i in self._index}
         for ident in self._index:
             self._tracker.pop(ident, None)
             self._candidates.pop(ident, None)
 
-    def add(self, adv: Advert) -> None:
+    def add(self, adv: Advert, at: datetime) -> None:
+        """Count one advert heard at effective time ``at`` (see the module docstring)."""
         now = self._clock()
         self._expire(now)
+        if at < now - CANDIDATE_TTL:
+            return
         ident = identity_of(adv)
         device_id = self._index.get(ident)
         if device_id is not None:
-            self._add_claimed(device_id, adv, now)
+            last = self._last_counted.get(ident)
+            if last is not None and at <= last:
+                return  # a replay of an advert already counted
+            self._last_counted[ident] = at
+            self._add_claimed(device_id, adv, at)
             return
         seen = self._candidates.get(ident)
         if seen is not None:
-            seen.hear(adv, now)
-            self._candidates.move_to_end(ident)
+            if at > seen.last_heard:
+                seen.hear(adv, at)
+                self._candidates.move_to_end(ident)
             return
         seen = self._tracker.get(ident)
         if seen is None:
-            seen = _Seen(now, now, adv.rssi, adv.source, adv.name)
-            seen.stamps.append(now)
+            seen = _Seen(at, at, adv.rssi, adv.source, adv.name)
+            seen.stamps.append(at)
+        elif at > seen.last_heard:
+            seen.hear(adv, at)
         else:
-            seen.hear(adv, now)
+            return
         if self._qualifies(ident, seen):
             self._tracker.pop(ident, None)
             self._candidates[ident] = seen
             self._evict(self._candidates, self._candidate_cap)
+        elif seen.last_heard < now - TRACKER_TTL:
+            self._tracker.pop(ident, None)  # a stale replay: already expired
         else:
             self._tracker[ident] = seen
             self._tracker.move_to_end(ident)
@@ -164,7 +184,10 @@ class BleAggregator:
                 b.last_at = max(b.last_at, r.last_at)
 
     def candidates(self) -> list[Candidate]:
-        self._expire(self._clock())
+        now = self._clock()
+        self._expire(now)
+        # Replays can arrive out of order, so expiry by map order is only a fast path.
+        cutoff = now - CANDIDATE_TTL
         return [
             Candidate(
                 identity=ident,
@@ -177,17 +200,18 @@ class BleAggregator:
                 typical_gap_s=s.gap(),
             )
             for ident, s in reversed(self._candidates.items())
+            if s.last_heard >= cutoff
         ]
 
-    def _add_claimed(self, device_id: int, adv: Advert, now: datetime) -> None:
-        key = (device_id, adv.source, now.strftime(BLE_MINUTE_FMT))
+    def _add_claimed(self, device_id: int, adv: Advert, at: datetime) -> None:
+        key = (device_id, adv.source, at.strftime(BLE_MINUTE_FMT))
         bucket = self._buckets.get(key)
         if bucket is None:
-            self._buckets[key] = _Bucket(adv.rssi, 1, now)
+            self._buckets[key] = _Bucket(adv.rssi, 1, at)
         else:
             bucket.max_rssi = max(bucket.max_rssi, adv.rssi)
             bucket.adverts += 1
-            bucket.last_at = now
+            bucket.last_at = max(bucket.last_at, at)
 
     def _drain(self, take: Callable[[str], bool]) -> list[MinuteRow]:
         keys = sorted((k for k in self._buckets if take(k[2])), key=lambda k: (k[2], k[0], k[1]))

@@ -5,104 +5,50 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from conftest import FixedClock
+from helpers.fake_ha import FakeHA, ManualTicker
 from lanscape_atlas.bluetooth.match import Advert
 from lanscape_atlas.collectors.bluetooth_ha import HaBluetoothClient
 from lanscape_atlas.config import HomeAssistantSettings
 
 TOKEN = "s3cr3t-token-value"
 SRC = "00:00:5e:00:53:01"
+SRC_B = "00:00:5e:00:53:02"
 DEV1 = "00:00:5e:00:53:10"
 DEV2 = "00:00:5e:00:53:11"
+T0 = datetime(2026, 1, 1, tzinfo=UTC).timestamp()  # the clock fixture's start
 
 
-def adv(address: str, rssi: int = -60, source: str = SRC) -> dict[str, Any]:
+def adv(
+    address: str,
+    rssi: int = -60,
+    source: str = SRC,
+    *,
+    time: float = T0,
+    name: str = "x",
+) -> dict[str, Any]:
     return {
         "address": address,
         "rssi": rssi,
         "source": source,
-        "name": "x",
+        "name": name,
         "manufacturer_data": {},
+        "service_data": {},
+        "service_uuids": [],
+        "time": time,
     }
-
-
-class FakeHA:
-    """Scriptable fake Home Assistant WebSocket endpoint."""
-
-    def __init__(self) -> None:
-        self.token = TOKEN
-        self.connections = 0
-        self.received: list[list[dict[str, Any]]] = []  # per connection, after auth
-        self.auth_messages: list[dict[str, Any]] = []
-        self.fail_ids: dict[int, str] = {}  # id -> error message
-        # per connection index: raw text frames to send after both subscriptions
-        self.frames: dict[int, list[Any]] = {}
-        self.drop_after_frames: set[int] = set()
-        self.subscribed = asyncio.Event()
-        self.silent = False  # accept the socket but never send auth_required
-
-    async def handler(self, request: web.Request) -> web.WebSocketResponse:
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        idx = self.connections
-        self.connections += 1
-        self.received.append([])
-        if self.silent:
-            async for _ in ws:
-                pass
-            return ws
-        await ws.send_json({"type": "auth_required", "ha_version": "2026.1.0"})
-        auth = await ws.receive_json()
-        self.auth_messages.append(auth)
-        if auth.get("access_token") != self.token:
-            await ws.send_json({"type": "auth_invalid", "message": "Invalid access token"})
-            await ws.close()
-            return ws
-        await ws.send_json({"type": "auth_ok", "ha_version": "2026.1.0"})
-        seen = 0
-        async for msg in ws:
-            if msg.type != aiohttp.WSMsgType.TEXT:
-                break
-            cmd = msg.json()
-            self.received[idx].append(cmd)
-            cid = cmd["id"]
-            if cid in self.fail_ids:
-                await ws.send_json(
-                    {
-                        "id": cid,
-                        "type": "result",
-                        "success": False,
-                        "result": None,
-                        "error": {"code": "boom", "message": self.fail_ids[cid]},
-                    }
-                )
-                continue
-            await ws.send_json({"id": cid, "type": "result", "success": True, "result": None})
-            seen += 1
-            if seen == 2:
-                self.subscribed.set()
-                for frame in self.frames.get(idx, []):
-                    if isinstance(frame, str):
-                        await ws.send_str(frame)
-                    else:
-                        await ws.send_json(frame)
-                if idx in self.drop_after_frames:
-                    await asyncio.sleep(0.1)  # leave a window to observe connected=True
-                    await ws.close()
-                    return ws
-        return ws
 
 
 @pytest.fixture
 async def ha() -> AsyncIterator[tuple[FakeHA, TestServer]]:
-    fake = FakeHA()
+    fake = FakeHA(TOKEN)
     app = web.Application()
     app.router.add_get("/api/websocket", fake.handler)
     server = TestServer(app)
@@ -116,10 +62,12 @@ async def ha() -> AsyncIterator[tuple[FakeHA, TestServer]]:
 class Sink:
     def __init__(self) -> None:
         self.adverts: list[Advert] = []
+        self.at: list[datetime] = []
         self.scanners: list[dict[str, str | None]] = []
 
-    def on_advert(self, a: Advert) -> None:
+    def on_advert(self, a: Advert, at: datetime) -> None:
         self.adverts.append(a)
+        self.at.append(at)
 
     def on_scanners(self, s: dict[str, str | None]) -> None:
         self.scanners.append(s)
@@ -170,14 +118,15 @@ async def test_auth_and_subscriptions(ha: tuple[FakeHA, TestServer], clock: Fixe
 
 
 async def test_adverts_delivered(ha: tuple[FakeHA, TestServer], clock: FixedClock) -> None:
+    """The subscribe replays HA's history; afterwards only payload changes are pushed."""
     fake, server = ha
-    fake.frames[0] = [
-        {"id": 2, "type": "event", "event": {"add": [adv(DEV1, -50), adv(DEV2, -70)]}}
-    ]
+    await fake.hear(adv(DEV1, -50))
     sink = Sink()
     client = make_client(server, sink, clock)
 
     async def body() -> None:
+        await wait_for(lambda: len(sink.adverts) == 1)
+        assert await fake.hear(adv(DEV2, -70))  # first advert of a new address: pushed
         await wait_for(lambda: len(sink.adverts) == 2)
 
     await run(client, body)
@@ -185,6 +134,7 @@ async def test_adverts_delivered(ha: tuple[FakeHA, TestServer], clock: FixedCloc
         (DEV1, -50, SRC),
         (DEV2, -70, SRC),
     ]
+    assert (fake.replays, fake.live_events) == (1, 1)
 
 
 async def test_advert_remove_ignored(ha: tuple[FakeHA, TestServer], clock: FixedClock) -> None:
@@ -264,7 +214,7 @@ async def test_callback_exception_does_not_kill_connection(
     sink = Sink()
     seen: list[str] = []
 
-    def flaky(a: Advert) -> None:
+    def flaky(a: Advert, _at: datetime) -> None:
         seen.append(a.address)
         if a.address == DEV1:
             raise RuntimeError(f"oops {TOKEN}")
@@ -437,3 +387,207 @@ async def test_since_is_start_time_before_any_connection(clock: FixedClock) -> N
         assert not status.connected and status.since == started
     finally:
         await client.stop()
+
+
+# -- snapshot re-subscribe (HA's stream is change-driven) -----------------------------------
+
+
+def cmd_log(fake: FakeHA, idx: int = 0) -> list[tuple[Any, ...]]:
+    return [
+        (c["id"], c["type"], c["subscription"]) if "subscription" in c else (c["id"], c["type"])
+        for c in fake.received[idx]
+    ]
+
+
+async def test_resubscribes_each_snapshot_with_increasing_ids(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    ticker = ManualTicker()
+    client = make_client(server, Sink(), clock, snapshot_sleep=ticker.wait)
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected and ticker.waiting == 1)
+        for n in range(3):
+            ticker.tick()
+            await wait_for(lambda n=n: len(fake.received[0]) == 4 + 2 * n)
+        await wait_for(lambda: fake.subscriptions(0) == {8})
+
+    await run(client, body)
+    assert cmd_log(fake) == [
+        (1, "bluetooth/subscribe_scanner_details"),
+        (2, "bluetooth/subscribe_advertisements"),
+        (3, "unsubscribe_events", 2),
+        (4, "bluetooth/subscribe_advertisements"),
+        (5, "unsubscribe_events", 4),
+        (6, "bluetooth/subscribe_advertisements"),
+        (7, "unsubscribe_events", 6),
+        (8, "bluetooth/subscribe_advertisements"),
+    ]
+    assert fake.connections == 1
+
+
+async def test_snapshot_interval_uses_real_timer(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    client = make_client(server, Sink(), clock, snapshot_s=0.02)
+
+    async def body() -> None:
+        await wait_for(lambda: bool(fake.received) and len(fake.received[0]) >= 2 + 2 * 3)
+
+    await run(client, body)
+    assert fake.connections == 1
+
+
+async def test_unchanged_advert_arrives_only_with_the_next_snapshot(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    ticker = ManualTicker()
+    sink = Sink()
+    client = make_client(server, sink, clock, snapshot_sleep=ticker.wait)
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected and ticker.waiting == 1)
+        assert await fake.hear(adv(DEV1, time=T0 - 3))  # new address: pushed live
+        await wait_for(lambda: len(sink.adverts) == 1)
+        for k in range(5):  # a steady beacon re-broadcasting the same payload
+            assert not await fake.hear(adv(DEV1, -50 - k, time=T0 - 2 + k * 0.1))
+        await asyncio.sleep(0.05)
+        assert len(sink.adverts) == 1
+        ticker.tick()
+        await wait_for(lambda: len(sink.adverts) == 2)
+
+    await run(client, body)
+    latest = sink.adverts[-1]
+    assert (latest.rssi, latest.time) == (-54, T0 - 2 + 0.4)
+
+
+async def test_snapshot_replays_history_with_ha_times(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    await fake.hear(adv(DEV1, time=T0 - 1))  # fresh: fixes the offset
+    await fake.hear(adv(DEV2, time=T0 - 7 * 60))  # heard 7 minutes ago
+    sink = Sink()
+    client = make_client(server, sink, clock)
+
+    async def body() -> None:
+        await wait_for(lambda: len(sink.adverts) == 2)
+
+    await run(client, body)
+    at = dict(zip((a.address for a in sink.adverts), sink.at, strict=True))
+    assert at[DEV1] == clock.now
+    assert at[DEV2] == clock.now - timedelta(minutes=7) + timedelta(seconds=1)
+
+
+@pytest.mark.parametrize("ha_ahead_s", [30.0, -30.0, 0.0])
+async def test_ha_clock_skew_corrected(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock, ha_ahead_s: float
+) -> None:
+    fake, server = ha
+    ticker = ManualTicker()
+    sink = Sink()
+    await fake.hear(adv(DEV1, time=T0 + ha_ahead_s))  # heard just now, by HA's clock
+    client = make_client(server, sink, clock, snapshot_sleep=ticker.wait)
+
+    async def body() -> None:
+        await wait_for(lambda: len(sink.adverts) == 1 and ticker.waiting == 1)
+        clock.advance(minutes=2)
+        # Heard 90 s ago by atlas's clock (HA stamps it with its own skewed clock).
+        await fake.hear(adv(DEV1, -40, time=clock.now.timestamp() - 90 + ha_ahead_s))
+        ticker.tick()
+        await wait_for(lambda: len(sink.adverts) == 2)
+
+    await run(client, body)
+    assert sink.at == [clock.now - timedelta(minutes=2), clock.now - timedelta(seconds=90)]
+
+
+async def test_far_future_time_is_dropped(ha: tuple[FakeHA, TestServer], clock: FixedClock) -> None:
+    fake, server = ha
+    await fake.hear(adv(DEV1, time=T0 + 3 * 86400))  # garbage, not skew
+    await fake.hear(adv(DEV2, time=T0 - 5))
+    sink = Sink()
+    client = make_client(server, sink, clock)
+
+    async def body() -> None:
+        await wait_for(lambda: len(sink.adverts) == 1)
+        await asyncio.sleep(0.05)
+
+    await run(client, body)
+    assert [a.address for a in sink.adverts] == [DEV2]
+    assert sink.at == [clock.now]
+
+
+async def test_events_for_a_replaced_subscription_are_ignored(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    fake, server = ha
+    ticker = ManualTicker()
+    sink = Sink()
+    client = make_client(server, sink, clock, snapshot_sleep=ticker.wait)
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected and ticker.waiting == 1)
+        ticker.tick()
+        await wait_for(lambda: fake.subscriptions(0) == {4} and ticker.waiting == 1)
+        await fake.send(0, {"id": 2, "type": "event", "event": {"add": [adv(DEV1)]}})
+        await fake.send(0, {"id": 4, "type": "event", "event": {"add": [adv(DEV2)]}})
+        await wait_for(lambda: len(sink.adverts) == 1)
+        await asyncio.sleep(0.05)
+
+    await run(client, body)
+    assert [a.address for a in sink.adverts] == [DEV2]
+
+
+@pytest.mark.parametrize(
+    "fail",
+    [("unsubscribe_events", 3), ("bluetooth/subscribe_advertisements", 4)],
+    ids=["unsubscribe", "subscribe"],
+)
+async def test_failed_resubscribe_reconnects(
+    ha: tuple[FakeHA, TestServer],
+    clock: FixedClock,
+    fail: tuple[str, int],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake, server = ha
+    kind, cid = fail
+    caplog.set_level(logging.WARNING)
+    ticker = ManualTicker()
+    client = make_client(server, Sink(), clock, snapshot_sleep=ticker.wait)
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected and ticker.waiting == 1)
+        fake.fail_next[kind] = f"refused {TOKEN}"
+        ticker.tick()
+        await wait_for(lambda: fake.connections == 2)
+        await wait_for(lambda: client.status().connected)
+
+    await run(client, body)
+    assert f"command {cid} failed: refused ***" in caplog.text
+    assert TOKEN not in caplog.text
+    # The new connection starts its ids again and re-subscribes from scratch.
+    assert cmd_log(fake, 1)[:2] == [
+        (1, "bluetooth/subscribe_scanner_details"),
+        (2, "bluetooth/subscribe_advertisements"),
+    ]
+
+
+async def test_snapshot_frame_above_default_ws_limit(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock
+) -> None:
+    """One snapshot is one frame: aiohttp's 4 MiB default must not cut it off."""
+    fake, server = ha
+    big = "n" * (5 * 1024 * 1024)
+    await fake.hear(adv(DEV1, name=big))
+    sink = Sink()
+    client = make_client(server, sink, clock)
+
+    async def body() -> None:
+        await wait_for(lambda: len(sink.adverts) == 1)
+
+    await run(client, body)
+    assert fake.connections == 1
+    assert sink.adverts[0].name == big

@@ -153,6 +153,7 @@ def test_ha_url_without_token_is_error(tmp_path: Path) -> None:
 def test_bluetooth_defaults(tmp_path: Path) -> None:
     s = load_settings(tmp_path / "missing.toml", env={})
     assert (s.bluetooth.retention_days, s.bluetooth.flush_s) == (14, 60)
+    assert s.bluetooth.snapshot_s == 60
 
 
 def test_bluetooth_retention_must_be_positive(tmp_path: Path) -> None:
@@ -161,11 +162,22 @@ def test_bluetooth_retention_must_be_positive(tmp_path: Path) -> None:
         "[bluetooth]\nretention_days = -3\n",
         "[bluetooth]\nflush_s = 0\n",
         '[bluetooth]\nretention_days = "7"\n',
+        "[bluetooth]\nsnapshot_s = 0\n",
+        "[bluetooth]\nsnapshot_s = -60\n",
+        "[bluetooth]\nsnapshot_s = 1.5\n",
     ):
         with pytest.raises(ValueError, match="bluetooth"):
             load_settings(_ha(tmp_path, body), env={})
-    s = load_settings(_ha(tmp_path, "[bluetooth]\nretention_days = 7\nflush_s = 30\n"), env={})
+    s = load_settings(
+        _ha(tmp_path, "[bluetooth]\nretention_days = 7\nflush_s = 30\nsnapshot_s = 45\n"), env={}
+    )
     assert (s.bluetooth.retention_days, s.bluetooth.flush_s) == (7, 30)
+    assert s.bluetooth.snapshot_s == 45
+
+
+def test_example_config_documents_snapshot_s() -> None:
+    text = (Path(__file__).parent.parent / "config.example.toml").read_text()
+    assert "snapshot_s" in text
 
 
 def test_settings_repr_hides_ha_token(tmp_path: Path) -> None:

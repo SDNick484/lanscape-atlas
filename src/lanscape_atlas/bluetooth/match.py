@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from collections.abc import Mapping
@@ -27,6 +28,7 @@ class Advert:
     source: str
     name: str | None
     manufacturer_data: dict[int, bytes]
+    time: float  # Home Assistant's epoch seconds (HA's clock) for this advert
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,11 @@ def parse_advert(raw: Mapping[str, Any]) -> Advert | None:
     mfr = _parse_manufacturer_data(raw.get("manufacturer_data"))
     if mfr is None:
         return None
+    time = raw.get("time")
+    if isinstance(time, bool) or not isinstance(time, (int, float)):
+        return None
+    if not math.isfinite(time) or time <= 0:
+        return None
     name = raw.get("name")
     return Advert(
         address=address,
@@ -115,6 +122,7 @@ def parse_advert(raw: Mapping[str, Any]) -> Advert | None:
         source=source,
         name=name if isinstance(name, str) and name else None,
         manufacturer_data=mfr,
+        time=float(time),
     )
 
 

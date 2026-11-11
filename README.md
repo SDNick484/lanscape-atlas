@@ -86,6 +86,13 @@ Sightings come from Home Assistant's Bluetooth integration, which already merges
 adverts of every ESP32 Bluetooth proxy and local adapter. lanscape-atlas subscribes to
 that stream over HA's WebSocket API; it does not talk to the proxies itself.
 
+Home Assistant only pushes an advert when its content changes (a steady beacon is pushed
+about once), but it replays its latest advert per device whenever a subscription starts.
+So lanscape-atlas re-subscribes every `snapshot_s` seconds (default 60) and reads that
+replay as a snapshot. Each advert is placed at the time Home Assistant heard it, corrected
+for any clock difference between the two hosts, and a replayed advert is never counted
+twice. "Last heard" is therefore accurate to about one snapshot interval.
+
 ### Prerequisites
 
 - Home Assistant with the **Bluetooth** integration and at least one proxy (ESPHome
@@ -109,7 +116,11 @@ verify_tls = true
 [bluetooth]
 retention_days = 14   # nightly prune of per-minute sightings
 flush_s = 60          # how often closed minutes are written to the database
+snapshot_s = 60       # how often Home Assistant's latest adverts are re-read (see above)
 ```
+
+Keep `snapshot_s` at 60 or below: the *steady* badge needs a sighting in 48 of the last 60
+minutes, so a longer interval makes every device look intermittent.
 
 Provide the token through the environment (preferred) rather than in `config.toml`:
 
@@ -153,8 +164,8 @@ without a room.
 
 | Kind | How it is matched | What "last heard" means |
 |---|---|---|
-| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, typically within 1-2 min. Lags if Android battery optimisation throttles the app. |
-| Beaconing remote (advertises every few seconds) | Static or public address | Current. |
+| Android phone | HA Companion app "BLE Transmitter" iBeacon (UUID, major, minor) | Current, to about one snapshot interval (default 60 s). Lags if Android battery optimisation throttles the app. |
+| Beaconing remote (advertises every few seconds) | Static or public address | Current, to about one snapshot interval. |
 | Press-to-advertise remote | Static or public address | When it was last pressed. |
 | Headphones with a stable address | Static or public address | Last time they were idle and nearby. Many go silent while connected. |
 | Anything with a rotating address | Not matched | Not findable. Never shown. |
@@ -176,7 +187,10 @@ repository.
   the "room" is that scanner's room. A device between two rooms flips when ownership
   changes; switching is coarse, not trilateration.
 - Home Assistant must be reachable. While the link is down the Find page shows a banner and
-  no new sightings are recorded; adverts are not buffered.
+  no new sightings are recorded. On reconnect, Home Assistant's replay restores only each
+  device's latest advert (filed at the time it was heard), not everything in between.
+- The advert count of a sighting counts snapshots and content changes that saw the device
+  in that minute, not every advert on the air.
 - Devices that rotate their address (iPhones, AirPods and most modern phones and earbuds)
   cannot be matched and are not findable.
 
