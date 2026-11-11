@@ -67,6 +67,8 @@ _NO_ENTITY = re.compile(r"^no (\w+) with id (-?\d+)$")
 def error_message(exc: BaseException) -> str | None:
     """The plain tool-error text for an expected failure, or ``None`` if unexpected."""
     if isinstance(exc, UndoConflict):
+        if not exc.conflicting and exc.reason:
+            return f"undo conflict: {exc.reason}"
         return f"undo conflict with batches {list(exc.conflicting)}"
     if isinstance(exc, StaleWrite):
         return (

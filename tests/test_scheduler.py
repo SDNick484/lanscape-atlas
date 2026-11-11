@@ -606,6 +606,21 @@ async def test_prune_job_ble_failure_does_not_block_observations(
     assert "BLE sighting prune failed" in caplog.text
 
 
+async def test_prune_job_failing_observation_prune_still_prunes_ble(
+    runner, svc, monkeypatch, caplog
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def boom(_d):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(svc, "prune_observations", boom)
+    monkeypatch.setattr(svc, "prune_ble", lambda d: calls.append(("ble", d)) or 0)
+    await scheduler_mod._prune_job(svc, 30, 14)  # must not raise
+    assert calls == [("ble", 14)]
+    assert "observation prune failed" in caplog.text
+
+
 async def test_prune_job_swallows_errors(settings, runner, svc, monkeypatch) -> None:
     def boom(_d):
         raise RuntimeError("db gone")

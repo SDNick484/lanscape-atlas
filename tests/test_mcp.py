@@ -586,3 +586,12 @@ def test_instructions_and_docstring_cover_floor_plan_tools() -> None:
     assert "place_devices" in mcp_server.INSTRUCTIONS
     src = Path(mcp_server.__file__).read_text()
     assert "may be omitted" in src and "counts as 0" in src
+
+
+def test_error_message_undo_conflict_without_batches() -> None:
+    from lanscape_atlas.mcp_server import error_message
+    from lanscape_atlas.service import UndoConflict
+
+    assert error_message(UndoConflict([7])) == "undo conflict with batches [7]"
+    exc = UndoConflict([], "cannot undo: device 5 no longer exists")
+    assert error_message(exc) == "undo conflict: cannot undo: device 5 no longer exists"

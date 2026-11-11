@@ -21,7 +21,8 @@ CANDIDATE_TTL = timedelta(hours=24)
 STABLE_SPAN = timedelta(minutes=30)
 TRACKER_TTL = timedelta(minutes=30)
 _GAP_WINDOW = 20  # inter-advert intervals kept for the median
-_MINUTE_FMT = "%Y-%m-%dT%H:%MZ"
+# ble_sighting.minute format (UTC); strings in it compare chronologically.
+BLE_MINUTE_FMT = "%Y-%m-%dT%H:%MZ"
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,7 @@ class BleAggregator:
             self._evict(self._tracker, self._tracker_cap)
 
     def drain_closed(self) -> list[MinuteRow]:
-        current = self._clock().strftime(_MINUTE_FMT)
+        current = self._clock().strftime(BLE_MINUTE_FMT)
         return self._drain(lambda minute: minute < current)
 
     def drain_all(self) -> list[MinuteRow]:
@@ -163,7 +164,7 @@ class BleAggregator:
         ]
 
     def _add_claimed(self, device_id: int, adv: Advert, now: datetime) -> None:
-        key = (device_id, adv.source, now.strftime(_MINUTE_FMT))
+        key = (device_id, adv.source, now.strftime(BLE_MINUTE_FMT))
         bucket = self._buckets.get(key)
         if bucket is None:
             self._buckets[key] = _Bucket(adv.rssi, 1, now)

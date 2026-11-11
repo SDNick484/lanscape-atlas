@@ -583,9 +583,12 @@ def history_undo(request: Request, batch_id: PathId, form: Form) -> Response:
     try:
         _service(request).undo(ACTOR, batch_id)
     except UndoConflict as e:
-        ids = ", ".join(f"#{b}" for b in e.conflicting)
-        msg = f"Cannot undo #{batch_id}: later changes touch the same data ({ids})."
-        msg += " Undo those first."
+        if e.conflicting:
+            ids = ", ".join(f"#{b}" for b in e.conflicting)
+            msg = f"Cannot undo #{batch_id}: later changes touch the same data ({ids})."
+            msg += " Undo those first."
+        else:
+            msg = f"#{batch_id}: {e}"
         return _history_page(request, actor, flash=("error", msg), status_code=409)
     except ValueError as e:
         flash = ("error", f"#{batch_id}: {_message(e)}")

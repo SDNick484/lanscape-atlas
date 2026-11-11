@@ -515,3 +515,68 @@ def test_claim_onto_unplaced_target_copies_place_and_point_together(svc, db, pho
         )
     }
     assert {"place_id", "pos_x", "pos_y"} <= logged
+
+
+# ------------------------------------------- undo references to a merged-away device
+
+
+def _add_iface(db, device_id, mac):
+    with db:
+        cur = db.execute(
+            "insert into interface(device_id, kind, address, first_seen, last_seen)"
+            " values (?, 'wifi', ?, ?, ?)",
+            (device_id, mac, T0.strftime("%Y-%m-%dT%H:%M:%SZ"), T0.strftime("%Y-%m-%dT%H:%M:%SZ")),
+        )
+    return cur.lastrowid
+
+
+def test_undo_remove_link_conflicts_when_device_merged_away(svc, db, phone, make_device):
+    target, source, rid = phone
+    other = make_device(name="switch")
+    svc.add_link("user", source, other, "wired")
+    link_id = db.execute("select id from link").fetchone()[0]
+    rm = svc.remove_link("user", link_id)
+    merge = svc.claim_interface("user", rid, target)
+    before = dump_state(db)
+    with pytest.raises(UndoConflict) as exc:
+        svc.undo("user", rm)
+    assert exc.value.conflicting == [merge]
+    assert dump_state(db) == before
+    assert not db.in_transaction
+
+
+def test_undo_interface_move_conflicts_when_old_owner_merged_away(svc, db, phone):
+    target, source, rid = phone
+    extra = _add_iface(db, source, OTHER)
+    move = svc.claim_interface("user", extra, target)  # source keeps rid: no merge
+    assert source in device_ids(db)
+    merge = svc.claim_interface("user", rid, target)
+    assert source not in device_ids(db)
+    before = dump_state(db)
+    with pytest.raises(UndoConflict) as exc:
+        svc.undo("user", move)
+    assert exc.value.conflicting == [merge]
+    assert dump_state(db) == before
+
+
+def test_claim_refuses_merge_of_device_with_ble_identity(svc, db, phone):
+    from lanscape_atlas.bluetooth.match import Identity
+
+    target, source, rid = phone
+    svc.claim_ble("user", Identity("address", "00:00:5e:00:53:39"), device_id=source)
+    before = dump_state(db)
+    with pytest.raises(ValueError, match=f"device {source} has Bluetooth identities"):
+        svc.claim_interface("user", rid, target)
+    assert dump_state(db) == before
+    assert not db.in_transaction
+
+
+def test_claim_refuses_merge_of_device_linked_to_scanner(svc, db, phone):
+    target, source, rid = phone
+    svc.upsert_scanners({"00:00:5e:00:53:3a": "proxy"}, T0)
+    scanner_id = db.execute("select id from ble_scanner").fetchone()[0]
+    svc.link_scanner("user", scanner_id, source)
+    before = dump_state(db)
+    with pytest.raises(ValueError, match=f"device {source} is linked to a Bluetooth scanner"):
+        svc.claim_interface("user", rid, target)
+    assert dump_state(db) == before

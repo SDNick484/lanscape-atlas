@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import Any
 
 import pytest
@@ -384,6 +384,81 @@ def test_delete_device_refuses_while_scanner_linked(svc: Service, db, clock, mak
     assert _scanner(db, SCANNER)["device_id"] == d  # type: ignore[index]
 
 
+def _iface(db: sqlite3.Connection, clock: Any, device_id: int, mac: str) -> int:
+    with db:
+        cur = db.execute(
+            "insert into interface(device_id, kind, address, first_seen, last_seen)"
+            " values (?, 'wifi', ?, ?, ?)",
+            (device_id, mac, iso(clock()), iso(clock())),
+        )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def test_undo_unclaim_conflicts_when_device_merged_away(
+    svc: Service, db, clock, make_device
+) -> None:
+    source = make_device(name=None)
+    target = make_device(name=None)
+    rid = _iface(db, clock, source, "02:00:5e:00:53:41")
+    svc.claim_ble("user", IDENT, device_id=source)
+    unclaim = svc.unclaim_ble("user", _identities(db)[0][0])
+    merge = svc.claim_interface("user", rid, target)
+    assert db.execute("select 1 from device where id = ?", (source,)).fetchone() is None
+    before = dump_state(db)
+    with pytest.raises(UndoConflict) as exc:
+        svc.undo("user", unclaim)
+    assert exc.value.conflicting == [merge]
+    assert dump_state(db) == before
+    assert not db.in_transaction
+
+
+def test_undo_unlink_conflicts_when_device_merged_away(
+    svc: Service, db, clock, make_device
+) -> None:
+    source = make_device(name=None)
+    target = make_device(name=None)
+    rid = _iface(db, clock, source, "02:00:5e:00:53:41")
+    svc.upsert_scanners({SCANNER: "proxy"}, clock())
+    scanner_id = _scanner(db, SCANNER)["id"]  # type: ignore[index]
+    svc.link_scanner("user", scanner_id, source)
+    unlink = svc.link_scanner("user", scanner_id, None)
+    merge = svc.claim_interface("user", rid, target)
+    before = dump_state(db)
+    with pytest.raises(UndoConflict) as exc:
+        svc.undo("user", unlink)
+    assert exc.value.conflicting == [merge]
+    assert dump_state(db) == before
+
+
+def test_undo_unclaim_after_device_merge_was_undone(svc: Service, db, clock, make_device) -> None:
+    source = make_device(name=None)
+    target = make_device(name=None)
+    rid = _iface(db, clock, source, "02:00:5e:00:53:41")
+    svc.claim_ble("user", IDENT, device_id=source)
+    identity_id = _identities(db)[0][0]
+    unclaim = svc.unclaim_ble("user", identity_id)
+    merge = svc.claim_interface("user", rid, target)
+    svc.undo("user", merge)  # the device is back: the deleting batch is no longer live
+    svc.undo("user", unclaim)
+    assert _identities(db) == [(identity_id, source, "address", ADDR)]
+
+
+def test_undo_unclaim_when_device_deleted_outside_change_log(svc: Service, db, make_device) -> None:
+    d = make_device(name="keys")
+    svc.claim_ble("user", IDENT, device_id=d)
+    unclaim = svc.unclaim_ble("user", _identities(db)[0][0])
+    with db:
+        db.execute("delete from device where id = ?", (d,))
+    before = dump_state(db)
+    with pytest.raises(UndoConflict) as exc:
+        svc.undo("user", unclaim)
+    assert exc.value.conflicting == []
+    assert f"device {d} no longer exists" in str(exc.value)
+    assert dump_state(db) == before
+    assert not db.in_transaction
+
+
 # ------------------------------------------------------------------ scanner links
 
 
@@ -464,6 +539,20 @@ def test_prune_ble_respects_cutoff(svc: Service, db, clock, make_device) -> None
     assert _sightings(db) == []
     with pytest.raises(ValueError):
         svc.prune_ble(-1)
+
+
+def test_prune_ble_cutoff_in_utc_for_non_utc_clock(svc: Service, db, clock, make_device) -> None:
+    tag = make_device(name="tag")
+    start = clock()
+    svc.record_ble_minutes([_row(clock, tag)])  # 00:00Z
+    clock.advance(minutes=1)
+    svc.record_ble_minutes([_row(clock, tag)])  # 00:01Z
+    # start + 1 day + 90 s, expressed at UTC-8: the cutoff must be 00:01Z, not local time.
+    clock.now = (start + timedelta(days=1, seconds=90)).astimezone(timezone(timedelta(hours=-8)))
+    assert svc.prune_ble(1) == 1
+    assert [r["minute"] for r in _sightings(db)] == [
+        (start + timedelta(minutes=1)).strftime(_MINUTE_FMT)
+    ]
 
 
 # ------------------------------------------------------------------ invariants
