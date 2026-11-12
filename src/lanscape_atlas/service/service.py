@@ -8,8 +8,8 @@ text so ``None`` and numbers round-trip.
 
 Transactions: the public user-facing writes (``update_device``, ``set_place``,
 ``add_link``, ``remove_link``, ``create_placeholder_device``, ``claim_interface``,
-``claim_ble``, ``unclaim_ble``, ``link_scanner``, ``undo``) each own one
-``BEGIN IMMEDIATE`` transaction, hold ``self.lock`` for its duration, and
+``claim_ble``, ``unclaim_ble``, ``hide_ble``, ``unhide_ble``, ``link_scanner``,
+``undo``) each own one ``BEGIN IMMEDIATE`` transaction, hold ``self.lock`` for its duration, and
 publish ``change.applied`` after commit. The Bluetooth collector writes
 (``record_ble_minutes``, ``upsert_scanners``) and the prunes
 (``prune_observations``, ``prune_ble``) also own one transaction each but are
@@ -33,6 +33,13 @@ with the same id. ``link_scanner`` is a plain owned field change on
 ``ble_scanner.device_id``. ``ble_sighting`` rows are collector data: deleting a
 device (e.g. undoing a claim that created it) deletes its sightings, and undo
 never brings them back.
+
+"Not mine": ``hide_ble`` logs a ``ble_hidden`` row (salted digest and label, never
+the raw identity) as a row-level creation, ``unhide_ble`` as a row-level deletion.
+Claiming a hidden identity deletes its ``ble_hidden`` row in the claim's batch, so
+one undo restores both. A digest names one identity, so undo treats a later claim,
+unclaim, hide or unhide of the same identity as a conflict: a hidden identity is
+never claimed and never hidden twice.
 """
 
 from __future__ import annotations
@@ -46,12 +53,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
-from lanscape_atlas.bluetooth.match import Identity, check_canonical
+from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, HIDDEN_LABEL_MAX, MinuteRow
+from lanscape_atlas.bluetooth.match import Identity, check_canonical, hidden_digest
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event, EventBus
 from lanscape_atlas.floorplan.geometry import check_aspect, parse_polygon, point_in_polygon
-from lanscape_atlas.service import queries
+from lanscape_atlas.service import ble_queries, queries
 
 USER_FIELDS = frozenset(
     {"name", "type", "icon", "place_id", "pos_x", "pos_y", "owner", "notes", "trust", "scan_policy"}
@@ -85,6 +92,9 @@ _SERVICE_COLUMNS = (
 )
 _FLOOR_PLAN_COLUMNS = ("id", "width", "height", "sha256", "file_name", "updated_at")
 _BLE_IDENTITY_COLUMNS = ("id", "device_id", "kind", "value", "created_at")
+_BLE_HIDDEN_COLUMNS = ("id", "digest", "label", "hidden_at")
+# Row-level entities that stand for one BLE identity (compared by salted digest in undo).
+_BLE_ROW_ENTITIES = ("ble_identity", "ble_hidden")
 # Entities whose ``device_id`` field is logged as a plain field change.
 _DEVICE_REF_ENTITIES = frozenset({"interface", "service", "ble_scanner"})
 _FIELD_SOURCE_KEY = "_field_source"
@@ -156,6 +166,8 @@ _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
     "floor_plan": frozenset(_FLOOR_PLAN_COLUMNS) - {"id"},
     # claim_ble/unclaim_ble write these rows whole (field='*').
     "ble_identity": frozenset({"device_id", "kind", "value", "created_at"}),
+    # hide_ble/unhide_ble (and claim_ble of a hidden identity) write these rows whole.
+    "ble_hidden": frozenset(_BLE_HIDDEN_COLUMNS) - {"id"},
     # Only link_scanner writes this; name/last_seen are collector data, not logged.
     "ble_scanner": frozenset({"device_id"}),
 }
@@ -165,6 +177,7 @@ _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "service": _SERVICE_COLUMNS,
     "floor_plan": _FLOOR_PLAN_COLUMNS,
     "ble_identity": _BLE_IDENTITY_COLUMNS,
+    "ble_hidden": _BLE_HIDDEN_COLUMNS,
 }
 
 
@@ -929,7 +942,9 @@ class Service:
         non-empty ``new_type``: create the device, logged as
         ``create_placeholder_device`` logs it, in the same batch). The identity
         row is logged as a row-level ``field='*'`` creation after the device, so
-        undo deletes the identity before the device. Raises ``ValueError`` for a
+        undo deletes the identity before the device. A hidden ("Not mine")
+        identity is unhidden in the same batch (its ``ble_hidden`` row logged as a
+        row-level deletion), so one undo restores both. Raises ``ValueError`` for a
         bad actor, a non-canonical identity, a bad target combination or an
         identity that is already claimed (nothing is written), and ``KeyError``
         for an unknown ``device_id``.
@@ -973,6 +988,13 @@ class Service:
                 None,
                 self._row_dict("ble_identity", identity_id),
             )
+            hidden = self.conn.execute(
+                "SELECT id FROM ble_hidden WHERE digest = ?", (self._digest(identity),)
+            ).fetchone()
+            if hidden is not None:
+                old = self._row_dict("ble_hidden", hidden["id"])
+                self._log_change(batch_id, "ble_hidden", hidden["id"], "*", old, None)
+                self._delete_entity("ble_hidden", hidden["id"])
         self._publish(batch_id, actor)
         return device_id, batch_id
 
@@ -990,6 +1012,73 @@ class Service:
             self._delete_entity("ble_identity", identity_id)
         self._publish(batch_id, actor)
         return batch_id
+
+    def hide_ble(self, actor: str, identity: Identity, label: str) -> tuple[int, int]:
+        """Hide an unclaimed identity ("Not mine"); returns ``(hidden_id, batch_id)``.
+
+        Stores the salted digest (``match.hidden_digest``) and ``label`` (trimmed, at
+        most ``HIDDEN_LABEL_MAX`` characters), never the identity itself, logged as a
+        row-level creation. Raises ``ValueError`` for a bad actor, a non-canonical
+        identity, an empty label, a claimed identity or one already hidden.
+        """
+        self._check_actor(actor)
+        check_canonical(identity)
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("label must be a non-empty string")
+        label = label.strip()[:HIDDEN_LABEL_MAX]
+        with self._write_txn():
+            claimed = self.conn.execute(
+                "SELECT device_id FROM ble_identity WHERE kind = ? AND value = ?",
+                (identity.kind, identity.value),
+            ).fetchone()
+            if claimed is not None:
+                raise ValueError(
+                    f"claimed by device {claimed['device_id']}; unclaim it before hiding it"
+                )
+            digest = self._digest(identity)
+            if self.conn.execute("SELECT 1 FROM ble_hidden WHERE digest = ?", (digest,)).fetchone():
+                raise ValueError("already hidden")
+            batch_id = self.begin_batch(actor)
+            cur = self.conn.execute(
+                "INSERT INTO ble_hidden(digest, label, hidden_at) VALUES (?, ?, ?)",
+                (digest, label, self._now()),
+            )
+            assert cur.lastrowid is not None
+            hidden_id = cur.lastrowid
+            self._log_change(
+                batch_id,
+                "ble_hidden",
+                hidden_id,
+                "*",
+                None,
+                self._row_dict("ble_hidden", hidden_id),
+            )
+        self._publish(batch_id, actor)
+        return hidden_id, batch_id
+
+    def unhide_ble(self, actor: str, hidden_id: int) -> int:
+        """Delete a hidden row so the identity is listed again; returns the batch id.
+
+        Logged as a row-level deletion, so undo re-inserts it with the same id.
+        Raises ``KeyError`` for an unknown id.
+        """
+        self._check_actor(actor)
+        with self._write_txn():
+            old = self._row_dict("ble_hidden", hidden_id)
+            batch_id = self.begin_batch(actor)
+            self._log_change(batch_id, "ble_hidden", hidden_id, "*", old, None)
+            self._delete_entity("ble_hidden", hidden_id)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def _digest(self, identity: Identity) -> str:
+        return hidden_digest(ble_queries.ble_salt(self.conn), identity)
+
+    def _row_digest(self, entity: str, row: Mapping[str, Any]) -> str:
+        """The identity digest a logged ``ble_identity``/``ble_hidden`` row stands for."""
+        if entity == "ble_hidden":
+            return str(row["digest"])
+        return self._digest(Identity(row["kind"], row["value"]))
 
     def link_scanner(self, actor: str, scanner_id: int, device_id: int | None) -> int:
         """Link a BLE scanner to the atlas device it runs on (None unlinks).
@@ -1332,13 +1421,15 @@ class Service:
                 for bid, row in self._later_rows(batch_id, "ble_identity"):
                     if row["device_id"] == ch.entity_id and live(bid):
                         found.add(bid)
-            # A BLE identity is unique by (kind, value) across row ids: a later
-            # claim of the same identity blocks re-inserting it.
-            if ch.entity == "ble_identity" and ch.field == "*":
-                mine = ch.old if ch.old is not None else ch.new
-                for bid, row in self._later_rows(batch_id, "ble_identity"):
-                    if (row["kind"], row["value"]) == (mine["kind"], mine["value"]) and live(bid):
-                        found.add(bid)
+            # A BLE identity is claimed or hidden at most once, across row ids: a later
+            # claim, unclaim, hide or unhide of the same identity (same salted digest)
+            # blocks undoing this row.
+            if ch.entity in _BLE_ROW_ENTITIES and ch.field == "*":
+                mine = self._row_digest(ch.entity, ch.old if ch.old is not None else ch.new)
+                for entity in _BLE_ROW_ENTITIES:
+                    for bid, row in self._later_rows(batch_id, entity):
+                        if live(bid) and self._row_digest(entity, row) == mine:
+                            found.add(bid)
         # Undo would re-point a row at a device a later live batch deleted.
         for device_id in sorted(self._referenced_devices(rows)):
             collect(

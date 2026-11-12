@@ -109,7 +109,8 @@ twice. "Last heard" is therefore accurate to about one snapshot interval.
 without a token is a configuration error. How you turn it on depends on how you installed.
 
 **Scripted install (`deploy/setup-alpine.sh`).** The script re-renders `config.toml` from
-`setup.env` on every run, so a hand edit to `config.toml` is overwritten. Add the Home
+`setup.env` on every run, and stops if `config.toml` was edited by hand (see *Scripted
+install and upgrade*). Add the Home
 Assistant keys to `/etc/lanscape-atlas/setup.env` (mode 0600) with `vim` and re-run the
 script:
 
@@ -124,6 +125,11 @@ The script writes an active `[home_assistant]` table (URL, token, `verify_tls`) 
 to the same values, and never prints the token, not even with `--dry-run`. Leave `HA_URL`
 empty to turn Bluetooth off again.
 
+To change the weak-signal cut-off of the candidate list (see *Claiming a device*), add
+`BLE_CANDIDATE_MIN_RSSI` (a whole number of dBm from -127 to 0) to `setup.env`; the script
+validates it and writes it as `candidate_min_rssi` in the `[bluetooth]` table. Unset keeps
+the default, -80.
+
 **Manual install.** Edit `config.toml` with `vim`, uncomment the table and fill it in,
 then restart the service:
 
@@ -137,6 +143,7 @@ verify_tls = true
 retention_days = 14   # nightly prune of per-minute sightings
 flush_s = 60          # how often closed minutes are written to the database
 snapshot_s = 30       # how often Home Assistant's latest adverts are re-read (see above)
+candidate_min_rssi = -80  # weaker candidates are hidden behind "Show N weak" (dBm, -127..0)
 ```
 
 Keep `snapshot_s` at 30 or below: the *steady* badge needs a sighting in 48 of the last 60
@@ -168,11 +175,26 @@ exposes the iBeacon ID (UUID, major, minor); the candidate list shows the same i
 Open `/find`. Under **Candidates** are stable devices heard recently that are not yet
 claimed: iBeacons, and addresses that look stable (a known vendor, a static-random
 address, or one heard steadily for 30 minutes). Press a remote's button, or hold a tag
-next to a proxy, and its signal strength stands out. Each candidate shows the scanner
-that heard it by name (and room, once the scanner is linked). Select the candidate, then
+next to a proxy, and its signal strength stands out. Candidates are listed strongest
+signal first; those weaker than `candidate_min_rssi` (default -80 dBm), usually a
+neighbour's, are hidden behind a **Show N weak** link (the API and MCP take
+`include_weak`; their candidate list carries `min_rssi` and `weak_hidden`, the number of
+weak candidates left out). Each candidate shows the scanner that heard it by name (and room, once
+the scanner is linked). Select the candidate, then
 under **Claim the selected candidate** either attach it to an existing device or create a
 new one (name and type), and press **Claim**. Claims are in History and can
 be undone; the device page has an **Unclaim** button.
+
+A neighbour's device that keeps showing up can be hidden with its row's **Not mine**
+button. It disappears from the candidate list (and is not counted in **Show N weak**), and
+atlas records nothing about it, as for any unclaimed device. Only a salted digest of its
+identity and a label (its advert name, else the vendor of its address, else "Unnamed
+device") are stored for the hide (a device you once claimed keeps its address in that
+claim's History entry). Hidden devices are listed on the **Status** page under **Hidden
+Bluetooth devices**, each with an **Unhide** button; a hide is also in History and can be
+undone. API: `POST /api/v1/ble/hide` with `{"identity": ...}` (a current candidate),
+`GET /api/v1/ble/hidden` and `DELETE /api/v1/ble/hidden/{id}`. MCP: `hide_ble`. Claiming a
+hidden device through the API or MCP unhides it, in the same undoable batch.
 
 ### Linking scanners
 
@@ -329,10 +351,36 @@ and logrotate entry; it never upgrades packages or restarts other services.
 Each run stops the service, checks out `--ref` (default `main`), reinstalls into the
 virtualenv, backs up the database (last three kept) when the code changed, renders
 `config.toml` from `setup.env`, migrates, restarts, and finishes with a smoke test of
-`/api/v1/collectors` and `/api/v1/devices`. Edit `setup.env`, not `config.toml`: the
-latter is regenerated on every run (the previous copy is kept as `config.toml.prev`).
-The API token is generated on the first run and kept afterwards unless you set
-`API_TOKEN`; the script never prints it.
+`/api/v1/collectors` and `/api/v1/devices`. The API token is generated on the first run
+and kept afterwards unless you set `API_TOKEN`; the script never prints it.
+
+Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
+run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If a hand
+edit to `config.toml` would be lost or changed by the new render, the script stops
+before replacing it, leaves it unchanged, and lists those settings by name (never their
+values), each with the `setup.env` key that controls it. Move them into `setup.env` and
+re-run, or re-run with `--discard-config-edits` to overwrite them. If every setting in
+the edited file already equals what `setup.env` renders (for example, you copied a
+hand-added table into `setup.env`, or only added a comment), the file is simply
+replaced, with a backup.
+
+A `config.toml` written by an older script (no `# sha256:` line) counts as hand-edited
+if it has a setting the new render would drop, or a different value for a key that
+`setup.env` leaves unset or empty. An unset key falls back to the script's default
+(for example `BIND_PORT=8720`), and that default does not override your file; set the key
+in `setup.env` to change the value. `--dry-run` reports a hand edit too.
+
+A file with the `# sha256:` line is checked right after preflight, before the service is
+stopped. Every file is checked again right after the new code is checked out, against
+its `config.example.toml`, before anything is installed. If the run stops after the
+service was stopped, the script starts the old, untouched install again with your
+unchanged `config.toml` (or, if that fails, tells you to run
+`rc-service lanscape-atlas start`).
+
+Before each replace, the current file is copied to
+`/var/lib/lanscape-atlas/config.toml.YYYYmmdd-HHMMSS` (UTC, mode 0600); the newest five
+are kept. A `config.toml.prev` left by older versions of the script is not touched;
+delete it yourself once you no longer need it.
 
 ### Commands
 
@@ -435,7 +483,7 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
 `claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
-`get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`.
+`get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`, `hide_ble`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
 its own batch and can be undone like any other change. Tool output never includes

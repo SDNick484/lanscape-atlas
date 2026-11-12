@@ -1,6 +1,7 @@
-"""The Find page (Phase 3 spec 6.1) and BLE unclaim from the device page.
+"""The Find page (Phase 3 spec 6.1), "Not mine", and BLE unclaim from the device page.
 
-``GET /find`` and ``GET /partials/find`` and ``POST /find/claim`` are ``async def``:
+``GET /find``, ``GET /partials/find``, ``POST /find/claim`` and ``POST /find/hide`` are
+``async def``:
 the aggregator is not thread-safe, so candidates are copied on the event loop and
 all DB work runs in a worker thread. The device-page unclaim is a plain DB write.
 
@@ -20,10 +21,18 @@ from fastapi.responses import HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 
+from lanscape_atlas.bluetooth.aggregator import visible_candidates
 from lanscape_atlas.service import Service
 from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.service import queries as q
-from lanscape_atlas.web.ble_api import age_seconds, ago, candidate_dict, require_candidate, where
+from lanscape_atlas.web.ble_api import (
+    age_seconds,
+    ago,
+    candidate_dict,
+    hide_candidate,
+    require_candidate,
+    where,
+)
 from lanscape_atlas.web.pages import (
     ACTOR,
     DEVICE_LIMIT,
@@ -41,6 +50,9 @@ from lanscape_atlas.web.pages import (
 BANNER_AFTER = timedelta(minutes=2)
 STALE_MESSAGE = "That device is no longer in range; nothing was claimed."
 PICK_MESSAGE = "Choose a candidate to claim."
+STALE_HIDE_MESSAGE = "That device is no longer in range; nothing was hidden."
+HIDE_PICK_MESSAGE = "Choose a candidate to hide."
+HIDDEN_FLASH = "Hidden {label}. Undo it from History or the Status page."
 BADGE_LABELS = {
     "steady": "Steady",
     "intermittent": "Intermittent",
@@ -102,12 +114,20 @@ def _db_context(svc: Service, search: str | None, with_candidates: bool) -> dict
     return {"rows": [_row_view(r, now) for r in rows], "devices": devices, "scanners": scanners}
 
 
-async def _context(request: Request, search: str | None, *, full: bool) -> dict[str, Any]:
+async def _context(
+    request: Request, search: str | None, *, full: bool, weak: bool = False
+) -> dict[str, Any]:
     svc = _service(request)
     runtime = request.app.state.bluetooth
     now = svc.clock()
     # Aggregator: loop only. Copy the candidates before leaving the loop.
-    found = [] if runtime is None else list(runtime.aggregator.candidates())
+    view = visible_candidates(
+        [] if runtime is None else runtime.aggregator.candidates(),
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
+        include_weak=weak,
+        exclude=None if runtime is None else runtime.is_hidden,
+    )
+    found = view.shown
     ctx = await run_in_threadpool(_db_context, svc, search, full and bool(found))
     scanners = ctx.pop("scanners")
     candidates = []
@@ -120,6 +140,9 @@ async def _context(request: Request, search: str | None, *, full: bool) -> dict[
         configured=runtime is not None,
         banner=_banner(request, now),
         candidates=candidates,
+        weak_count=view.weak,
+        show_weak=weak,
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
         q=search or "",
         intermittent_hint=INTERMITTENT_HINT,
     )
@@ -140,17 +163,24 @@ async def find_page(
     request: Request,
     q: str | None = None,
     claimed: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
+    weak: bool = False,
+    hidden: Annotated[int | None, Query(ge=1, le=MAX_ID)] = None,
 ) -> Response:
-    ctx = await _context(request, q, full=True)
+    ctx = await _context(request, q, full=True, weak=weak)
     flash = None
     if claimed is not None:
         name = await run_in_threadpool(_device_name, _service(request), claimed)
         flash = ("ok", f"Claimed as {name}.")
+    elif hidden is not None:
+        label = await run_in_threadpool(_hidden_label, _service(request), hidden)
+        if label is not None:  # unhidden since: no flash
+            flash = ("ok", HIDDEN_FLASH.format(label=label))
     return _find_page(request, ctx, flash)
 
 
 @router.get("/partials/find", response_class=HTMLResponse)
 async def find_partial(request: Request, q: str | None = None) -> Response:
+    # Claimed rows only; the candidate list is not part of the partial.
     ctx = await _context(request, q, full=False)
     return render(request, "_find_rows.html", ctx)
 
@@ -159,6 +189,12 @@ def _device_name(svc: Service, device_id: int) -> str:
     with svc.lock:
         row = svc.conn.execute("SELECT name FROM device WHERE id = ?", (device_id,)).fetchone()
     return (row[0] if row and row[0] else f"device {device_id}") if row else "a device"
+
+
+def _hidden_label(svc: Service, hidden_id: int) -> str | None:
+    with svc.lock:
+        row = svc.conn.execute("SELECT label FROM ble_hidden WHERE id = ?", (hidden_id,)).fetchone()
+    return None if row is None else str(row[0])
 
 
 def _claim_args(form: FormData) -> tuple[int | None, str | None, str | None]:
@@ -196,9 +232,29 @@ async def find_claim(request: Request, form: Form) -> Response:
             )
         )
     except ValueError as e:
-        ctx = await _context(request, None, full=True)
+        # Re-render the view the form came from, so a weak candidate stays listed.
+        weak = (_text(form, "weak") or "") == "1"
+        ctx = await _context(request, None, full=True, weak=weak)
         return _find_page(request, ctx, ("error", _message(e)), 422)
     return _redirect(request, f"/find?claimed={claimed}")
+
+
+@router.post("/find/hide", response_model=None)
+async def find_hide(request: Request, form: Form) -> Response:
+    """ "Not mine": hide one candidate (its row's button submits the separate hide form)."""
+    weak = (_text(form, "weak") or "") == "1"
+    try:
+        key = (_text(form, "identity") or "").strip()
+        if not key:
+            raise ValueError(HIDE_PICK_MESSAGE)
+        try:
+            done = await hide_candidate(_service(request), request.app.state.bluetooth, ACTOR, key)
+        except KeyError:
+            raise ValueError(STALE_HIDE_MESSAGE) from None
+    except ValueError as e:
+        ctx = await _context(request, None, full=True, weak=weak)
+        return _find_page(request, ctx, ("error", _message(e)), 422)
+    return _redirect(request, ("/find?weak=1&" if weak else "/find?") + f"hidden={done['id']}")
 
 
 @router.post("/devices/{device_id}/ble/{identity_id}/unclaim", response_model=None)

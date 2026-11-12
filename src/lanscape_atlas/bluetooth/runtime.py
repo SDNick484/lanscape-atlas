@@ -6,7 +6,9 @@ Ingestor/Observation path: they feed the aggregator directly.
 
 ``change.applied`` can be published from FastAPI threadpool threads, so the subscriber only
 schedules the index reload onto the loop (``call_soon_threadsafe``); the reload itself runs
-there.
+there. The reload also refreshes the hidden ("Not mine") digests and their salt, which
+``is_hidden`` checks candidates against; hidden candidates are still tracked by the
+aggregator (nothing is recorded about them either way), only never listed.
 """
 
 from __future__ import annotations
@@ -19,13 +21,14 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from lanscape_atlas.bluetooth.aggregator import BleAggregator, MinuteRow
-from lanscape_atlas.bluetooth.match import Advert, Identity
+from lanscape_atlas.bluetooth.match import Advert, Identity, hidden_digest
 from lanscape_atlas.clock import Clock
 from lanscape_atlas.collectors.bluetooth_ha import ClientStatus, HaBluetoothClient
 from lanscape_atlas.config import Settings
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event
 from lanscape_atlas.oui import OuiDB
 from lanscape_atlas.service import Service
+from lanscape_atlas.service import ble_queries as bq
 
 if TYPE_CHECKING:
     from lanscape_atlas.scheduler import CollectorRunner
@@ -51,9 +54,13 @@ class BluetoothRuntime:
         self._service = service
         self._clock = clock
         self._runner = runner
+        self.vendor: Callable[[str], str | None] = oui.lookup
         self.aggregator = BleAggregator(
             clock, known_vendor=lambda addr: oui.lookup(addr) is not None
         )
+        # Hidden ("Not mine") identities: their digests and the salt; loop-confined.
+        self._hidden_salt: bytes | None = None
+        self._hidden: frozenset[str] = frozenset()
         self._scanners: dict[str, str | None] = {}
         self._write_lock = asyncio.Lock()
         self._client = client_factory(
@@ -93,6 +100,11 @@ class BluetoothRuntime:
     def status(self) -> ClientStatus:
         return self._client.status()
 
+    def is_hidden(self, identity: Identity) -> bool:
+        """Whether ``identity`` is on the "Not mine" list (as of the last reload). Loop only."""
+        salt = self._hidden_salt
+        return salt is not None and hidden_digest(salt, identity) in self._hidden
+
     # -- internals --------------------------------------------------------------------------
 
     def _on_advert(self, advert: Advert, at: datetime) -> None:
@@ -117,12 +129,14 @@ class BluetoothRuntime:
             return
         try:
             with self._service.lock:
-                rows = self._service.conn.execute(
-                    "SELECT device_id, kind, value FROM ble_identity"
-                ).fetchall()
+                conn = self._service.conn
+                rows = conn.execute("SELECT device_id, kind, value FROM ble_identity").fetchall()
+                salt = bq.ble_salt(conn)
+                hidden = frozenset(bq.hidden_digests(conn))
             self.aggregator.set_index(
                 {Identity(r["kind"], r["value"]): int(r["device_id"]) for r in rows}
             )
+            self._hidden_salt, self._hidden = salt, hidden
         except Exception:  # noqa: BLE001 - keep the old index rather than kill the loop callback
             log.exception("could not reload the Bluetooth identity index")
 

@@ -1,12 +1,16 @@
-"""Bluetooth JSON API under ``/api/v1``: find, candidates, claim, identities, scanners.
+"""Bluetooth JSON API under ``/api/v1``: find, candidates, claim, identities, scanners, hidden.
 
 Writes go through ``Service`` with ``actor="user"``. Bodies are strict (unknown
 fields rejected, ids not coerced). Errors are mapped by the app-level handlers in
 ``app.py`` (KeyError 404, ValueError 422, UndoConflict 409).
 
-``GET /ble/candidates`` and ``POST /ble/claim`` are ``async def``: the aggregator
-is not thread-safe and is only touched on the event loop; their DB work runs in a
-worker thread so the loop never blocks on ``service.lock``.
+``GET /ble/candidates``, ``POST /ble/claim`` and ``POST /ble/hide`` are ``async def``:
+the aggregator is not thread-safe and is only touched on the event loop; their DB work
+runs in a worker thread so the loop never blocks on ``service.lock``.
+
+Hidden ("Not mine") candidates are left out of every candidate list (and of
+``weak_hidden``), but ``require_candidate`` checks the unfiltered list: claiming a
+hidden candidate through the API or MCP works and unhides it.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from lanscape_atlas.bluetooth.aggregator import Candidate
+from lanscape_atlas.bluetooth.aggregator import Candidate, hide_label, visible_candidates
 from lanscape_atlas.bluetooth.match import Identity
 from lanscape_atlas.bluetooth.runtime import BluetoothRuntime
 from lanscape_atlas.clock import iso
@@ -89,11 +93,42 @@ def where(last: bq.LastHeard) -> str:
 
 
 def require_candidate(runtime: BluetoothRuntime | None, key: str) -> Identity:
-    """The parsed identity if it is a current candidate; else ``ValueError``."""
+    """The parsed identity if it is a current candidate (hidden or not); else ``ValueError``."""
     identity = Identity.parse(key)
     if runtime is None or not any(c.identity == identity for c in runtime.aggregator.candidates()):
         raise ValueError("no such candidate")
     return identity
+
+
+def current_candidate(runtime: BluetoothRuntime | None, key: str) -> Candidate:
+    """The current candidate (hidden or not) for ``key``; ``KeyError`` (404) if none.
+
+    A malformed key raises ``ValueError`` (422). Call on the event loop.
+    """
+    identity = Identity.parse(key)
+    for c in [] if runtime is None else runtime.aggregator.candidates():
+        if c.identity == identity:
+            return c
+    raise KeyError("no such candidate")
+
+
+async def hide_candidate(
+    svc: Service, runtime: BluetoothRuntime | None, actor: str, key: str
+) -> dict[str, Any]:
+    """Hide a current candidate as "Not mine": ``{"id", "label", "batch_id"}``.
+
+    The label is computed here from the candidate (``hide_label``). Call on the event
+    loop; the write runs in a worker thread.
+    """
+    c = current_candidate(runtime, key)
+    assert runtime is not None
+    label = hide_label(c, runtime.vendor)
+    hidden_id, batch_id = await asyncio.to_thread(svc.hide_ble, actor, c.identity, label)
+    return {"id": hidden_id, "label": label, "batch_id": batch_id}
+
+
+def hidden_dict(h: bq.HiddenView) -> dict[str, Any]:
+    return {"id": h.id, "label": h.label, "hidden_at": h.hidden_at}
 
 
 class NewDevice(BaseModel):
@@ -117,6 +152,12 @@ class ClaimBody(BaseModel):
         return self
 
 
+class HideBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity: Annotated[str, Field(max_length=200)]
+
+
 class ScannerLinkBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,15 +172,33 @@ def find(request: Request, q: str | None = None) -> list[dict[str, Any]]:
     return [find_row_dict(r) for r in rows]
 
 
-@router.get("/ble/candidates")
-async def candidates(request: Request) -> dict[str, Any]:
-    runtime: BluetoothRuntime | None = request.app.state.bluetooth
+def candidates_payload(
+    runtime: BluetoothRuntime | None, *, min_rssi: int, include_weak: bool
+) -> dict[str, Any]:
+    """The candidate list for the API and MCP. Call on the event loop (reads the aggregator)."""
     if runtime is None:
-        return {"connected": None, "candidates": []}
+        return {"connected": None, "min_rssi": min_rssi, "weak_hidden": 0, "candidates": []}
+    view = visible_candidates(
+        runtime.aggregator.candidates(),
+        min_rssi=min_rssi,
+        include_weak=include_weak,
+        exclude=runtime.is_hidden,
+    )
     return {
         "connected": runtime.status().connected,
-        "candidates": [candidate_dict(c) for c in runtime.aggregator.candidates()],
+        "min_rssi": min_rssi,
+        "weak_hidden": 0 if include_weak else view.weak,
+        "candidates": [candidate_dict(c) for c in view.shown],
     }
+
+
+@router.get("/ble/candidates")
+async def candidates(request: Request, include_weak: bool = False) -> dict[str, Any]:
+    return candidates_payload(
+        request.app.state.bluetooth,
+        min_rssi=request.app.state.settings.bluetooth.candidate_min_rssi,
+        include_weak=include_weak,
+    )
 
 
 @router.post("/ble/claim")
@@ -162,6 +221,26 @@ async def claim(request: Request, body: ClaimBody) -> dict[str, int]:
 @router.delete("/ble/identities/{identity_id}")
 def unclaim(request: Request, identity_id: int) -> dict[str, int]:
     return {"batch_id": _service(request).unclaim_ble(ACTOR, identity_id)}
+
+
+@router.post("/ble/hide")
+async def hide(request: Request, body: HideBody) -> dict[str, Any]:
+    return await hide_candidate(
+        _service(request), request.app.state.bluetooth, ACTOR, body.identity
+    )
+
+
+@router.get("/ble/hidden")
+def hidden(request: Request) -> list[dict[str, Any]]:
+    svc = _service(request)
+    with svc.lock:
+        views = bq.hidden(svc.conn)
+    return [hidden_dict(h) for h in views]
+
+
+@router.delete("/ble/hidden/{hidden_id}")
+def unhide(request: Request, hidden_id: int) -> dict[str, int]:
+    return {"batch_id": _service(request).unhide_ble(ACTOR, hidden_id)}
 
 
 @router.get("/ble/scanners")

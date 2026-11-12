@@ -9,6 +9,7 @@
   <input type="search" name="q" value="{{ q }}" placeholder="Search by name"
          hx-get="{{ root }}/partials/find" hx-trigger="input changed delay:300ms, search"
          hx-target="#find-results" hx-swap="innerHTML">
+  {% if show_weak %}<input type="hidden" name="weak" value="1">{% endif %}
   <button type="submit" class="secondary">Search</button>
 </form>
 <div id="find-results" hx-get="{{ root }}/partials/find" hx-trigger="every 30s" hx-include="[name='q']" hx-swap="innerHTML">
@@ -17,25 +18,36 @@
 
 {% if configured %}
 <h2>Candidates</h2>
-<p class="muted">Stable Bluetooth devices heard recently and not yet claimed. Pick one, then claim it below.</p>
+<p class="muted">Stable Bluetooth devices heard recently and not yet claimed, strongest signal first. Pick one, then claim it below.
+{% if weak_count and not show_weak %}<a href="{{ root }}/find?weak=1">Show {{ weak_count }} weak</a> (below {{ min_rssi }} dBm, usually a neighbour's).
+{% elif show_weak %}<a href="{{ root }}/find">Hide weak</a> (below {{ min_rssi }} dBm).{% endif %}</p>
+{# "Not mine" buttons submit this form (form="hide-form"), so they are not part of the claim
+   form: its radios are not sent and Enter in its fields still submits Claim. #}
+<form method="post" action="{{ root }}/find/hide" id="hide-form">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% if show_weak %}<input type="hidden" name="weak" value="1">{% endif %}
+</form>
 {# One form for every candidate: the device list is rendered once, not once per row. #}
 <form method="post" action="{{ root }}/find/claim" id="claim-form">
 <input type="hidden" name="csrf" value="{{ csrf }}">
+{% if show_weak %}<input type="hidden" name="weak" value="1">{% endif %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th></tr></thead>
+  <thead><tr><th></th><th>Identity</th><th>Advert name</th><th>Signal</th><th>Nearest scanner</th><th>Last heard</th><th>Gap</th><th></th></tr></thead>
   <tbody>
   {% for c in candidates %}
   <tr>
     <td><input type="radio" name="identity" value="{{ c.identity }}" id="cand-{{ loop.index }}" aria-label="Select {{ c.identity }}" required></td>
     <td class="mono"><label for="cand-{{ loop.index }}">{{ c.identity }}</label></td>
     <td>{{ c.name or "" }}</td>
+    <td>{{ c.best_rssi }} dBm</td>
     <td class="scanner" title="{{ c.source }}">{% if c.scanner_name %}{{ c.scanner_name }}{% else %}<span class="mono">{{ c.source }}</span>{% endif %}{% if c.scanner_room %} <span class="muted">{{ c.scanner_room }}</span>{% endif %}</td>
     <td>{{ c.age }}</td>
     <td>{% if c.typical_gap_s is not none %}{{ "%.0f"|format(c.typical_gap_s) }} s{% endif %}</td>
+    <td><button type="submit" class="secondary" form="hide-form" name="identity" value="{{ c.identity }}" aria-label="Not mine: {{ c.identity }}" title="Hide it from this list (e.g. a neighbour's device)">Not mine</button></td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="empty">No candidates right now.</td></tr>
+  <tr><td colspan="8" class="empty">{% if weak_count and not show_weak %}No candidates at or above {{ min_rssi }} dBm.{% else %}No candidates right now.{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table>

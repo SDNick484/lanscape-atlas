@@ -279,6 +279,8 @@ POST_ROUTES = (
     "find_claim",
     "ble_unclaim",
     "scanner_link",
+    "find_hide",
+    "ble_unhide",
 )
 
 
@@ -308,7 +310,7 @@ def _post_case(name: str, service: Service, app: FastAPI) -> tuple[str, dict[str
         with service.lock:
             sid = int(service.conn.execute("SELECT id FROM ble_scanner").fetchone()[0])
         return f"/status/scanners/{sid}/link", {"device_id": str(dev.id)}
-    if name in ("find_claim", "ble_unclaim"):
+    if name in ("find_claim", "ble_unclaim", "find_hide", "ble_unhide"):
         return _ble_case(name, service, app, dev.id)
     assert name == "undo"
     batch = service.update_device("system", dev.id, {"owner": "Sam"})
@@ -319,7 +321,7 @@ def _ble_case(
     name: str, service: Service, app: FastAPI, device_id: int
 ) -> tuple[str, dict[str, str]]:
     ident = Identity("address", "00:00:5e:00:53:01")
-    if name == "find_claim":
+    if name in ("find_claim", "find_hide"):
 
         class _Agg:
             def candidates(self) -> list[Candidate]:
@@ -329,8 +331,19 @@ def _ble_case(
         class _Runtime:
             aggregator = _Agg()
 
+            def is_hidden(self, identity: Identity) -> bool:
+                return False
+
+            def vendor(self, address: str) -> str | None:
+                return None
+
         app.state.bluetooth = _Runtime()
+        if name == "find_hide":
+            return "/find/hide", {"identity": ident.key()}
         return "/find/claim", {"identity": ident.key(), "device_id": str(device_id)}
+    if name == "ble_unhide":
+        hidden_id, _ = service.hide_ble("user", ident, "Tag")
+        return f"/status/ble-hidden/{hidden_id}/unhide", {}
     service.claim_ble("user", ident, device_id=device_id)
     with service.lock:
         iid = int(service.conn.execute("SELECT id FROM ble_identity").fetchone()[0])

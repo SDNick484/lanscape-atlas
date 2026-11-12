@@ -14,10 +14,11 @@ from fastapi.testclient import TestClient
 
 from conftest import FixedClock
 from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, Candidate, MinuteRow
-from lanscape_atlas.bluetooth.match import Identity
+from lanscape_atlas.bluetooth.match import Identity, hidden_digest
 from lanscape_atlas.collectors.bluetooth_ha import ClientStatus
 from lanscape_atlas.config import Settings
 from lanscape_atlas.service import UndoConflict
+from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.web.app import create_app
 
 TOKEN = "test-api-token-123"
@@ -34,19 +35,41 @@ class StubAggregator:
         return list(self.items)
 
 
+VENDOR = "Example Vendor"
+
+
 class StubRuntime:
-    def __init__(self, items: list[Candidate], connected: bool = True) -> None:
+    """The runtime surface the web layer uses. With ``db``, ``is_hidden`` reads the hidden
+    list live (the real runtime reloads it on ``change.applied``)."""
+
+    def __init__(
+        self,
+        items: list[Candidate],
+        connected: bool = True,
+        db: sqlite3.Connection | None = None,
+    ) -> None:
         self.aggregator = StubAggregator(items)
         self._connected = connected
+        self._db = db
 
     def status(self) -> ClientStatus:
         return ClientStatus(self._connected, None, None)
 
+    def is_hidden(self, identity: Identity) -> bool:
+        if self._db is None:
+            return False
+        return hidden_digest(bq.ble_salt(self._db), identity) in bq.hidden_digests(self._db)
 
-def candidate(clock: FixedClock, address: str = ADDR) -> Candidate:
+    def vendor(self, address: str) -> str | None:
+        return VENDOR if address == ADDR else None
+
+
+def candidate(
+    clock: FixedClock, address: str = ADDR, rssi: int = -55, name: str | None = "Tag"
+) -> Candidate:
     now = clock()
     return Candidate(
-        Identity("address", address), "Tag", -55, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
+        Identity("address", address), name, rssi, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
     )
 
 
@@ -54,7 +77,7 @@ def candidate(clock: FixedClock, address: str = ADDR) -> Candidate:
 def app(tmp_path: Path, db: sqlite3.Connection, clock: FixedClock) -> FastAPI:
     settings = Settings(data_dir=tmp_path, allowed_hosts=("testserver",))
     app = create_app(settings, conn=db, clock=clock, start_background=False)
-    app.state.bluetooth = StubRuntime([candidate(clock)])
+    app.state.bluetooth = StubRuntime([candidate(clock)], db=db)
     return app
 
 
@@ -106,7 +129,46 @@ def test_find_row_without_sightings_has_null_last(
 
 def test_candidates_empty_without_ha(client: TestClient, app: FastAPI) -> None:
     app.state.bluetooth = None
-    assert client.get("/api/v1/ble/candidates").json() == {"connected": None, "candidates": []}
+    assert client.get("/api/v1/ble/candidates").json() == {
+        "connected": None,
+        "min_rssi": -80,
+        "weak_hidden": 0,
+        "candidates": [],
+    }
+
+
+WEAK = "00:00:5e:00:53:02"
+STRONG = "00:00:5e:00:53:03"
+
+
+def test_candidates_strongest_first_weak_hidden(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    app.state.bluetooth = StubRuntime(
+        [candidate(clock, WEAK, -90), candidate(clock), candidate(clock, STRONG, -40)]
+    )
+    body = client.get("/api/v1/ble/candidates").json()
+    assert [c["identity"] for c in body["candidates"]] == [f"address:{STRONG}", KEY]
+    assert (body["min_rssi"], body["weak_hidden"]) == (-80, 1)
+    body = client.get("/api/v1/ble/candidates", params={"include_weak": "true"}).json()
+    assert [c["identity"] for c in body["candidates"]] == [
+        f"address:{STRONG}",
+        KEY,
+        f"address:{WEAK}",
+    ]
+    assert body["weak_hidden"] == 0
+
+
+def test_weak_candidate_can_still_be_claimed(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    app.state.bluetooth = StubRuntime([candidate(clock, WEAK, -95)])
+    r = client.post(
+        "/api/v1/ble/claim",
+        json={"identity": f"address:{WEAK}", "new": {"name": "Remote", "type": "remote"}},
+    )
+    assert r.status_code == 200, r.text
+    assert db.execute("select value from ble_identity").fetchone()[0] == WEAK
 
 
 def test_candidates_listed(client: TestClient) -> None:
@@ -252,6 +314,9 @@ def test_ble_routes_require_token(
         ("delete", "/api/v1/ble/identities/1", None),
         ("get", "/api/v1/ble/scanners", None),
         ("put", "/api/v1/ble/scanners/1/device", {"device_id": None}),
+        ("post", "/api/v1/ble/hide", {"identity": KEY}),
+        ("get", "/api/v1/ble/hidden", None),
+        ("delete", "/api/v1/ble/hidden/1", None),
     ]
     with TestClient(app) as c:
         for method, path, body in calls:
@@ -278,3 +343,88 @@ def test_undo_conflict_409_includes_reason(client: TestClient, app: FastAPI) -> 
     }
     r2 = client.get("/api/v1/_boom2")
     assert r2.status_code == 409 and r2.json() == {"detail": "conflict", "conflicting": [3, 4]}
+
+
+# ------------------------------------------------------------------ Not mine
+
+
+def _identities(body: dict[str, Any]) -> list[str]:
+    return [c["identity"] for c in body["candidates"]]
+
+
+def test_hide_list_unhide(client: TestClient, db: sqlite3.Connection) -> None:
+    r = client.post("/api/v1/ble/hide", json={"identity": KEY})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["label"] == "Tag" and body["id"] > 0 and body["batch_id"] > 0
+    actor = db.execute("select actor from batch where id = ?", (body["batch_id"],))
+    assert actor.fetchone()[0] == "user"
+    assert _identities(client.get("/api/v1/ble/candidates").json()) == []
+    assert client.get("/api/v1/ble/hidden").json() == [
+        {"id": body["id"], "label": "Tag", "hidden_at": "2026-01-01T00:00:00Z"}
+    ]
+    r = client.delete(f"/api/v1/ble/hidden/{body['id']}")
+    assert r.status_code == 200 and r.json()["batch_id"] > body["batch_id"]
+    assert client.get("/api/v1/ble/hidden").json() == []
+    assert _identities(client.get("/api/v1/ble/candidates").json()) == [KEY]
+    assert client.delete(f"/api/v1/ble/hidden/{body['id']}").status_code == 404
+    assert client.delete("/api/v1/ble/hidden/9999").status_code == 404
+
+
+def test_hidden_weak_candidate_not_counted(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    app.state.bluetooth = StubRuntime(
+        [candidate(clock), candidate(clock, WEAK, -95), candidate(clock, STRONG, -99)], db=db
+    )
+    assert client.post("/api/v1/ble/hide", json={"identity": f"address:{WEAK}"}).status_code == 200
+    body = client.get("/api/v1/ble/candidates").json()
+    assert _identities(body) == [KEY] and body["weak_hidden"] == 1
+    body = client.get("/api/v1/ble/candidates", params={"include_weak": "true"}).json()
+    assert _identities(body) == [KEY, f"address:{STRONG}"]
+
+
+def test_hide_label_falls_back_to_vendor_then_placeholder(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    app.state.bluetooth = StubRuntime(
+        [candidate(clock, name=None), candidate(clock, WEAK, name=None)], db=db
+    )
+    assert client.post("/api/v1/ble/hide", json={"identity": KEY}).json()["label"] == VENDOR
+    r = client.post("/api/v1/ble/hide", json={"identity": f"address:{WEAK}"})
+    assert r.json()["label"] == "Unnamed device"
+
+
+def test_hide_errors(client: TestClient, app: FastAPI) -> None:
+    other = Identity("address", "00:00:5e:00:53:09").key()
+    r = client.post("/api/v1/ble/hide", json={"identity": other})
+    assert r.status_code == 404 and "no such candidate" in r.text
+    assert client.post("/api/v1/ble/hide", json={"identity": "nonsense"}).status_code == 422
+    assert client.post("/api/v1/ble/hide", json={}).status_code == 422
+    extra = {"identity": KEY, "label": "mine"}
+    assert client.post("/api/v1/ble/hide", json=extra).status_code == 422
+    assert client.post("/api/v1/ble/hide", json={"identity": KEY}).status_code == 200
+    r = client.post("/api/v1/ble/hide", json={"identity": KEY})  # still heard, already hidden
+    assert r.status_code == 422 and "already hidden" in r.text
+    app.state.bluetooth = None
+    r = client.post("/api/v1/ble/hide", json={"identity": KEY})
+    assert r.status_code == 404 and "no such candidate" in r.text
+
+
+def test_hide_claimed_is_422(
+    client: TestClient, app: FastAPI, make_device: Callable[..., int]
+) -> None:
+    app.state.service.claim_ble("user", Identity("address", ADDR), device_id=make_device())
+    r = client.post("/api/v1/ble/hide", json={"identity": KEY})
+    assert r.status_code == 422 and "claimed" in r.text
+
+
+def test_claim_of_hidden_candidate_unhides_it(
+    client: TestClient, make_device: Callable[..., int], db: sqlite3.Connection
+) -> None:
+    client.post("/api/v1/ble/hide", json={"identity": KEY})
+    d = make_device(name="Keys")
+    r = client.post("/api/v1/ble/claim", json={"identity": KEY, "device_id": d})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/v1/ble/hidden").json() == []
+    assert db.execute("select device_id from ble_identity").fetchone()[0] == d

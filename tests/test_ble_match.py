@@ -230,3 +230,32 @@ def test_parse_advert_keeps_ha_time() -> None:
     assert adv is not None and adv.time == 1767225600.25
     adv = parse_advert(_raw(time=1767225600))  # an int is fine too
     assert adv is not None and adv.time == 1767225600.0 and isinstance(adv.time, float)
+
+
+# ------------------------------------------------------------- hidden digest
+
+
+def test_hidden_digest_is_hmac_sha256_of_the_key() -> None:
+    import hashlib
+    import hmac
+
+    from lanscape_atlas.bluetooth.match import hidden_digest
+
+    salt = bytes(range(32))
+    ident = Identity("address", "00:00:5e:00:53:01")
+    want = hmac.new(salt, b"address:00:00:5e:00:53:01", hashlib.sha256).hexdigest()
+    assert hidden_digest(salt, ident) == want
+    assert len(want) == 64 and ident.value not in want
+
+
+def test_hidden_digest_depends_on_salt_and_identity() -> None:
+    from lanscape_atlas.bluetooth.match import hidden_digest
+
+    a = Identity("address", "00:00:5e:00:53:01")
+    b = Identity("address", "00:00:5e:00:53:02")
+    beacon = Identity("ibeacon", f"{UUID}/1/2")
+    s1, s2 = b"\x01" * 32, b"\x02" * 32
+    assert hidden_digest(s1, a) == hidden_digest(s1, Identity("address", a.value))
+    assert hidden_digest(s1, a) != hidden_digest(s2, a)
+    assert hidden_digest(s1, a) != hidden_digest(s1, b)
+    assert hidden_digest(s1, beacon) != hidden_digest(s1, a)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
 import re
 import uuid
@@ -55,6 +57,11 @@ class Identity:
         if kind == "ibeacon":
             return cls("ibeacon", _canonical_value("ibeacon", value))
         raise ValueError(f"invalid identity key: {key!r}")
+
+
+def hidden_digest(salt: bytes, identity: Identity) -> str:
+    """The salted digest a hidden ("Not mine") identity is stored as: HMAC-SHA256 of its key."""
+    return hmac.new(salt, identity.key().encode(), hashlib.sha256).hexdigest()
 
 
 def _canonical_value(kind: str, value: str) -> str:

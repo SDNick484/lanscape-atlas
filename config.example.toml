@@ -32,10 +32,13 @@ use_ssl = true
 # payload changes, so each re-subscribe replays HA's latest advert per device (a snapshot);
 # "last heard" is accurate to about one snapshot interval. Keep it at 30 or below (the
 # "steady" badge needs a sighting in 48 of the last 60 minutes; at 60 snapshots drift
-# against minute boundaries and steady devices can look intermittent).
+# against minute boundaries and steady devices can look intermittent). Candidates whose best
+# signal is below candidate_min_rssi (dBm, -127..0) are listed only on request: far-away
+# devices are usually a neighbour's.
 [bluetooth]
 retention_days = 14
 snapshot_s = 30
+candidate_min_rssi = -80
 
 [collectors.asusrouter]
 enabled = true

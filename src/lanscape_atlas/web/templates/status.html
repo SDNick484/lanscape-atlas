@@ -57,4 +57,27 @@
 </table>
 </div>
 {% endif %}
+{% if hidden %}
+<h2>Hidden Bluetooth devices</h2>
+<p class="muted">Marked “Not mine” on Find, so they are no longer listed as candidates. Unhide one to list it again.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Device</th><th>Hidden</th><th></th></tr></thead>
+  <tbody>
+  {% for h in hidden %}
+  <tr id="hidden-{{ h.id }}">
+    <td>{{ h.label }}</td>
+    <td class="mono">{{ h.hidden_at|ts }}</td>
+    <td>
+      <form class="inline" method="post" action="{{ root }}/status/ble-hidden/{{ h.id }}/unhide">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">Unhide</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 {% endblock %}

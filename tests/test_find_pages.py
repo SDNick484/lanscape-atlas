@@ -15,9 +15,10 @@ from fastapi.testclient import TestClient
 
 from conftest import FixedClock
 from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, Candidate, MinuteRow
-from lanscape_atlas.bluetooth.match import Identity
+from lanscape_atlas.bluetooth.match import Identity, hidden_digest
 from lanscape_atlas.collectors.bluetooth_ha import ClientStatus
 from lanscape_atlas.config import Settings
+from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.web.app import create_app
 from lanscape_atlas.web.ble_api import ago
 
@@ -35,22 +36,36 @@ class StubAggregator:
 
 
 class StubRuntime:
+    """With ``db``, ``is_hidden`` reads the hidden list live (the runtime reloads it)."""
+
     def __init__(
         self,
         items: list[Candidate],
         status: ClientStatus | None = None,
+        db: sqlite3.Connection | None = None,
     ) -> None:
         self.aggregator = StubAggregator(items)
         self._status = status or ClientStatus(True, None, None)
+        self._db = db
 
     def status(self) -> ClientStatus:
         return self._status
 
+    def is_hidden(self, identity: Identity) -> bool:
+        if self._db is None:
+            return False
+        return hidden_digest(bq.ble_salt(self._db), identity) in bq.hidden_digests(self._db)
 
-def cand(clock: FixedClock, name: str | None = "Tag", address: str = ADDR) -> Candidate:
+    def vendor(self, address: str) -> str | None:
+        return None
+
+
+def cand(
+    clock: FixedClock, name: str | None = "Tag", address: str = ADDR, rssi: int = -55
+) -> Candidate:
     now = clock()
     return Candidate(
-        Identity("address", address), name, -55, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
+        Identity("address", address), name, rssi, SCANNER, now - timedelta(minutes=5), now, 7, 2.5
     )
 
 
@@ -58,7 +73,7 @@ def cand(clock: FixedClock, name: str | None = "Tag", address: str = ADDR) -> Ca
 def app(tmp_path: Path, db: sqlite3.Connection, clock: FixedClock) -> FastAPI:
     settings = Settings(data_dir=tmp_path, allowed_hosts=("testserver",))
     app = create_app(settings, conn=db, clock=clock, start_background=False)
-    app.state.bluetooth = StubRuntime([cand(clock)])
+    app.state.bluetooth = StubRuntime([cand(clock)], db=db)
     return app
 
 
@@ -529,3 +544,167 @@ def test_candidate_scanner_shown_by_name_and_room(
         f'<span class="mono">{unknown}</span>',
     ]
     assert f'title="{SCANNER}"' in html  # the address is still there on hover
+
+
+def test_candidates_sorted_by_signal_and_weak_behind_a_link(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    weak, strong = "00:00:5e:00:53:02", "00:00:5e:00:53:03"
+    app.state.bluetooth = StubRuntime(
+        [cand(clock, "Far", weak, -91), cand(clock), cand(clock, "Near", strong, -42)]
+    )
+    html = client.get("/find").text
+    assert f"address:{weak}" not in html
+    assert html.index(f"address:{strong}") < html.index(KEY)
+    assert "-42 dBm" in html and "-55 dBm" in html
+    assert 'href="/find?weak=1"' in html and "Show 1 weak" in html
+    shown = client.get("/find", params={"weak": "1"}).text
+    assert shown.index(KEY) < shown.index(f"address:{weak}")
+    assert "-91 dBm" in shown and 'href="/find"' in shown and "Hide weak" in shown
+
+
+def test_no_weak_link_when_nothing_is_weak(client: TestClient) -> None:
+    html = client.get("/find").text
+    assert "Show 0 weak" not in html and "weak=1" not in html
+
+
+def test_claim_error_in_weak_view_keeps_the_weak_candidate(
+    client: TestClient, app: FastAPI, clock: FixedClock
+) -> None:
+    weak = "00:00:5e:00:53:02"
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", weak, -91)])
+    page = client.get("/find", params={"weak": "1"}).text
+    assert 'name="weak" value="1"' in page  # the claim form carries the view
+    r = _post(client, "/find/claim", {"identity": f"address:{weak}", "weak": "1"})
+    assert r.status_code == 422
+    assert f"address:{weak}" in r.text and "Hide weak" in r.text
+    assert "Claim the selected candidate" in r.text
+
+
+def test_only_weak_candidates_says_so(client: TestClient, app: FastAPI, clock: FixedClock) -> None:
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", "00:00:5e:00:53:02", -91)])
+    html = client.get("/find").text
+    assert "No candidates at or above -80 dBm." in html and "No candidates right now." not in html
+
+
+def test_search_keeps_the_weak_view(client: TestClient, app: FastAPI, clock: FixedClock) -> None:
+    app.state.bluetooth = StubRuntime([cand(clock, "Far", "00:00:5e:00:53:02", -91)])
+    html = client.get("/find", params={"weak": "1"}).text
+    search_form = html[html.index('role="search"') - 200 : html.index("</form>")]
+    assert 'name="weak" value="1"' in search_form
+
+
+# ------------------------------------------------------------------- Not mine
+
+HIDE_FLASH = "Hidden Tag. Undo it from History or the Status page."
+WEAK_ADDR = "00:00:5e:00:53:09"
+
+
+def _candidate_keys(html: str) -> list[str]:
+    return re.findall(r'type="radio" name="identity" value="([^"]+)"', html)
+
+
+def test_not_mine_button_per_candidate_outside_the_claim_form(client: TestClient) -> None:
+    html = client.get("/find").text
+    # One separate hide form; each row's button submits it via form=, so the claim form's
+    # radios and fields (and its Enter-key default button) are untouched.
+    assert html.count('id="hide-form"') == 1
+    assert 'action="/find/hide"' in html
+    claim = html[html.index('id="claim-form"') :]
+    assert "<form" not in claim[5 : claim.index("</form>")]  # no nested form
+    buttons = re.findall(r"<button[^>]*>Not mine</button>", html)
+    assert len(buttons) == 1
+    assert 'form="hide-form"' in buttons[0] and f'value="{KEY}"' in buttons[0]
+    assert 'name="identity"' in buttons[0]
+    # The claim form's default (first) submit button is still Claim.
+    first_submit = re.search(r'<button type="submit"(?![^>]*form=)[^>]*>([^<]+)<', claim)
+    assert first_submit is not None and first_submit.group(1) == "Claim"
+
+
+def test_not_mine_flow(client: TestClient, app: FastAPI, db: sqlite3.Connection) -> None:
+    r = client.post("/find/hide", data={"identity": KEY}, follow_redirects=False)
+    assert r.status_code == 403
+    assert db.execute("select count(*) from ble_hidden").fetchone()[0] == 0
+    r = _post(client, "/find/hide", {"identity": KEY})
+    assert r.status_code == 303
+    hidden_id = db.execute("select id from ble_hidden").fetchone()[0]
+    assert r.headers["location"] == f"/find?hidden={hidden_id}"
+    page = client.get(r.headers["location"]).text
+    assert HIDE_FLASH in page
+    assert KEY not in page and "No candidates right now." in page
+    actor = db.execute("select actor from batch order by id desc limit 1").fetchone()[0]
+    assert actor == "user"
+
+
+def test_not_mine_in_weak_view_returns_to_weak_view(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    weak_key = f"address:{WEAK_ADDR}"
+    app.state.bluetooth = StubRuntime([cand(clock), cand(clock, "Far", WEAK_ADDR, -95)], db=db)
+    html = client.get("/find?weak=1").text
+    hide_form = html[html.index('id="hide-form"') :]
+    assert '<input type="hidden" name="weak" value="1">' in hide_form[: hide_form.index("</form>")]
+    r = _post(client, "/find/hide", {"identity": weak_key, "weak": "1"})
+    assert r.status_code == 303
+    hidden_id = db.execute("select id from ble_hidden").fetchone()[0]
+    assert r.headers["location"] == f"/find?weak=1&hidden={hidden_id}"
+    page = client.get(r.headers["location"]).text
+    assert "Hidden Far." in page
+    assert _candidate_keys(page) == [KEY] and weak_key not in page
+    assert "Hide weak" in page  # still the weak view
+    # Hidden weak devices are not counted behind the "Show N weak" link.
+    assert "Show 1 weak" not in client.get("/find").text
+
+
+def test_not_mine_stale_or_already_hidden_is_422(
+    client: TestClient, app: FastAPI, db: sqlite3.Connection
+) -> None:
+    r = _post(client, "/find/hide", {"identity": "address:00:00:5e:00:53:42"})
+    assert r.status_code == 422 and "no longer in range; nothing was hidden" in r.text
+    r = _post(client, "/find/hide", {"identity": ""})
+    assert r.status_code == 422
+    assert _post(client, "/find/hide", {"identity": KEY}).status_code == 303
+    r = _post(client, "/find/hide", {"identity": KEY})  # double submit
+    assert r.status_code == 422 and "already hidden" in r.text
+    assert db.execute("select count(*) from ble_hidden").fetchone()[0] == 1
+
+
+def test_hidden_flash_for_unknown_id_is_omitted(client: TestClient) -> None:
+    page = client.get("/find?hidden=77").text
+    assert "Hidden " not in page
+    assert client.get("/find?hidden=0").status_code == 422
+
+
+def test_claim_form_still_works_with_not_mine_buttons(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection, make_device
+) -> None:
+    other = "00:00:5e:00:53:07"
+    app.state.bluetooth = StubRuntime([cand(clock), cand(clock, "Other", other)], db=db)
+    page = client.get("/find").text
+    assert page.count(">Not mine</button>") == 2
+    d = make_device(name="Keys", type="tag")
+    r = _post(client, "/find/claim", {"identity": f"address:{other}", "device_id": str(d)})
+    assert r.status_code == 303 and r.headers["location"] == f"/find?claimed={d}"
+    assert db.execute("select value from ble_identity").fetchone()[0] == other
+    assert db.execute("select count(*) from ble_hidden").fetchone()[0] == 0
+
+
+def test_status_lists_hidden_and_unhides(
+    client: TestClient, app: FastAPI, clock: FixedClock, db: sqlite3.Connection
+) -> None:
+    assert "Hidden Bluetooth devices" not in client.get("/status").text
+    svc = app.state.service
+    hidden_id, _ = svc.hide_ble("user", Identity("address", ADDR), "Neighbour <tag>")
+    html = client.get("/status").text
+    assert "Hidden Bluetooth devices" in html
+    assert "Neighbour &lt;tag&gt;" in html and "2026-01-01 00:00" in html
+    assert f'action="/status/ble-hidden/{hidden_id}/unhide"' in html
+    r = client.post(f"/status/ble-hidden/{hidden_id}/unhide", follow_redirects=False)
+    assert r.status_code == 403
+    r = _post(client, f"/status/ble-hidden/{hidden_id}/unhide", {})
+    assert r.status_code == 303 and r.headers["location"] == "/status?unhidden=1"
+    page = client.get(r.headers["location"]).text
+    assert "Unhidden." in page and "Hidden Bluetooth devices" not in page
+    assert db.execute("select count(*) from ble_hidden").fetchone()[0] == 0
+    assert _candidate_keys(client.get("/find").text) == [KEY]
+    assert _post(client, f"/status/ble-hidden/{hidden_id}/unhide", {}).status_code == 404

@@ -32,6 +32,8 @@ class BluetoothSettings:
     retention_days: int = 14
     flush_s: int = 60
     snapshot_s: int = 30  # re-subscribe interval: HA replays its advert history each time
+    # Candidates whose best RSSI is below this (dBm) are listed only on request.
+    candidate_min_rssi: int = -80
 
 
 @dataclass(frozen=True)
@@ -134,7 +136,13 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
         retention_days=_get(bt, "retention_days", int, 14, "bluetooth."),
         flush_s=_get(bt, "flush_s", int, 60, "bluetooth."),
         snapshot_s=_get(bt, "snapshot_s", int, 30, "bluetooth."),
+        candidate_min_rssi=_get(bt, "candidate_min_rssi", int, -80, "bluetooth."),
     )
+    if not -127 <= bluetooth.candidate_min_rssi <= 0:
+        raise ValueError(
+            "config key 'bluetooth.candidate_min_rssi' must be between -127 and 0 (dBm), "
+            f"got {bluetooth.candidate_min_rssi}"
+        )
     for key, val in (
         ("retention_days", bluetooth.retention_days),
         ("flush_s", bluetooth.flush_s),

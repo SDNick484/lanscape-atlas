@@ -45,6 +45,7 @@ EXPECTED = {
     "where_is",
     "ble_candidates",
     "claim_ble",
+    "hide_ble",
 }
 
 
@@ -132,7 +133,7 @@ async def test_tool_names_exact(app: FastAPI) -> None:
     async with _session(app) as client:
         tools = (await client.list_tools()).tools
         assert {t.name for t in tools} == EXPECTED
-        assert len(tools) == 15
+        assert len(tools) == 16
         assert set(TOOL_NAMES) == EXPECTED
         for t in tools:
             assert t.description and len(t.description) > 20, t.name
@@ -614,12 +615,13 @@ def _with_candidate(app: FastAPI, clock: FixedClock, *, connected: bool = True) 
 
 
 def test_tool_names_include_ble() -> None:
-    assert {"where_is", "ble_candidates", "claim_ble"} <= set(TOOL_NAMES)
+    assert {"where_is", "ble_candidates", "claim_ble", "hide_ble"} <= set(TOOL_NAMES)
     from lanscape_atlas.mcp_server import INSTRUCTIONS
 
-    for name in ("where_is", "ble_candidates", "claim_ble"):
+    for name in ("where_is", "ble_candidates", "claim_ble", "hide_ble"):
         assert name in INSTRUCTIONS
     assert "rotate" in INSTRUCTIONS
+    assert "neighbour" in INSTRUCTIONS
 
 
 async def test_where_is(app: FastAPI, clock: FixedClock) -> None:
@@ -659,12 +661,31 @@ async def test_where_is(app: FastAPI, clock: FixedClock) -> None:
 
 async def test_ble_candidates(app: FastAPI, clock: FixedClock) -> None:
     async with _session(app) as c:
-        assert _data(await _call(c, "ble_candidates")) == {"connected": None, "candidates": []}
+        assert _data(await _call(c, "ble_candidates")) == {
+            "connected": None,
+            "min_rssi": -80,
+            "weak_hidden": 0,
+            "candidates": [],
+        }
         _with_candidate(app, clock)
         data = _data(await _call(c, "ble_candidates"))
         assert data["connected"] is True
         assert data["candidates"][0]["identity"] == BLE_KEY
         assert data["candidates"][0]["last_heard"] == "2026-01-01T00:00:00Z"
+
+
+async def test_ble_candidates_weak_filter(app: FastAPI, clock: FixedClock) -> None:
+    from test_ble_api import StubRuntime, candidate
+
+    weak = "00:00:5e:00:53:02"
+    app.state.bluetooth = StubRuntime([candidate(clock, weak, -90), candidate(clock)])
+    async with _session(app) as c:
+        data = _data(await _call(c, "ble_candidates"))
+        assert [x["identity"] for x in data["candidates"]] == [BLE_KEY]
+        assert data["weak_hidden"] == 1
+        data = _data(await _call(c, "ble_candidates", include_weak=True))
+        assert [x["identity"] for x in data["candidates"]] == [BLE_KEY, f"address:{weak}"]
+        assert data["weak_hidden"] == 0
 
 
 async def test_claim_ble_actor_is_claude(app: FastAPI, clock: FixedClock) -> None:
@@ -694,4 +715,34 @@ async def test_claim_ble_errors(app: FastAPI, clock: FixedClock) -> None:
         assert both.is_error and "exactly one" in _text(both)
         app.state.bluetooth = None
         gone = await _call(c, "claim_ble", candidate=BLE_KEY, new_name="x")
+        assert gone.is_error and _text(gone) == "no such candidate"
+
+
+async def test_hide_ble_actor_is_claude_and_undoable(app: FastAPI, clock: FixedClock) -> None:
+    from test_ble_api import StubRuntime, candidate
+
+    db = app.state.service.conn
+    app.state.bluetooth = StubRuntime([candidate(clock)], db=db)
+    async with _session(app) as c:
+        r = _data(await _call(c, "hide_ble", candidate=BLE_KEY))
+        assert r["label"] == "Tag" and r["id"] > 0
+        actor = db.execute("select actor from batch where id = ?", (r["batch_id"],))
+        assert actor.fetchone()[0] == "claude"
+        assert _data(await _call(c, "ble_candidates"))["candidates"] == []
+        again = await _call(c, "hide_ble", candidate=BLE_KEY)
+        assert again.is_error and _text(again) == "already hidden"
+        _data(await _call(c, "undo", batch_id=r["batch_id"]))
+        listed = _data(await _call(c, "ble_candidates"))["candidates"]
+        assert [x["identity"] for x in listed] == [BLE_KEY]
+
+
+async def test_hide_ble_errors(app: FastAPI, clock: FixedClock) -> None:
+    _with_candidate(app, clock)
+    async with _session(app) as c:
+        bad = await _call(c, "hide_ble", candidate="address:00:00:5e:00:53:09")
+        assert bad.is_error and _text(bad) == "no such candidate"
+        junk = await _call(c, "hide_ble", candidate="nonsense")
+        assert junk.is_error
+        app.state.bluetooth = None
+        gone = await _call(c, "hide_ble", candidate=BLE_KEY)
         assert gone.is_error and _text(gone) == "no such candidate"
