@@ -355,19 +355,27 @@ virtualenv, backs up the database (last three kept) when the code changed, rende
 and kept afterwards unless you set `API_TOKEN`; the script never prints it.
 
 Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
-run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If
-`config.toml` was edited by hand, the script stops before replacing it, leaves it
-unchanged, and lists the settings that would be lost or changed by name (never their
-values), each with the `setup.env` key that controls it. Move those into `setup.env`
-and re-run, or re-run with `--discard-config-edits` to overwrite them. A `config.toml`
-written by an older script (no `# sha256:` line) counts as hand-edited only if it has
-a setting the new render would drop, or a different value for a setting that
-`setup.env` does not set; values that `setup.env` sets (including the script's defaults
-such as `BIND_PORT`) simply follow `setup.env`. `--dry-run` reports a hand edit too.
+run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If a hand
+edit to `config.toml` would be lost or changed by the new render, the script stops
+before replacing it, leaves it unchanged, and lists those settings by name (never their
+values), each with the `setup.env` key that controls it. Move them into `setup.env` and
+re-run, or re-run with `--discard-config-edits` to overwrite them. If every setting in
+the edited file already equals what `setup.env` renders (for example, you copied a
+hand-added table into `setup.env`, or only added a comment), the file is simply
+replaced, with a backup.
+
+A `config.toml` written by an older script (no `# sha256:` line) counts as hand-edited
+if it has a setting the new render would drop, or a different value for a key that
+`setup.env` leaves unset or empty. An unset key falls back to the script's default
+(for example `BIND_PORT=8720`), and that default does not override your file; set the key
+in `setup.env` to change the value. `--dry-run` reports a hand edit too.
+
 A file with the `# sha256:` line is checked right after preflight, before the service is
-stopped; an older file is checked when the new `config.toml` is rendered. If the run
-stops after the service was stopped, the script starts it again with your unchanged
-`config.toml` (or, if that fails, tells you to run `rc-service lanscape-atlas start`).
+stopped. Every file is checked again right after the new code is checked out, against
+its `config.example.toml`, before anything is installed. If the run stops after the
+service was stopped, the script starts the old, untouched install again with your
+unchanged `config.toml` (or, if that fails, tells you to run
+`rc-service lanscape-atlas start`).
 
 Before each replace, the current file is copied to
 `/var/lib/lanscape-atlas/config.toml.YYYYmmdd-HHMMSS` (UTC, mode 0600); the newest five
