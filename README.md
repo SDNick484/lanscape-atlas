@@ -109,7 +109,8 @@ twice. "Last heard" is therefore accurate to about one snapshot interval.
 without a token is a configuration error. How you turn it on depends on how you installed.
 
 **Scripted install (`deploy/setup-alpine.sh`).** The script re-renders `config.toml` from
-`setup.env` on every run, so a hand edit to `config.toml` is overwritten. Add the Home
+`setup.env` on every run, and stops if `config.toml` was edited by hand (see *Scripted
+install and upgrade*). Add the Home
 Assistant keys to `/etc/lanscape-atlas/setup.env` (mode 0600) with `vim` and re-run the
 script:
 
@@ -350,10 +351,24 @@ and logrotate entry; it never upgrades packages or restarts other services.
 Each run stops the service, checks out `--ref` (default `main`), reinstalls into the
 virtualenv, backs up the database (last three kept) when the code changed, renders
 `config.toml` from `setup.env`, migrates, restarts, and finishes with a smoke test of
-`/api/v1/collectors` and `/api/v1/devices`. Edit `setup.env`, not `config.toml`: the
-latter is regenerated on every run (the previous copy is kept as `config.toml.prev`).
-The API token is generated on the first run and kept afterwards unless you set
-`API_TOKEN`; the script never prints it.
+`/api/v1/collectors` and `/api/v1/devices`. The API token is generated on the first run
+and kept afterwards unless you set `API_TOKEN`; the script never prints it.
+
+Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
+run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If
+`config.toml` was edited by hand, the script stops before replacing it, leaves it
+unchanged, and lists the settings that would be lost or changed by name (never their
+values), each with the `setup.env` key that controls it. Move those into `setup.env`
+and re-run, or re-run with `--discard-config-edits` to overwrite them. A `config.toml`
+written by an older script (no `# sha256:` line) counts as hand-edited only if it has
+a setting the new render would drop, or a different value for a setting that
+`setup.env` does not set; values that `setup.env` sets (including the script's defaults
+such as `BIND_PORT`) simply follow `setup.env`. `--dry-run` reports a hand edit too.
+
+Before each replace, the current file is copied to
+`/var/lib/lanscape-atlas/config.toml.YYYYmmdd-HHMMSS` (UTC, mode 0600); the newest five
+are kept. A `config.toml.prev` left by older versions of the script is not touched;
+delete it yourself once you no longer need it.
 
 ### Commands
 

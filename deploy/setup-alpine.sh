@@ -14,11 +14,15 @@
 # /etc/lanscape-atlas/setup.env); see deploy/setup.env.example. That file holds
 # secrets and must never be committed. config.toml is re-rendered from it (and
 # from config.example.toml) on every run, so edit the env file, not config.toml.
+# A hand edit to config.toml stops the run before anything is overwritten (see
+# render_config); --discard-config-edits overwrites it anyway. Each replaced
+# config.toml is first copied to config.toml.YYYYmmdd-HHMMSS (UTC, newest 5 kept).
 #
 # Paths:
 #   /opt/lanscape-atlas/{src,venv}          code (root-owned, read-only to the service)
 #   /etc/lanscape-atlas/                    setup.env, deploy key, known_hosts (root, 0700)
-#   /var/lib/lanscape-atlas/                data, config.toml (lanscape, 0700/0600), backups/
+#   /var/lib/lanscape-atlas/                data, config.toml (lanscape, 0700/0600), backups/,
+#                                           config.toml.YYYYmmdd-HHMMSS (config backups)
 #   /var/log/lanscape-atlas.log             service log (rotated weekly)
 #   /etc/init.d/lanscape-atlas              OpenRC service
 #   /etc/logrotate.d/lanscape-atlas         log rotation
@@ -43,6 +47,10 @@ DATA_DIR=/var/lib/$APP
 CONF=$DATA_DIR/config.toml
 BACKUP_DIR=$DATA_DIR/backups
 BACKUPS_KEPT=3
+CONFIG_BACKUPS_KEPT=5
+# render_config exits with this status when the existing config.toml was edited by hand.
+HAND_EDITED_RC=3
+HAND_EDITED_MSG="config.toml was edited by hand; move these into setup.env, or re-run with --discard-config-edits to overwrite (the current file is left unchanged)"
 LOG_FILE=/var/log/$APP.log
 INIT_FILE=/etc/init.d/$APP
 LOGROTATE_FILE=/etc/logrotate.d/$APP
@@ -53,6 +61,9 @@ ENV_FILE=$DEFAULT_ENV_FILE
 REF_ARG=""
 RENDER_OUT=""
 EXISTING_CONF=""
+CONFIG_HOOK=""
+DISCARD_CONFIG_EDITS=0
+CONF_CHOWN=1
 PROBLEMS=0
 # Carried across the re-exec below so a failure can still say the service was left stopped.
 STOPPED=${LANSCAPE_SETUP_STOPPED:-0}
@@ -121,11 +132,13 @@ trap on_exit EXIT
 
 usage() {
 	cat <<EOF
-Usage: sh setup-alpine.sh [--dry-run] [--env FILE] [--ref REF]
+Usage: sh setup-alpine.sh [--dry-run] [--env FILE] [--ref REF] [--discard-config-edits]
 
   --dry-run    inspect the system and report what would change; change nothing
   --env FILE   settings file (default $DEFAULT_ENV_FILE, root-owned, mode 0600)
   --ref REF    branch, tag or commit to deploy (default: REF from the env file, else main)
+  --discard-config-edits
+               overwrite config.toml even if it was edited by hand (a backup is kept)
   -h, --help   show this help
 EOF
 }
@@ -150,11 +163,17 @@ while [ $# -gt 0 ]; do
 		RENDER_OUT=$2
 		shift
 		;;
-	--existing) # internal (tests): existing config.toml whose api_token is kept
+	--existing) # internal (tests): existing config.toml (api_token kept, checked for hand edits)
 		[ $# -ge 2 ] || die "--existing needs a file"
 		EXISTING_CONF=$2
 		shift
 		;;
+	--write-config) # internal (tests): run the config step against FILE (no chown or app check) and exit
+		[ $# -ge 2 ] || die "--write-config needs a file"
+		CONFIG_HOOK=$2
+		shift
+		;;
+	--discard-config-edits) DISCARD_CONFIG_EDITS=1 ;;
 	-h | --help)
 		usage
 		exit 0
@@ -332,8 +351,20 @@ uses_ssh() {
 # Strings go through json.dumps, whose output is a valid TOML basic string, so
 # passwords with quotes or backslashes cannot break the file. Secrets travel in
 # the environment of this one python process, never on a command line.
+#
+# Line 2 of the result is "# sha256: <hex>", the SHA-256 of everything after it.
+# Before OUT is written, EXISTING (when given) is checked for hand edits:
+#   - it has a sha256 line: hand-edited unless the line is valid and matches;
+#   - it has none (an older script wrote it, or a person did): hand-edited when one
+#     of its settings would be dropped by the new render, or would get a different
+#     value that setup.env does not set in this run (keys the render writes from
+#     setup.env, including the script's defaults such as BIND_PORT, follow setup.env).
+# A hand-edited EXISTING lists the settings it would lose or change, by name only
+# (never values) with the setup.env key for each, and exits $HAND_EDITED_RC without
+# writing OUT; with --discard-config-edits it lists them and carries on.
 render_config() {
-	CFG_OUT=$1 CFG_EXAMPLE=$2 CFG_EXISTING=${3:-} \
+	CFG_OUT=$1 CFG_EXAMPLE=$2 CFG_EXISTING=${3:-} CFG_DISCARD=$DISCARD_CONFIG_EDITS \
+		CFG_HAND_EDITED_RC=$HAND_EDITED_RC \
 		CFG_BIND_HOST=$BIND_HOST CFG_BIND_PORT=$BIND_PORT CFG_SCAN_INTERFACE=$SCAN_INTERFACE \
 		CFG_RETENTION_DAYS=$RETENTION_DAYS CFG_ALLOWED_HOSTS=$ALLOWED_HOSTS CFG_API_TOKEN=$API_TOKEN \
 		CFG_ROUTER_HOST=$ROUTER_HOST CFG_ROUTER_USER=$ROUTER_USER CFG_ROUTER_PASSWORD=$ROUTER_PASSWORD \
@@ -341,6 +372,7 @@ render_config() {
 		CFG_HA_URL=$HA_URL CFG_HA_TOKEN=$HA_TOKEN CFG_HA_VERIFY_TLS=$HA_VERIFY_TLS \
 		CFG_BLE_MIN_RSSI=$BLE_CANDIDATE_MIN_RSSI \
 		CFG_DATA_DIR=$DATA_DIR python3 -I - <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -350,6 +382,26 @@ import tomllib
 
 env = os.environ
 lines = open(env["CFG_EXAMPLE"], encoding="utf-8").read().splitlines()
+HEADER = "# Generated by deploy/setup-alpine.sh from setup.env; edits are overwritten."
+# Every key set_key writes (except data_dir, fixed by this script) -> its setup.env key.
+SETUP_ENV_KEYS = {
+    "bind_host": "BIND_HOST",
+    "bind_port": "BIND_PORT",
+    "scan_interface": "SCAN_INTERFACE",
+    "observation_retention_days": "RETENTION_DAYS",
+    "api_token": "API_TOKEN",
+    "allowed_hosts": "ALLOWED_HOSTS",
+    "router.host": "ROUTER_HOST",
+    "router.username": "ROUTER_USER",
+    "router.password": "ROUTER_PASSWORD",
+    "router.use_ssl": "ROUTER_USE_SSL",
+    "collectors.asusrouter.interval_s": "ASUSROUTER_INTERVAL_S",
+    "home_assistant.url": "HA_URL",
+    "home_assistant.token": "HA_TOKEN",
+    "home_assistant.verify_tls": "HA_VERIFY_TLS",
+    "bluetooth.candidate_min_rssi": "BLE_CANDIDATE_MIN_RSSI",
+}
+written = set()  # dotted keys set_key wrote in this run
 
 
 def lit(value):
@@ -366,16 +418,26 @@ def set_key(section, key, value, commented=False):
             current = header.group(1)
         elif current == section and pattern.match(line):
             lines[i] = f"{key} = {value}"
+            written.add(f"{section}.{key}" if section else key)
             return
     where = f"[{section}]" if section else "the top level"
     sys.exit(f"config.example.toml has no '{key}' in {where}; update deploy/setup-alpine.sh")
 
 
+existing_raw = None  # bytes of the existing config.toml, if any
+existing_cfg = None  # ...parsed, if it is valid TOML
+if env.get("CFG_EXISTING") and os.path.isfile(env["CFG_EXISTING"]):
+    with open(env["CFG_EXISTING"], "rb") as fh:
+        existing_raw = fh.read()
+    try:
+        existing_cfg = tomllib.loads(existing_raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        existing_cfg = None
+
 token = env["CFG_API_TOKEN"]
 source = "from setup.env"
-if not token and env.get("CFG_EXISTING") and os.path.isfile(env["CFG_EXISTING"]):
-    with open(env["CFG_EXISTING"], "rb") as fh:
-        old = tomllib.load(fh).get("api_token", "")
+if not token and existing_cfg is not None:
+    old = existing_cfg.get("api_token", "")
     if isinstance(old, str) and old:
         token, source = old, "kept from the existing config.toml"
 if not token:
@@ -418,8 +480,12 @@ min_rssi = int(env["CFG_BLE_MIN_RSSI"]) if env["CFG_BLE_MIN_RSSI"] else None
 if min_rssi is not None:
     set_key("bluetooth", "candidate_min_rssi", str(min_rssi))
 
-lines.insert(0, "# Generated by deploy/setup-alpine.sh from setup.env; edits are overwritten.")
-text = "\n".join(lines) + "\n"
+unlisted = written - SETUP_ENV_KEYS.keys() - {"data_dir"}
+if unlisted:
+    sys.exit(f"SETUP_ENV_KEYS lacks {sorted(unlisted)}; update deploy/setup-alpine.sh")
+
+body = "\n".join(lines) + "\n"
+text = f"{HEADER}\n# sha256: {hashlib.sha256(body.encode('utf-8')).hexdigest()}\n{body}"
 
 cfg = tomllib.loads(text)
 expected = {
@@ -455,11 +521,142 @@ if cfg.get("home_assistant") != want_ha:
 if min_rssi is not None and cfg["bluetooth"]["candidate_min_rssi"] != min_rssi:
     sys.exit("rendered config.toml does not round-trip: bluetooth.candidate_min_rssi")
 
+
+def flat(table, prefix=""):
+    out = {}
+    for key, value in table.items():
+        if isinstance(value, dict):
+            out.update(flat(value, f"{prefix}{key}."))
+        else:
+            out[f"{prefix}{key}"] = value
+    return out
+
+
+def same(a, b):
+    return type(a) is type(b) and a == b
+
+
+if existing_raw is not None:
+    new_flat = flat(cfg)
+    old_flat = flat(existing_cfg) if existing_cfg is not None else None
+    # Settings of the existing file that the new render would drop or change.
+    changed = (
+        None
+        if old_flat is None
+        else [k for k, v in old_flat.items() if k not in new_flat or not same(v, new_flat[k])]
+    )
+    if re.search(rb"^#\s*sha256:", existing_raw, re.M):
+        parts = existing_raw.split(b"\n", 2)
+        sum_line = re.fullmatch(rb"# sha256: ([0-9a-f]{64})", parts[1]) if len(parts) == 3 else None
+        hand_edited = not (
+            sum_line
+            and parts[0] == HEADER.encode()
+            and sum_line.group(1).decode() == hashlib.sha256(parts[2]).hexdigest()
+        )
+    else:
+        from_env = written - {"data_dir"}
+        hand_edited = changed is None or any(k not in new_flat or k not in from_env for k in changed)
+    if hand_edited:
+        if changed is None:
+            listing = ["(it is not valid TOML, so its settings cannot be listed)"]
+        elif not changed:
+            listing = ["(no setting would be lost or changed: only comments, layout or removed keys differ)"]
+        else:
+            names = [k if re.fullmatch(r"[A-Za-z0-9_.-]+", k) else json.dumps(k) for k in changed]
+            width = max(map(len, names))
+            listing = [
+                f"{name:<{width}}  ({SETUP_ENV_KEYS[k]})" if k in SETUP_ENV_KEYS else f"{name:<{width}}  (no setup.env key)"
+                for k, name in zip(changed, names)
+            ]
+        if env["CFG_DISCARD"] == "1":
+            print("discarding hand edits to config.toml; these settings change (values not shown):")
+            for row in listing:
+                print("  " + row)
+        else:
+            print("config.toml has hand edits; these settings would be lost or changed (values not shown):", file=sys.stderr)
+            for row in listing:
+                print("    " + row, file=sys.stderr)
+            sys.exit(int(env["CFG_HAND_EDITED_RC"]))
+
 fd = os.open(env["CFG_OUT"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as fh:
     fh.write(text)
 print(f"api_token: {source} (it is stored only in config.toml)")
 PY
+}
+
+have_python() { command -v python3 >/dev/null 2>&1; }
+
+# Copy $CONF to $CONF.YYYYmmdd-HHMMSS (same owner, 0600) and keep the newest
+# $CONFIG_BACKUPS_KEPT such copies. config.toml.prev (older scripts) is left alone.
+backup_config() {
+	stamp=$(date -u +%Y%m%d-%H%M%S)
+	dest=$CONF.$stamp
+	n=1
+	while [ -e "$dest" ]; do # two runs in one second
+		dest=$CONF.$stamp-$n
+		n=$((n + 1))
+	done
+	(umask 077 && cp -p "$CONF" "$dest")
+	chmod 0600 "$dest"
+	note "previous config.toml backed up to $dest"
+	printf '%s\n' "$CONF".[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]* |
+		LC_ALL=C sort -r | tail -n +$((CONFIG_BACKUPS_KEPT + 1)) | while IFS= read -r old; do
+		rm -f "$old"
+	done
+}
+
+# update_config EXAMPLE: render config.toml into $CONF, stopping (a problem on
+# --dry-run) if $CONF was edited by hand, unless --discard-config-edits. A changed
+# file is backed up first; an unchanged one is left alone.
+update_config() {
+	example=$1
+	if [ "$DRY_RUN" = 1 ]; then
+		if [ ! -f "$example" ] || ! have_python; then
+			note "(dry-run) config.example.toml or python3 not available yet; skipping the render check"
+			return 0
+		fi
+		tmp=$(mktemp)
+		# Validate the rendering for real, then discard it.
+		rc=0
+		render_config "$tmp" "$example" "$CONF" >/dev/null || rc=$?
+		if [ "$rc" = 0 ]; then
+			if [ ! -f "$CONF" ]; then
+				note "(dry-run) config.toml renders and validates; would write $CONF (0600, $SVC_USER)"
+			elif cmp -s "$tmp" "$CONF"; then
+				note "(dry-run) config.toml renders and validates; $CONF is unchanged"
+			else
+				note "(dry-run) config.toml renders and validates; would back up and replace $CONF"
+			fi
+		elif [ "$rc" = "$HAND_EDITED_RC" ]; then
+			problem "$HAND_EDITED_MSG"
+		else
+			problem "config.toml could not be rendered from $ENV_FILE"
+		fi
+		rm -f "$tmp"
+		return 0
+	fi
+	tmp=$(mktemp "$(dirname "$CONF")/.config.XXXXXX")
+	msg=$(mktemp)
+	rc=0
+	render_config "$tmp" "$example" "$CONF" >"$msg" || rc=$?
+	if [ "$rc" != 0 ]; then
+		rm -f "$tmp" "$msg"
+		[ "$rc" != "$HAND_EDITED_RC" ] || die "$HAND_EDITED_MSG"
+		die "config.toml could not be rendered from $ENV_FILE"
+	fi
+	sed 's/^/    /' "$msg"
+	rm -f "$msg"
+	if [ -f "$CONF" ] && cmp -s "$tmp" "$CONF"; then
+		note "config.toml unchanged"
+		rm -f "$tmp"
+		return 0
+	fi
+	[ ! -f "$CONF" ] || backup_config
+	[ "$CONF_CHOWN" = 0 ] || chown "$SVC_USER:$SVC_USER" "$tmp"
+	chmod 0600 "$tmp"
+	mv -f "$tmp" "$CONF"
+	note "wrote $CONF (0600)"
 }
 
 # --------------------------------------------------------- render-only mode
@@ -473,7 +670,16 @@ if [ "$PROBLEMS" -gt 0 ]; then
 	exit 1
 fi
 if [ -n "$RENDER_OUT" ]; then
-	render_config "$RENDER_OUT" "$SCRIPT_DIR/../config.example.toml" "$EXISTING_CONF"
+	rc=0
+	render_config "$RENDER_OUT" "$SCRIPT_DIR/../config.example.toml" "$EXISTING_CONF" || rc=$?
+	[ "$rc" != "$HAND_EDITED_RC" ] || die "$HAND_EDITED_MSG"
+	exit "$rc"
+fi
+if [ -n "$CONFIG_HOOK" ]; then
+	CONF=$CONFIG_HOOK
+	CONF_CHOWN=0
+	update_config "$SCRIPT_DIR/../config.example.toml"
+	[ "$PROBLEMS" = 0 ] || exit 1
 	exit 0
 fi
 
@@ -495,8 +701,6 @@ version_ge() { # version_ge A B: A >= B for dotted numeric versions
 		exit 0
 	}'
 }
-
-have_python() { command -v python3 >/dev/null 2>&1; }
 
 preflight() {
 	step "Preflight"
@@ -773,39 +977,8 @@ write_config() {
 	step "Configuration"
 	example=$SRC/config.example.toml
 	[ -f "$example" ] || example=$SCRIPT_DIR/../config.example.toml
-	if [ "$DRY_RUN" = 1 ]; then
-		if [ ! -f "$example" ] || ! have_python; then
-			note "(dry-run) config.example.toml or python3 not available yet; skipping the render check"
-			return 0
-		fi
-		tmp=$(mktemp)
-		# Validate the rendering for real, then discard it.
-		if render_config "$tmp" "$example" "$CONF" >/dev/null; then
-			note "(dry-run) config.toml renders and validates; would write $CONF (0600, $SVC_USER)"
-		else
-			problem "config.toml could not be rendered from $ENV_FILE"
-		fi
-		rm -f "$tmp"
-		return 0
-	fi
-	tmp=$(mktemp "$DATA_DIR/.config.XXXXXX")
-	msg=$(mktemp)
-	if ! render_config "$tmp" "$example" "$CONF" >"$msg"; then
-		rm -f "$tmp" "$msg"
-		die "config.toml could not be rendered from $ENV_FILE"
-	fi
-	sed 's/^/    /' "$msg"
-	rm -f "$msg"
-	if [ -f "$CONF" ] && cmp -s "$tmp" "$CONF"; then
-		note "config.toml unchanged"
-		rm -f "$tmp"
-	else
-		[ ! -f "$CONF" ] || (umask 077 && cp -p "$CONF" "$CONF.prev")
-		chown "$SVC_USER:$SVC_USER" "$tmp"
-		chmod 0600 "$tmp"
-		mv -f "$tmp" "$CONF"
-		note "wrote $CONF (0600, $SVC_USER)"
-	fi
+	update_config "$example"
+	[ "$DRY_RUN" = 0 ] || return 0
 	# Load it exactly as the service will: as the service user, through the app's own parser.
 	check_py=$(mktemp)
 	cat >"$check_py" <<'PY'
