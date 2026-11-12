@@ -364,6 +364,10 @@ written by an older script (no `# sha256:` line) counts as hand-edited only if i
 a setting the new render would drop, or a different value for a setting that
 `setup.env` does not set; values that `setup.env` sets (including the script's defaults
 such as `BIND_PORT`) simply follow `setup.env`. `--dry-run` reports a hand edit too.
+A file with the `# sha256:` line is checked right after preflight, before the service is
+stopped; an older file is checked when the new `config.toml` is rendered. If the run
+stops after the service was stopped, the script starts it again with your unchanged
+`config.toml` (or, if that fails, tells you to run `rc-service lanscape-atlas start`).
 
 Before each replace, the current file is copied to
 `/var/lib/lanscape-atlas/config.toml.YYYYmmdd-HHMMSS` (UTC, mode 0600); the newest five

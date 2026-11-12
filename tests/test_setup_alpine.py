@@ -61,9 +61,20 @@ def write_env(tmp_path: Path, data: dict[str, str], mode: int = 0o600) -> Path:
     return path
 
 
-def run(shell: list[str], *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+def run(
+    shell: list[str],
+    *args: str,
+    check: bool = False,
+    env: dict[str, str] | None = None,
+    script: Path = SCRIPT,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [*shell, str(SCRIPT), *args], capture_output=True, text=True, check=check, timeout=60
+        [*shell, str(script), *args],
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=60,
+        env=env,
     )
 
 
@@ -666,3 +677,222 @@ def test_readme_documents_config_hand_edits_and_backups() -> None:
     text = (ROOT / "README.md").read_text()
     assert "--discard-config-edits" in text
     assert "config.toml.YYYYmmdd-HHMMSS" in text
+
+
+# ------------------------------------- early check and restart after a hand-edit stop
+#
+# ``--check-config FILE`` (internal) runs the early check (before the service is stopped)
+# against FILE. rc-service is faked by a script first on PATH; LANSCAPE_SETUP_STOPPED=1 is
+# how the script before a re-exec hands over "I stopped the service".
+
+RESTARTED = "service restarted with your existing config.toml; nothing was overwritten"
+
+
+def check_conf(
+    shell: list[str],
+    tmp_path: Path,
+    data: dict[str, str],
+    conf: Path,
+    *extra: str,
+    env: dict[str, str] | None = None,
+    script: Path = SCRIPT,
+) -> subprocess.CompletedProcess[str]:
+    env_file = write_env(tmp_path, data)
+    args = ["--env", str(env_file), "--check-config", str(conf), *extra]
+    return run(shell, *args, env=env, script=script)
+
+
+def fake_rc_service(tmp_path: Path, status: int = 0, stopped: bool = True) -> dict[str, str]:
+    """Environment with a fake rc-service first on PATH that logs its arguments."""
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir(exist_ok=True)
+    fake = fakebin / "rc-service"
+    fake.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >>"$FAKE_RC_LOG"\nexit {status}\n')
+    fake.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_RC_LOG": str(tmp_path / "rc-service.log"),
+    }
+    if stopped:
+        env["LANSCAPE_SETUP_STOPPED"] = "1"
+    return env
+
+
+def rc_calls(tmp_path: Path) -> list[str]:
+    log = tmp_path / "rc-service.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def hand_edited_conf(shell: list[str], tmp_path: Path, legacy: bool = False) -> Path:
+    conf = conf_path(tmp_path)
+    assert write_conf(shell, tmp_path, BASE_ENV, conf).returncode == 0
+    text = conf.read_text()
+    conf.write_text((strip_checksum(text) if legacy else text) + HAND_HA)
+    return conf
+
+
+def test_main_flow_checks_config_before_stopping_the_service() -> None:
+    main = SCRIPT.read_text().split(
+        "# --------------------------------------------------------------------- main", 1
+    )[1]
+    calls = [line.strip() for line in main.splitlines() if re.fullmatch(r"[a-z_]+", line.strip())]
+    assert (
+        calls.index("preflight") < calls.index("check_config_early") < calls.index("stop_service")
+    )
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_early_check_stops_on_hand_edited_checksummed_config(
+    shell: list[str], tmp_path: Path
+) -> None:
+    conf = hand_edited_conf(shell, tmp_path)
+    edited = conf.read_bytes()
+    proc = check_conf(shell, tmp_path, BASE_ENV, conf)
+    assert proc.returncode != 0
+    assert "config.toml was edited by hand" in proc.stderr
+    assert listed(proc.stderr, "home_assistant.url", "HA_URL"), proc.stderr
+    assert conf.read_bytes() == edited
+    assert os.listdir(conf.parent) == ["config.toml"]
+    assert_no_secrets(proc)
+
+
+@pytest.mark.parametrize("kind", ["clean", "legacy_hand_edited", "absent"])
+def test_early_check_passes_what_it_cannot_or_need_not_stop(kind: str, tmp_path: Path) -> None:
+    if kind == "legacy_hand_edited":  # needs the new render: write_config checks it later
+        conf = hand_edited_conf(["sh"], tmp_path, legacy=True)
+    else:
+        conf = conf_path(tmp_path)
+        if kind == "clean":
+            assert write_conf(["sh"], tmp_path, BASE_ENV, conf).returncode == 0
+    before = conf.read_bytes() if conf.exists() else None
+    proc = check_conf(["sh"], tmp_path, BASE_ENV, conf)
+    assert proc.returncode == 0, proc.stderr
+    assert (conf.read_bytes() if conf.exists() else None) == before
+
+
+def test_early_check_with_discard_does_not_stop(tmp_path: Path) -> None:
+    conf = hand_edited_conf(["sh"], tmp_path)
+    proc = check_conf(["sh"], tmp_path, BASE_ENV, conf, "--discard-config-edits")
+    assert proc.returncode == 0, proc.stderr
+    assert_no_secrets(proc)
+
+
+def test_early_check_without_an_example_stops_without_names(tmp_path: Path) -> None:
+    conf = hand_edited_conf(["sh"], tmp_path)
+    bare = tmp_path / "bare" / "deploy"
+    bare.mkdir(parents=True)
+    script = bare / "setup-alpine.sh"
+    shutil.copy(SCRIPT, script)  # no ../config.example.toml next to this copy
+    proc = check_conf(["sh"], tmp_path, BASE_ENV, conf, script=script)
+    assert proc.returncode != 0
+    assert "settings changed by hand" in proc.stderr
+    assert "config.toml was edited by hand" in proc.stderr
+    assert "home_assistant" not in proc.stderr
+    assert_no_secrets(proc)
+
+
+def test_early_check_dry_run_reports_without_writing(tmp_path: Path) -> None:
+    conf = hand_edited_conf(["sh"], tmp_path)
+    edited = conf.read_bytes()
+    proc = check_conf(["sh"], tmp_path, BASE_ENV, conf, "--dry-run")
+    assert proc.returncode == 1
+    assert "PROBLEM" in proc.stderr and "config.toml was edited by hand" in proc.stderr
+    assert conf.read_bytes() == edited
+
+
+TAMPERINGS = {
+    "clean": lambda t: t,
+    "comment_added": lambda t: t + "# mine\n",
+    "value_changed": lambda t: t.replace("bind_port = 8720", "bind_port = 8721"),
+    "sum_line_tampered": lambda t: t.replace("# sha256: ", "# sha256: 0", 1),
+    "header_changed": lambda t: t.replace("edits are overwritten", "edits are kept", 1),
+    "no_final_newline": lambda t: t.rstrip("\n"),
+    "crlf": lambda t: t.replace("\n", "\r\n"),
+}
+
+
+@pytest.mark.parametrize("tamper", sorted(TAMPERINGS))
+def test_early_and_late_checks_agree(tamper: str, tmp_path: Path) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(["sh"], tmp_path, BASE_ENV, conf).returncode == 0
+    conf.write_bytes(TAMPERINGS[tamper](conf.read_text()).encode())
+    early = check_conf(["sh"], tmp_path, BASE_ENV, conf)
+    late, _ = render(["sh"], tmp_path, BASE_ENV, existing=conf)
+    assert (early.returncode == 0) == (late.returncode == 0), (early.stderr, late.stderr)
+    assert (early.returncode == 0) == (tamper == "clean")
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_early_stop_restarts_a_service_stopped_before_the_reexec(
+    shell: list[str], tmp_path: Path
+) -> None:
+    conf = hand_edited_conf(shell, tmp_path)
+    edited = conf.read_bytes()
+    proc = check_conf(shell, tmp_path, BASE_ENV, conf, env=fake_rc_service(tmp_path))
+    assert proc.returncode != 0
+    assert rc_calls(tmp_path) == ["lanscape-atlas start"]
+    assert RESTARTED in proc.stdout + proc.stderr
+    assert "config.toml was edited by hand" in proc.stderr
+    assert "NOT restarted" not in proc.stderr
+    assert conf.read_bytes() == edited
+    assert_no_secrets(proc)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_late_stop_restarts_the_stopped_service(shell: list[str], tmp_path: Path) -> None:
+    conf = hand_edited_conf(shell, tmp_path, legacy=True)
+    edited = conf.read_bytes()
+    proc = write_conf(shell, tmp_path, BASE_ENV, conf)
+    assert proc.returncode != 0  # without the fake: nothing to restart
+    proc = run(
+        shell,
+        "--env",
+        str(tmp_path / "setup.env"),
+        "--write-config",
+        str(conf),
+        env=fake_rc_service(tmp_path),
+    )
+    assert proc.returncode != 0
+    assert rc_calls(tmp_path) == ["lanscape-atlas start"]
+    assert RESTARTED in proc.stdout + proc.stderr
+    assert conf.read_bytes() == edited
+    assert os.listdir(conf.parent) == ["config.toml"]
+    assert_no_secrets(proc)
+
+
+def test_failed_restart_says_how_to_start_it(tmp_path: Path) -> None:
+    conf = hand_edited_conf(["sh"], tmp_path)
+    proc = check_conf(["sh"], tmp_path, BASE_ENV, conf, env=fake_rc_service(tmp_path, status=1))
+    assert proc.returncode != 0
+    assert rc_calls(tmp_path) == ["lanscape-atlas start"]
+    combined = proc.stdout + proc.stderr
+    assert RESTARTED not in combined
+    assert "could not restart" in combined
+    assert "rc-service lanscape-atlas start" in combined
+    assert "config.toml was edited by hand" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("extra", "stopped"),
+    [(("--dry-run",), True), ((), False), (("--discard-config-edits",), True)],
+    ids=["dry-run", "not-stopped", "discard"],
+)
+def test_no_restart_when_not_needed(extra: tuple[str, ...], stopped: bool, tmp_path: Path) -> None:
+    conf = hand_edited_conf(["sh"], tmp_path)
+    env = fake_rc_service(tmp_path, stopped=stopped)
+    early = check_conf(["sh"], tmp_path, BASE_ENV, conf, *extra, env=env)
+    late = run(
+        ["sh"], "--env", str(tmp_path / "setup.env"), "--write-config", str(conf), *extra, env=env
+    )
+    assert rc_calls(tmp_path) == []
+    for proc in (early, late):
+        assert RESTARTED not in proc.stdout + proc.stderr
+
+
+def test_reexec_keeps_discard_config_edits() -> None:
+    text = SCRIPT.read_text()
+    body = text[text.index("reexec_if_updated() {") :]
+    body = body[: body.index("\n}\n")]
+    assert "--discard-config-edits" in body
+    assert re.search(r'exec sh "\$new_script" "\$@"', body)
