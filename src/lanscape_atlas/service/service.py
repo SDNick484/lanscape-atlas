@@ -26,6 +26,14 @@ if any) so undo restores provenance and layout with the row. A claim logs
 ``interface.device_id`` and ``service.device_id`` moves as plain field changes
 (``old_actor``/``old_set_at`` NULL: those columns have no ``field_source``).
 
+Floor plan (schema v5): creating the plan (blank or first image) logs a row-level
+creation; turning a blank plan into an image plan logs a row-level **replacement**
+(``old_value`` and ``new_value`` both full rows with their ``field_source``), which only
+``floor_plan`` uses, because sha256/file_name must leave NULL together (CHECK) and a
+field-by-field undo would pass through a refused row. Scale, units and image
+replacement are plain field changes. A pre-v5 first upload (per-field rows with NULL
+old values, ``sha256`` the marker) still undoes by deleting the row.
+
 Bluetooth: a BLE claim logs the ``ble_identity`` row as a row-level creation
 (after the new device's creation and owned ``name``/``type`` when it claims as a
 new device); an unclaim logs it as a row-level deletion, so undo re-inserts it
@@ -45,6 +53,7 @@ never claimed and never hidden twice.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -90,7 +99,31 @@ _SERVICE_COLUMNS = (
     "first_seen",
     "last_seen",
 )
-_FLOOR_PLAN_COLUMNS = ("id", "width", "height", "sha256", "file_name", "updated_at")
+_FLOOR_PLAN_COLUMNS = (
+    "id",
+    "width",
+    "height",
+    "sha256",
+    "file_name",
+    "updated_at",
+    "width_mm",
+    "units",
+)
+# Columns added by schema v5: a floor_plan snapshot logged before v5 lacks them, so
+# re-inserting one (redo of an undone pre-v5 upload) fills these in (cf. ``roaming``).
+_FLOOR_PLAN_V5_DEFAULTS: dict[str, Any] = {"width_mm": None, "units": "imperial"}
+# The pre-v5 first upload logged these fields one by one with a NULL old value; the
+# ``sha256`` row is the creation marker. Since v5 a plan is created with a row-level
+# ``'*'`` change and none of these fields is ever logged with a NULL old value again
+# (width/height/updated_at are NOT NULL, and sha256/file_name only leave NULL in a
+# row-level blank -> image replacement), so such a row can only be a pre-v5 creation.
+_FLOOR_PLAN_LEGACY_CREATION = frozenset({"sha256", "width", "height", "file_name", "updated_at"})
+PLAN_UNITS = frozenset({"imperial", "metric"})
+# Each side of a blank plan, in mm (spec §5.2: 1 m to 300 m).
+BLANK_MIN_MM = 1_000
+BLANK_MAX_MM = 300_000
+# Largest real-world plan width a scale may set (1 km): a typo guard, not a physical limit.
+SCALE_MAX_MM = 1_000_000.0
 _BLE_IDENTITY_COLUMNS = ("id", "device_id", "kind", "value", "created_at")
 _BLE_HIDDEN_COLUMNS = ("id", "digest", "label", "hidden_at")
 # Row-level entities that stand for one BLE identity (compared by salted digest in undo).
@@ -531,12 +564,18 @@ class Service:
     def set_floor_plan(
         self, actor: str, *, width: int, height: int, sha256: str, file_name: str
     ) -> int:
-        """Create or replace the single floor plan image row (id 1); returns the batch id.
+        """Create or replace the single floor plan image (row id 1); returns the batch id.
 
-        A replacement must keep the existing aspect ratio (``ValueError``
-        otherwise, nothing written). The first upload logs ``sha256`` with a
-        NULL old value, which undo reads as a creation and answers by deleting
-        the row.
+        - No plan: creates an image plan (no scale, imperial units), logged as a
+          row-level ``'*'`` creation that undo answers by deleting the row.
+        - A blank plan: turns it into an image plan, keeping ``width_mm`` and
+          ``units`` (spec §5.2), logged as one row-level ``'*'`` replacement so undo
+          restores the blank plan exactly. The new image must keep the plan's aspect
+          ratio while any room polygon or drawn shape exists; with neither, any aspect
+          is accepted.
+        - An image plan: replaces the image field by field; the aspect ratio must match.
+
+        ``ValueError`` (nothing written) for bad arguments or a refused aspect.
         """
         self._check_actor(actor)
         if (
@@ -554,37 +593,174 @@ class Service:
             raise ValueError("file_name must be a non-empty string")
         with self._write_txn():
             cur = self.conn.execute("SELECT * FROM floor_plan WHERE id = 1").fetchone()
-            if cur is not None:
-                check_aspect(int(cur["width"]), int(cur["height"]), width, height)
-            batch_id = self.begin_batch(actor)
-            now = self._now()
+            image = {"width": width, "height": height, "sha256": sha256, "file_name": file_name}
             if cur is None:
-                self.conn.execute(
-                    "INSERT INTO floor_plan(id, width, height, sha256, file_name, updated_at)"
-                    " VALUES (1, ?, ?, ?, ?, ?)",
-                    (width, height, sha256, file_name, now),
-                )
-                # sha256 first with old=None is the creation marker undo looks for.
-                for field, value in (
-                    ("sha256", sha256),
-                    ("width", width),
-                    ("height", height),
-                    ("file_name", file_name),
-                    ("updated_at", now),
-                ):
-                    self._log_change(batch_id, "floor_plan", 1, field, None, value)
-                    self._restore_source("floor_plan", 1, field, actor, now)
+                batch_id = self.begin_batch(actor)
+                self._create_plan(batch_id, actor, image)
+            elif cur["sha256"] is None:
+                if self._plan_has_drawing():
+                    try:
+                        check_aspect(int(cur["width"]), int(cur["height"]), width, height)
+                    except ValueError:
+                        raise ValueError(
+                            "aspect ratio differs from the blank plan, and rooms are drawn on"
+                            " it: crop the image to the plan's proportions first"
+                        ) from None
+                batch_id = self.begin_batch(actor)
+                self._replace_plan(batch_id, actor, image)
             else:
-                for field, value in (
-                    ("width", width),
-                    ("height", height),
-                    ("sha256", sha256),
-                    ("file_name", file_name),
-                    ("updated_at", now),
-                ):
+                check_aspect(int(cur["width"]), int(cur["height"]), width, height)
+                batch_id = self.begin_batch(actor)
+                now = self._now()
+                for field, value in (*image.items(), ("updated_at", now)):
                     self._write_field(batch_id, "floor_plan", 1, field, cur[field], value, actor)
         self._publish(batch_id, actor)
         return batch_id
+
+    def create_blank_plan(
+        self, actor: str, *, width_mm: float, height_mm: float, units: str
+    ) -> int:
+        """Create a blank plan (no image) of ``width_mm`` x ``height_mm``; returns the batch id.
+
+        Only when no plan exists. Each side must be 1,000 to 300,000 mm; both are
+        stored rounded to whole mm as ``width``/``height``, with ``width_mm = width``.
+        Logged as a row-level ``'*'`` creation (undo deletes the row, redo re-creates
+        it). ``ValueError`` otherwise, with nothing written.
+        """
+        self._check_actor(actor)
+        sides = []
+        for name, value in (("width", width_mm), ("depth", height_mm)):
+            if not _is_number(value) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a number of millimetres")
+            if not BLANK_MIN_MM <= value <= BLANK_MAX_MM:
+                raise ValueError(f"{name} must be between 1 m and 300 m (3.3 ft and 984 ft)")
+            sides.append(round(value))
+        self._check_units(units)
+        with self._write_txn():
+            if self.conn.execute("SELECT 1 FROM floor_plan WHERE id = 1").fetchone():
+                raise ValueError("a floor plan already exists")
+            batch_id = self.begin_batch(actor)
+            self._create_plan(
+                batch_id,
+                actor,
+                {
+                    "width": sides[0],
+                    "height": sides[1],
+                    "width_mm": float(sides[0]),
+                    "units": units,
+                },
+            )
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def set_plan_scale(self, actor: str, *, width_mm: float) -> int:
+        """Set an image plan's real-world width in mm; returns the batch id (0 if unchanged).
+
+        A logged field write on ``floor_plan.width_mm``. Refused (``ValueError``) with
+        no plan, on a blank plan (its scale is its size), or for a width that is not
+        a finite number in (0, 1,000,000] mm. Rooms and devices keep their
+        normalized positions, so only displayed lengths change.
+        """
+        self._check_actor(actor)
+        if (
+            not _is_number(width_mm)
+            or not math.isfinite(width_mm)
+            or not 0 < width_mm <= SCALE_MAX_MM
+        ):
+            raise ValueError("width_mm must be a number of millimetres above 0 and up to 1 km")
+        batch_id = 0
+        with self._write_txn():
+            cur = self._plan_row()
+            if cur["sha256"] is None:
+                raise ValueError("a blank plan's scale is its size; it cannot be set")
+            value = float(width_mm)
+            if cur["width_mm"] != value:
+                batch_id = self.begin_batch(actor)
+                self._write_field(
+                    batch_id, "floor_plan", 1, "width_mm", cur["width_mm"], value, actor
+                )
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def set_plan_units(self, actor: str, units: str) -> int:
+        """Set the plan's display units ('imperial' or 'metric'); returns the batch id.
+
+        A logged field write on ``floor_plan.units``; 0 if unchanged. ``ValueError``
+        for other values or when there is no plan.
+        """
+        self._check_actor(actor)
+        self._check_units(units)
+        batch_id = 0
+        with self._write_txn():
+            cur = self._plan_row()
+            if cur["units"] != units:
+                batch_id = self.begin_batch(actor)
+                self._write_field(batch_id, "floor_plan", 1, "units", cur["units"], units, actor)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    @staticmethod
+    def _check_units(units: object) -> None:
+        if units not in PLAN_UNITS:
+            raise ValueError(f"units must be one of {sorted(PLAN_UNITS)}, got {units!r}")
+
+    def _plan_row(self) -> sqlite3.Row:
+        row: sqlite3.Row | None = self.conn.execute(
+            "SELECT * FROM floor_plan WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            raise ValueError("there is no floor plan yet")
+        return row
+
+    def _plan_has_drawing(self) -> bool:
+        """True if any room polygon or drawn shape exists (the aspect rule then applies).
+
+        ``plan_shape`` arrives with schema v6 (issue #10); until that table exists only
+        room polygons count, so this works on either schema.
+        """
+        if self.conn.execute("SELECT 1 FROM place WHERE polygon IS NOT NULL LIMIT 1").fetchone():
+            return True
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_shape'"
+        ).fetchone():
+            return self.conn.execute("SELECT 1 FROM plan_shape LIMIT 1").fetchone() is not None
+        return False
+
+    def _create_plan(self, batch_id: int, actor: str, values: Mapping[str, Any]) -> None:
+        """Insert floor_plan row 1 from ``values`` and log it as a row-level creation.
+
+        Every column written gets ``field_source`` (actor, now); the logged snapshot
+        carries those rows so redo restores provenance with the row.
+        """
+        now = self._now()
+        row: dict[str, Any] = {
+            "id": 1,
+            "sha256": None,
+            "file_name": None,
+            **_FLOOR_PLAN_V5_DEFAULTS,
+            **values,
+            "updated_at": now,
+        }
+        self._insert_row("floor_plan", row)
+        for field in (*values, "updated_at"):
+            self._restore_source("floor_plan", 1, field, actor, now)
+        self._log_change(batch_id, "floor_plan", 1, "*", None, self._snapshot("floor_plan", 1))
+
+    def _replace_plan(self, batch_id: int, actor: str, values: Mapping[str, Any]) -> None:
+        """Overwrite fields of floor_plan row 1, logged as one row-level replacement.
+
+        Used where a field-by-field write (and its field-by-field undo) would pass
+        through a row the CHECK refuses, e.g. a blank plan getting its image (sha256
+        and file_name leave NULL together). Changed fields get ``field_source``.
+        """
+        old = self._snapshot("floor_plan", 1)
+        now = self._now()
+        changed = {**values, "updated_at": now}
+        sets = ", ".join(f"{field} = ?" for field in changed)
+        self.conn.execute(f"UPDATE floor_plan SET {sets} WHERE id = 1", tuple(changed.values()))
+        for field in changed:
+            self._restore_source("floor_plan", 1, field, actor, now)
+        self._log_change(batch_id, "floor_plan", 1, "*", old, self._snapshot("floor_plan", 1))
 
     def place_devices(
         self, actor: str, placements: Sequence[Placement], based_on: Mapping[int, int]
@@ -1407,6 +1583,16 @@ class Service:
                     " AND (old_value = ? OR new_value = ?)",
                     (batch_id, ref, ref),
                 )
+            # Undo would delete the plan (or change its aspect) under room polygons or
+            # drawn shapes written after it: refuse rather than strand or distort them.
+            # plan_shape (schema v6, issue #10) is matched in the change log, which works
+            # before that table exists.
+            if ch.reshapes_plan:
+                collect(
+                    "SELECT DISTINCT batch_id FROM change WHERE batch_id > ?"
+                    " AND ((entity = 'place' AND field = 'polygon') OR entity = 'plan_shape')",
+                    (batch_id,),
+                )
             if ch.creates and ch.entity == "device":
                 ref = _dump(ch.entity_id)
                 collect(
@@ -1489,6 +1675,8 @@ class Service:
                 current = self._snapshot(ch.entity, ch.entity_id)
                 self._log_change(batch_id, ch.entity, ch.entity_id, "*", current, None)
                 self._delete_entity(ch.entity, ch.entity_id)
+            elif ch.new is not None:  # whole-row replacement (floor_plan) -> put old back
+                self._restore_row(batch_id, ch)
             else:  # removal -> re-insert (original id unless discovered data reused it)
                 row = dict(ch.old)
                 entity_id = ch.entity_id
@@ -1504,6 +1692,10 @@ class Service:
                 if ch.entity == "device":
                     # Snapshots logged before schema v2 have no roaming key.
                     row.setdefault("roaming", 0)
+                if ch.entity == "floor_plan":
+                    # Snapshots logged before schema v5 have no width_mm/units keys.
+                    for key, default in _FLOOR_PLAN_V5_DEFAULTS.items():
+                        row.setdefault(key, default)
                 entity_id = self._insert_row(ch.entity, row)
                 row["id"] = entity_id
                 for field, (src_actor, src_set_at) in sorted(
@@ -1520,8 +1712,8 @@ class Service:
             return
         if ch.field not in _ENTITY_COLUMNS[ch.entity]:
             raise RuntimeError(f"cannot undo change on unknown field {ch.entity}.{ch.field}")
-        if ch.entity == "floor_plan" and ch.old is None:
-            # First upload: the sha256 marker deletes the whole row; the sibling
+        if ch.is_legacy_floor_plan_creation:
+            # Pre-v5 first upload: the sha256 marker deletes the whole row; the sibling
             # per-field creation changes are covered by that deletion.
             if ch.field == "sha256":
                 current = self._snapshot("floor_plan", ch.entity_id)
@@ -1557,6 +1749,30 @@ class Service:
             f"UPDATE {ch.entity} SET {ch.field} = ? WHERE id = ?", (ch.old, ch.entity_id)
         )
         self._restore_source(ch.entity, ch.entity_id, ch.field, ch.old_actor, ch.old_set_at)
+
+    def _restore_row(self, batch_id: int, ch: _Change) -> None:
+        """Undo a row-level replacement: write ``ch.old``'s columns and provenance back.
+
+        Logs the inverse as another replacement (current -> restored), so undoing the
+        undo replaces it again. Only ``floor_plan`` is ever replaced whole.
+        """
+        if ch.entity != "floor_plan":
+            raise RuntimeError(f"cannot undo a row replacement on {ch.entity!r}")
+        current = self._snapshot(ch.entity, ch.entity_id)
+        row = {**_FLOOR_PLAN_V5_DEFAULTS, **ch.old}
+        cols = [c for c in _ROW_COLUMNS[ch.entity] if c != "id"]
+        self.conn.execute(
+            f"UPDATE {ch.entity} SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
+            (*(row[c] for c in cols), ch.entity_id),
+        )
+        self.conn.execute(
+            "DELETE FROM field_source WHERE entity = ? AND entity_id = ?",
+            (ch.entity, ch.entity_id),
+        )
+        for field, (src_actor, src_set_at) in sorted(row.get(_FIELD_SOURCE_KEY, {}).items()):
+            self._restore_source(ch.entity, ch.entity_id, field, src_actor, src_set_at)
+        restored = self._snapshot(ch.entity, ch.entity_id)
+        self._log_change(batch_id, ch.entity, ch.entity_id, "*", current, restored)
 
     def _restore_source(
         self, entity: str, entity_id: int, field: str, actor: str | None, set_at: str | None
@@ -1698,12 +1914,50 @@ class _Change:
         )
 
     @property
+    def is_legacy_floor_plan_creation(self) -> bool:
+        """One of the per-field rows of a pre-v5 first upload (NULL old value).
+
+        See ``_FLOOR_PLAN_LEGACY_CREATION``: since v5 these fields are never logged
+        one by one with a NULL old value, so this cannot match a later write.
+        """
+        return (
+            self.entity == "floor_plan"
+            and self.field in _FLOOR_PLAN_LEGACY_CREATION
+            and self.old is None
+        )
+
+    @property
     def is_floor_plan_creation(self) -> bool:
-        """``floor_plan.sha256`` logged with a NULL old value marks the first upload."""
-        return self.entity == "floor_plan" and self.field == "sha256" and self.old is None
+        """The marker of a pre-v5 first upload: ``sha256`` logged with a NULL old value.
+
+        A plan created since v5 logs a row-level ``'*'`` creation instead.
+        """
+        return self.is_legacy_floor_plan_creation and self.field == "sha256"
 
     @property
     def creates(self) -> bool:
         return (
             self.field == "*" or self.is_place_existence or self.is_floor_plan_creation
         ) and self.old is None
+
+    @property
+    def reshapes_plan(self) -> bool:
+        """Undoing this would remove the floor plan or change its aspect ratio.
+
+        True for a plan creation (row-level or the pre-v5 marker) and for a row-level
+        replacement whose two sides differ in aspect (an image of any aspect over a
+        blank plan with nothing drawn on it).
+        """
+        if self.entity != "floor_plan":
+            return False
+        if self.creates:
+            return True
+        if self.field != "*" or not isinstance(self.old, dict) or not isinstance(self.new, dict):
+            return False
+        try:
+            check_aspect(
+                self.old["width"], self.old["height"], self.new["width"], self.new["height"]
+            )
+        except ValueError:
+            return True
+        return False

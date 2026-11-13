@@ -1,8 +1,11 @@
+import math
+
 import pytest
 
 from lanscape_atlas.floorplan.geometry import (
     check_aspect,
     parse_polygon,
+    plan_length_mm,
     point_in_polygon,
 )
 
@@ -121,3 +124,42 @@ def test_aspect_just_beyond_tolerance_rejected():
 def test_aspect_non_positive_dimension_rejected(dims):
     with pytest.raises(ValueError):
         check_aspect(*dims)
+
+
+# ------------------------------------------------------------ plan_length_mm
+
+
+def test_plan_length_mm_horizontal_uses_width_mm():
+    # A 2:1 plan 10 m wide: half its width is 5 m.
+    assert plan_length_mm(0.5, 0, width=2000, height=1000, width_mm=10_000) == pytest.approx(5000)
+
+
+def test_plan_length_mm_vertical_corrects_for_aspect():
+    # Same plan: it is 5 m deep, so half its height is 2.5 m (not 5 m).
+    assert plan_length_mm(0, 0.5, width=2000, height=1000, width_mm=10_000) == pytest.approx(2500)
+
+
+def test_plan_length_mm_diagonal_on_tall_plan():
+    # A 1:3 plan (pixels) 4 m wide is 12 m deep; the full diagonal is sqrt(4^2 + 12^2) m.
+    got = plan_length_mm(1, 1, width=500, height=1500, width_mm=4000)
+    assert got == pytest.approx(math.hypot(4000, 12_000))
+
+
+def test_plan_length_mm_sign_does_not_matter():
+    args = {"width": 1600, "height": 1200, "width_mm": 8000}
+    assert plan_length_mm(-0.25, -0.5, **args) == pytest.approx(plan_length_mm(0.25, 0.5, **args))
+    assert plan_length_mm(0, 0, **args) == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"width": 0, "height": 10, "width_mm": 1000},
+        {"width": 10, "height": -1, "width_mm": 1000},
+        {"width": 10, "height": 10, "width_mm": 0},
+        {"width": 10, "height": 10, "width_mm": float("nan")},
+    ],
+)
+def test_plan_length_mm_rejects_bad_plan(kwargs):
+    with pytest.raises(ValueError):
+        plan_length_mm(0.1, 0.1, **kwargs)

@@ -45,6 +45,22 @@ def test_plan_none_then_metadata_without_paths(svc, db):
         "height": 600,
         "file_name": "plan.png",
         "updated_at": "2026-01-01T00:00:00Z",
+        "blank": False,
+        "width_mm": None,
+        "units": "imperial",
+    }
+
+
+def test_blank_plan_metadata(svc, db):
+    svc.create_blank_plan("user", width_mm=12_000, height_mm=9_000, units="metric")
+    assert floor_plan_view(db, now=T0)["plan"] == {
+        "width": 12_000,
+        "height": 9_000,
+        "file_name": None,
+        "updated_at": "2026-01-01T00:00:00Z",
+        "blank": True,
+        "width_mm": 12_000.0,
+        "units": "metric",
     }
 
 

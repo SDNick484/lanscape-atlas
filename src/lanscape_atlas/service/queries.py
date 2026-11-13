@@ -523,7 +523,11 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
     carries its ``place_id`` (the room id, or None) so the page can group the tray by room.
     Each device carries ``last_batch`` (see ``last_placement_batch``) so the page can
     send it back as ``based_on``. Exposes plan metadata only, never the file path or
-    image bytes. Online state is the stored ``device.online`` flag. Every device entry
+    image bytes: ``plan`` is None (no plan) or ``{width, height, file_name, updated_at,
+    blank, width_mm, units}``; a blank plan (``blank`` true, ``file_name`` None) has
+    ``width``/``height`` in mm, an image plan in pixels; ``width_mm`` is the plan's
+    real width (None for an uncalibrated image) and ``units`` the display units.
+    Online state is the stored ``device.online`` flag. Every device entry
     whose newest Bluetooth sighting is at most 24 h old (``now`` is the reference) also
     carries ``heard: {"place_id", "at"}`` (``place_id`` is None for an unlinked scanner);
     the sighting is chosen like ``ble_queries.last_heard`` (newest, then stronger, then
@@ -531,7 +535,7 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
     """
     heard = _heard_by_device(conn, now)
     plan_row = conn.execute(
-        "SELECT width, height, file_name, updated_at FROM floor_plan WHERE id = 1"
+        "SELECT width, height, file_name, updated_at, width_mm, units FROM floor_plan WHERE id = 1"
     ).fetchone()
     plan = (
         {
@@ -539,6 +543,9 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
             "height": plan_row["height"],
             "file_name": plan_row["file_name"],
             "updated_at": plan_row["updated_at"],
+            "blank": plan_row["file_name"] is None,
+            "width_mm": plan_row["width_mm"],
+            "units": plan_row["units"],
         }
         if plan_row is not None
         else None

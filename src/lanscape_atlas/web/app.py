@@ -137,7 +137,7 @@ def _message(exc: BaseException, default: str) -> str:
     return default
 
 
-JSON_PAGE_PATHS = ("/floorplan/placements",)
+JSON_PAGE_PATHS = ("/floorplan/placements", "/floorplan/scale")
 
 
 def _wants_json(scope: Scope) -> bool:

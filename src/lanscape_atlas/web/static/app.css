@@ -342,3 +342,19 @@ fieldset.card legend { font-weight: 600; padding: 0 4px; }
 .sw-place.p7 { background: var(--place-7); }
 .sw-place.p8 { background: var(--place-8); }
 .sw-place.p9 { background: var(--place-9); }
+
+/* Floor plan: blank plan grid, scale and units (spec §5.3). The grid stands in for the
+   image (same box, same transform); its strokes stay constant on screen like the rest. */
+.fp-stage .fp-grid { display: block; width: 100%; height: auto; user-select: none; background: var(--surface); }
+.fp-grid line, .fp-grid rect { fill: none; vector-effect: non-scaling-stroke; }
+.fp-grid-minor line { stroke: var(--border); stroke-width: calc(1px / var(--fp-zoom, 1)); }
+.fp-grid-major line { stroke: var(--muted); opacity: 0.55; stroke-width: calc(1px / var(--fp-zoom, 1)); }
+.fp-grid-major .fp-grid-edge { stroke: var(--muted); stroke-width: calc(2px / var(--fp-zoom, 1)); }
+.fp-units { gap: 2px; }
+.fp-units button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.fp-size { font-size: 12.5px; }
+.fp-start { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+.fp-start h2 { font-size: 15px; margin-top: 0; }
+.fp-start form > * + * { margin-top: 8px; }
+.fp-start input[inputmode="decimal"] { width: 6em; }
+#scale-error:empty { display: none; }
