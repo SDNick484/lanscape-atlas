@@ -9,7 +9,8 @@ Edges: manual/discovered ``link`` rows, plus edges derived at query time from
 ``interface.ap_node`` (the AiMesh node's MAC, stored by the asusrouter collector):
 client device -> device owning an interface with that address. Derived edges are
 collapsed to one per unordered device pair (first interface id, ``wifi`` if any
-interface on the pair is wifi) and dropped where a manual link joins the pair.
+interface on the pair is wifi) and dropped where a manual link joins the pair, or where
+an endpoint is a non-infrastructure device wired by hand to a switch or hub.
 """
 
 from __future__ import annotations
@@ -46,20 +47,51 @@ class LayoutBody(BaseModel):
     positions: dict[BodyId, tuple[FiniteFloat, FiniteFloat]]
 
 
+INFRA_TYPES = frozenset({"router", "mesh_node", "ap"})
+SWITCH_TYPES = frozenset({"switch", "hub"})
+
+
+def _norm_type(value: object) -> str:
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _wired_to_switch(links: list[dict[str, Any]], types: Mapping[int, str | None]) -> set[int]:
+    """Non-infrastructure devices with a manual link to a switch or hub (either direction)."""
+    out: set[int] = set()
+    for e in links:
+        if not e["manual"]:
+            continue
+        for dev, other in ((e["source"], e["target"]), (e["target"], e["source"])):
+            if _norm_type(types.get(other)) in SWITCH_TYPES and (
+                _norm_type(types.get(dev)) not in INFRA_TYPES
+            ):
+                out.add(dev)
+    return out
+
+
 def dedupe_edges(
-    links: list[dict[str, Any]], derived: list[dict[str, Any]]
+    links: list[dict[str, Any]],
+    derived: list[dict[str, Any]],
+    types: Mapping[int, str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """``links`` unchanged, then ``derived`` collapsed per unordered pair.
 
     The first derived edge on a pair keeps its id and direction; the pair's kind
     is ``wifi`` if any of its edges is. A pair joined by a manual link loses its
     derived edges entirely.
+
+    With ``types`` (device id -> type), a derived edge is also dropped when either
+    endpoint is a device whose type is not router, mesh_node or ap and that has a manual
+    link to a switch or hub (types compared trimmed and case-insensitively). Either
+    endpoint is checked because a derived edge's direction is not reliably client to
+    AP. Infrastructure never loses its derived edges.
     """
     manual_pairs = {frozenset((e["source"], e["target"])) for e in links if e["manual"]}
+    behind_switch = _wired_to_switch(links, types) if types is not None else set()
     by_pair: dict[frozenset[int], dict[str, Any]] = {}
     for e in derived:
         pair = frozenset((e["source"], e["target"]))
-        if pair in manual_pairs:
+        if pair in manual_pairs or not behind_switch.isdisjoint(pair):
             continue
         kept = by_pair.get(pair)
         if kept is None:
@@ -70,7 +102,10 @@ def dedupe_edges(
 
 
 def topology_graph(conn: sqlite3.Connection) -> Graph:
-    """Nodes (every device, with saved positions) and deduplicated edges.
+    """Nodes (every device, with saved positions), deduplicated edges and places.
+
+    ``place_id`` is the device's place (``None`` when unset or the place was deleted);
+    ``places`` lists every place as ``{id, name}`` so the page can name the legend.
 
     ``placeholder`` marks devices with no interfaces (drawn by hand, e.g. an
     unmanaged switch): they can never be seen online, so the page does not dim them.
@@ -85,11 +120,12 @@ def topology_graph(conn: sqlite3.Connection) -> Graph:
             "icon": r["icon"],
             "online": bool(r["online"]),
             "placeholder": not r["has_iface"],
+            "place_id": r["place_id"],
             "x": r["x"],
             "y": r["y"],
         }
         for r in conn.execute(
-            "SELECT d.id, d.name, d.type, d.icon, d.online, t.x, t.y,"
+            "SELECT d.id, d.name, d.type, d.icon, d.online, d.place_id, t.x, t.y,"
             " EXISTS (SELECT 1 FROM interface i WHERE i.device_id = d.id) AS has_iface"
             " FROM device d"
             " LEFT JOIN topology_layout t ON t.device_id = d.id ORDER BY d.id"
@@ -127,7 +163,12 @@ def topology_graph(conn: sqlite3.Connection) -> Graph:
                 "manual": False,
             }
         )
-    return {"nodes": nodes, "edges": dedupe_edges(links, derived)}
+    types = {n["id"]: n["type"] for n in nodes}
+    places = [
+        {"id": r["id"], "name": r["name"]}
+        for r in conn.execute("SELECT id, name FROM place ORDER BY id")
+    ]
+    return {"nodes": nodes, "edges": dedupe_edges(links, derived, types), "places": places}
 
 
 def save_layout(svc: Service, positions: Mapping[int, tuple[float, float]]) -> int:

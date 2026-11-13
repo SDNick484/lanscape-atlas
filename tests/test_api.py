@@ -311,11 +311,21 @@ def test_links_add_remove(client: TestClient) -> None:
 
 def test_topology_shape(client: TestClient) -> None:
     topo = client.get("/api/v1/topology").json()
-    assert set(topo) == {"nodes", "edges"}
+    assert set(topo) == {"nodes", "edges", "places"}
     devices = client.get("/api/v1/devices", params={"limit": 1000}).json()
     assert {n["id"] for n in topo["nodes"]} == {d["id"] for d in devices}
     for n in topo["nodes"]:
-        assert set(n) == {"id", "name", "type", "icon", "online", "placeholder", "x", "y"}
+        assert set(n) == {
+            "id",
+            "name",
+            "type",
+            "icon",
+            "online",
+            "placeholder",
+            "place_id",
+            "x",
+            "y",
+        }
         assert n["x"] is None and n["y"] is None
     # Derived AP edges exist for wifi clients of the mesh nodes.
     ap_edges = [e for e in topo["edges"] if str(e["id"]).startswith("ap-")]

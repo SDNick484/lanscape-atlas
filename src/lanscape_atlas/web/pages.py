@@ -42,6 +42,7 @@ from lanscape_atlas.service import queries as q
 from lanscape_atlas.web.ble_api import ago, where
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
+from lanscape_atlas.web.search import SearchQuery, search_devices
 from lanscape_atlas.web.topology import (
     Graph,
     LayoutBody,
@@ -640,6 +641,14 @@ def topology_data(request: Request) -> Graph:
     svc = _service(request)
     with svc.lock:
         return topology_graph(svc.conn)
+
+
+@router.get("/topology/search")
+def topology_search(request: Request, q: SearchQuery = "") -> list[dict[str, Any]]:
+    """Ranked device matches for the page's search box (see ``web.search``)."""
+    svc = _service(request)
+    with svc.lock:
+        return search_devices(svc.conn, q, window_min=svc.ip_match_window_min)
 
 
 @router.post("/topology/layout", dependencies=[CsrfHeader])

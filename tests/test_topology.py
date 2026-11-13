@@ -20,7 +20,7 @@ from lanscape_atlas.service import Service
 from lanscape_atlas.web.app import create_app
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_house.json"
-NODE_KEYS = {"id", "name", "type", "icon", "online", "placeholder", "x", "y"}
+NODE_KEYS = {"id", "name", "type", "icon", "online", "placeholder", "place_id", "x", "y"}
 EDGE_KEYS = {"id", "source", "target", "kind", "manual"}
 
 
@@ -268,7 +268,7 @@ def test_topology_page_renders(client: TestClient) -> None:
 
 def test_topology_data_shape(client: TestClient) -> None:
     graph = _graph(client)
-    assert set(graph) == {"nodes", "edges"}
+    assert set(graph) == {"nodes", "edges", "places"}
     assert graph == client.get("/api/v1/topology").json()
     devices = client.get("/api/v1/devices", params={"limit": 1000}).json()
     assert {n["id"] for n in graph["nodes"]} == {d["id"] for d in devices}
@@ -395,3 +395,288 @@ def test_save_layout_is_one_function(service: Service) -> None:
     with pytest.raises(ValueError):
         topology.save_layout(service, {dev: (float("nan"), 1.0)})
     assert topology.save_layout(service, {dev: (7.0, 8.0)}) == 1
+
+
+# ------------------------------------------------- dashed-edge hiding (spec 3.3)
+
+INFRA = {"router", "mesh_node", "ap"}
+
+
+def _client_edge(client: TestClient, service: Service, dev_type: str) -> dict[str, Any]:
+    """A derived edge whose client end is retyped to ``dev_type``; returns the edge."""
+    graph = _graph(client)
+    types = {n["id"]: n["type"] for n in graph["nodes"]}
+    edge = next(e for e in _derived(graph) if (types[e["source"]] or "").lower() not in INFRA)
+    service.update_device("user", edge["source"], {"type": dev_type})
+    return edge
+
+
+def _wire(client: TestClient, a: int, b: int) -> int:
+    r = _post(client, "/topology/links", {"a_device_id": a, "b_device_id": b, "kind": "wired"})
+    assert r.status_code == 200, r.text
+    return int(r.json()["link_id"])
+
+
+def _has_edge(client: TestClient, edge_id: str) -> bool:
+    return any(e["id"] == edge_id for e in _graph(client)["edges"])
+
+
+@pytest.mark.parametrize("sw_type", ["switch", "hub", "Switch ", " HUB"])
+def test_wiring_to_switch_hides_dashed_edge(
+    client: TestClient, service: Service, sw_type: str
+) -> None:
+    edge = _client_edge(client, service, "other")
+    sw, _ = service.create_placeholder_device("user", "Unmanaged", sw_type)
+    assert _has_edge(client, edge["id"])
+    _wire(client, edge["source"], sw)
+    assert not _has_edge(client, edge["id"])
+    assert client.get("/api/v1/topology").json() == _graph(client)
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_hiding_works_for_either_link_direction(
+    client: TestClient, service: Service, flip: bool
+) -> None:
+    edge = _client_edge(client, service, "other")
+    sw, _ = service.create_placeholder_device("user", "Unmanaged", "switch")
+    a, b = (sw, edge["source"]) if flip else (edge["source"], sw)
+    _wire(client, a, b)
+    assert not _has_edge(client, edge["id"])
+
+
+def test_hiding_applies_when_client_is_the_target_end(client: TestClient, service: Service) -> None:
+    """The rule looks at either endpoint, since the derived direction is not reliable."""
+    from lanscape_atlas.web.topology import dedupe_edges
+
+    derived = [{"id": "ap-1", "source": 1, "target": 2, "kind": "wifi", "manual": False}]
+    links = [{"id": 9, "source": 2, "target": 3, "kind": "wired", "manual": True}]
+    types = {1: "router", 2: "laptop", 3: "switch"}
+    assert dedupe_edges(links, derived, types) == links
+
+
+def test_type_other_keeps_dashed_edge(client: TestClient, service: Service) -> None:
+    edge = _client_edge(client, service, "other")
+    peer, _ = service.create_placeholder_device("user", "Thing", "other")
+    _wire(client, edge["source"], peer)
+    assert _has_edge(client, edge["id"])
+
+
+def test_mesh_node_wired_to_switch_keeps_backhaul(client: TestClient, service: Service) -> None:
+    graph = _graph(client)
+    mesh = next(n for n in graph["nodes"] if n["name"] == "mesh-node-upstairs")["id"]
+    service.update_device("user", mesh, {"type": "mesh_node"})
+    edge = next(e for e in _derived(graph) if mesh in (e["source"], e["target"]))
+    sw, _ = service.create_placeholder_device("user", "Unmanaged", "switch")
+    _wire(client, mesh, sw)
+    assert _has_edge(client, edge["id"])
+    # Same device retyped to something that is not infrastructure: its edges now hide.
+    service.update_device("user", mesh, {"type": "other"})
+    assert not _has_edge(client, edge["id"])
+
+
+def test_deleting_the_switch_link_brings_the_edge_back(
+    client: TestClient, service: Service
+) -> None:
+    edge = _client_edge(client, service, "other")
+    sw, _ = service.create_placeholder_device("user", "Unmanaged", "switch")
+    link_id = _wire(client, edge["source"], sw)
+    assert not _has_edge(client, edge["id"])
+    assert _post(client, f"/topology/links/{link_id}/delete").status_code == 200
+    assert _has_edge(client, edge["id"])
+
+
+def test_switch_without_uplink_still_hides(client: TestClient, service: Service) -> None:
+    edge = _client_edge(client, service, "other")
+    sw, _ = service.create_placeholder_device("user", "Detached", "switch")
+    _wire(client, edge["source"], sw)
+    graph = _graph(client)
+    assert all(sw not in (e["source"], e["target"]) or e["manual"] for e in graph["edges"])
+    assert not _has_edge(client, edge["id"])
+
+
+def test_only_manual_links_count(
+    client: TestClient, service: Service, db: sqlite3.Connection
+) -> None:
+    """A discovered (non-manual) ``link`` row to a switch does not hide the dashed edge."""
+    edge = _client_edge(client, service, "other")
+    sw, _ = service.create_placeholder_device("user", "Unmanaged", "switch")
+    with db:
+        db.execute(
+            "INSERT INTO link(a_device_id, b_device_id, kind, source)"
+            " VALUES (?, ?, 'wired', 'discovered')",
+            (edge["source"], sw),
+        )
+    assert _has_edge(client, edge["id"])
+
+
+# ------------------------------------------------------------------ places
+
+
+def test_graph_has_place_id_and_places(client: TestClient, service: Service) -> None:
+    graph = _graph(client)
+    assert graph["places"] == [] and all(n["place_id"] is None for n in graph["nodes"])
+    service.set_place("user", graph["nodes"][0]["id"], "Room A")
+    service.set_place("user", graph["nodes"][1]["id"], "Room B")
+    graph = _graph(client)
+    with service.lock:
+        ids = {r["name"]: r["id"] for r in service.conn.execute("SELECT id, name FROM place")}
+    assert graph["places"] == [
+        {"id": ids["Room A"], "name": "Room A"},
+        {"id": ids["Room B"], "name": "Room B"},
+    ]
+    by_id = {n["id"]: n for n in graph["nodes"]}
+    assert by_id[graph["nodes"][0]["id"]]["place_id"] == ids["Room A"]
+    assert by_id[graph["nodes"][1]["id"]]["place_id"] == ids["Room B"]
+    assert client.get("/api/v1/topology").json() == graph
+
+
+def test_deleted_place_gives_null_place_id(
+    client: TestClient, service: Service, db: sqlite3.Connection
+) -> None:
+    dev = _graph(client)["nodes"][0]["id"]
+    service.set_place("user", dev, "Room A")
+    with db:
+        db.execute("DELETE FROM place")
+    graph = _graph(client)
+    assert graph["places"] == []
+    assert next(n for n in graph["nodes"] if n["id"] == dev)["place_id"] is None
+
+
+# ------------------------------------------------------------------ search
+
+
+def _search(client: TestClient, q: str) -> Any:
+    return client.get("/topology/search", params={"q": q})
+
+
+def _named(service: Service, name: str, type_: str = "other") -> int:
+    return service.create_placeholder_device("user", name, type_)[0]
+
+
+def test_search_by_name_returns_shape(client: TestClient, service: Service) -> None:
+    dev = _named(service, "Frobnicator Display", "tablet")
+    r = _search(client, "frobnicator")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/json")
+    assert r.json() == [{"device_id": dev, "name": "Frobnicator Display", "type": "tablet"}]
+
+
+def test_search_by_ip_and_full_and_partial_mac(client: TestClient) -> None:
+    graph = _graph(client)
+    with_ip = _search(client, "192.0.2.80").json()
+    assert len(with_ip) == 1
+    dev = with_ip[0]["device_id"]
+    assert any(n["id"] == dev for n in graph["nodes"])
+    mac_hit = _search(client, "00:00:5e:00:53:80").json()
+    assert [d["device_id"] for d in mac_hit] == [dev]
+    partial = _search(client, "53:80").json()
+    assert dev in [d["device_id"] for d in partial]
+
+
+def test_search_ranking_order(client: TestClient, service: Service, db: sqlite3.Connection) -> None:
+    # Created in an order that differs from the expected ranking.
+    zeta = _named(service, "zzz Frob room")
+    contains = _named(service, "The Frob")
+    starts_b = _named(service, "frob B")
+    starts_a = _named(service, "Frob a")
+    got = [d["device_id"] for d in _search(client, "frob").json()]
+    assert got == [starts_a, starts_b, contains, zeta]
+
+
+def test_search_exact_mac_ranks_before_name_prefix(
+    client: TestClient, service: Service, db: sqlite3.Connection
+) -> None:
+    mac = "02:00:5e:00:53:c1"
+    owner = _named(service, "Zed")
+    prefixed = _named(service, mac[:8] + " backup")
+    with db:
+        db.execute(
+            "INSERT INTO interface(device_id, kind, address, first_seen, last_seen)"
+            " VALUES (?, 'ethernet', ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            (owner, mac),
+        )
+    assert [d["device_id"] for d in _search(client, mac.upper()).json()] == [owner]
+    # A name-prefix match on the same text ranks below an exact MAC match.
+    assert _search(client, mac[:8]).json()[0]["device_id"] == prefixed
+
+
+def test_search_empty_and_whitespace(client: TestClient) -> None:
+    assert _search(client, "").json() == []
+    assert _search(client, "   ").json() == []
+    assert client.get("/topology/search").json() == []
+
+
+def test_search_length_cap(client: TestClient, service: Service) -> None:
+    assert _search(client, "a" * 100).status_code == 200
+    r = _search(client, "a" * 101)
+    assert r.status_code == 422 and r.headers["content-type"].startswith("application/json")
+
+
+def test_search_limit_20(client: TestClient, service: Service) -> None:
+    for i in range(25):
+        _named(service, f"Lamp {i:02d}")
+    got = _search(client, "lamp").json()
+    assert [d["name"] for d in got] == [f"Lamp {i:02d}" for i in range(20)]
+
+
+@pytest.mark.parametrize("q", ["%", "_"])
+def test_search_wildcards_are_literal(client: TestClient, service: Service, q: str) -> None:
+    _named(service, "Plain Device")
+    literal = _named(service, "50% off_sign")
+    assert [d["device_id"] for d in _search(client, q).json()] == [literal]
+
+
+def test_search_percent_in_middle_is_not_a_wildcard(client: TestClient, service: Service) -> None:
+    _named(service, "Plain Device")
+    assert _search(client, "p%e").json() == []
+    assert _search(client, "p_ain").json() == []
+
+
+def test_search_is_same_origin_page_route(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
+) -> None:
+    """Like ``/topology/data``: GET, no CSRF token, no bearer token needed."""
+    settings = Settings(data_dir=tmp_path, api_token="test-api-token-123")
+    app = create_app(settings, conn=db, clock=clock, start_background=False)
+    with TestClient(app) as c:
+        assert c.get("/api/v1/devices", params={"q": "x"}).status_code == 401
+        assert c.get("/topology/search", params={"q": "x"}).status_code == 200
+        assert c.post("/topology/search").status_code in (403, 405)
+
+
+def test_search_obeys_host_allowlist(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
+) -> None:
+    settings = Settings(data_dir=tmp_path, allowed_hosts=("testserver",))
+    app = create_app(settings, conn=db, clock=clock, start_background=False)
+    with TestClient(app) as c:
+        assert c.get("/topology/search", params={"q": "x"}).status_code == 200
+        r = c.get("/topology/search", params={"q": "x"}, headers={"Host": "evil.example"})
+        assert r.status_code == 421
+
+
+def test_rank_device_matches_is_reusable() -> None:
+    from lanscape_atlas.service.queries import DeviceSummary
+    from lanscape_atlas.web.search import MAX_QUERY_LEN, SEARCH_LIMIT, rank_device_matches
+
+    def row(i: int, name: str | None, ipv4: str | None = None, macs: tuple[str, ...] = ()) -> Any:
+        return DeviceSummary(
+            id=i, name=name, type="other", icon=None, online=True, ipv4=ipv4, macs=list(macs),
+            vendor=None, place=None, ap_node=None, band=None, service_count=0,
+            last_seen="2026-01-01T00:00:00Z", trust="known",
+        )  # fmt: skip
+
+    rows = [
+        row(1, "b cam"),
+        row(2, None, "192.0.2.5"),
+        row(3, "cam z"),
+        row(4, "Cam a"),
+        row(5, "x", macs=("00:00:5e:00:53:01",)),
+    ]
+    assert MAX_QUERY_LEN == 100 and SEARCH_LIMIT == 20
+    matched = [r for r in rows if "cam" in (r.name or "").lower()]
+    assert [r["device_id"] for r in rank_device_matches(matched, "cam")] == [4, 3, 1]
+    assert [r["device_id"] for r in rank_device_matches(rows, " 192.0.2.5 ")][:1] == [2]
+    assert [r["device_id"] for r in rank_device_matches(rows, "00:00:5E:00:53:01")][:1] == [5]
+    assert len(rank_device_matches(rows, "cam", limit=2)) == 2
+    assert rank_device_matches(rows, "   ") == []
+    assert rank_device_matches(rows, "cam")[0] == {"device_id": 4, "name": "Cam a", "type": "other"}
