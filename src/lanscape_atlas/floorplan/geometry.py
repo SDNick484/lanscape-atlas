@@ -173,3 +173,162 @@ def parse_door(raw: object) -> dict[str, Any]:
         "width": width,
         "flip": flip,
     }
+
+
+# ------------------------------------------------- furniture and labels (issue #11)
+
+# A rotated rectangle's corners may overshoot the plan by this much (float rounding of the
+# 6-place stored values); anything further is refused, not clamped.
+FIT_TOL = 2e-6
+LABEL_MAX_SIZE = 1.0
+
+
+def parse_furniture(raw: object) -> dict[str, Any]:
+    """Validate furniture; returns it canonical. Two forms, each with exactly one key:
+
+    ``{"rect": {"cx", "cy", "w", "h", "angle"}}``: centre in ``[0, 1]``; ``w`` and ``h``
+    above 0, as fractions of the plan's width; ``angle`` in degrees in aspect-corrected
+    space (so 90 looks square on a non-square plan), within one turn either way. Whether
+    the rotated corners stay on the plan needs the plan's aspect: ``check_furniture_fits``.
+
+    ``{"points": [[x, y], ...]}``: a closed outline of 3 to 500 points in ``[0, 1]``; no
+    two consecutive points (including last and first) may be the same.
+    """
+    if not isinstance(raw, Mapping) or len(raw) != 1 or not set(raw) <= {"rect", "points"}:
+        raise ValueError("furniture geometry must be an object with exactly one of rect or points")
+    if "rect" in raw:
+        rect = _keys(raw["rect"], "furniture rect", frozenset({"cx", "cy", "w", "h", "angle"}))
+        angle = _finite(rect["angle"], "furniture angle")
+        if abs(angle) > DOOR_MAX_ANGLE:
+            raise ValueError("furniture angle must be between -360 and 360 degrees")
+        size: dict[str, float] = {}
+        for key in ("w", "h"):
+            v = _finite(rect[key], f"furniture {key}")
+            if v <= 0.0:
+                raise ValueError(f"furniture {key} must be above 0")
+            size[key] = v
+        return {
+            "rect": {
+                "cx": _unit(rect["cx"], "furniture cx"),
+                "cy": _unit(rect["cy"], "furniture cy"),
+                "w": size["w"],
+                "h": size["h"],
+                "angle": angle,
+            }
+        }
+    pts = raw["points"]
+    if not isinstance(pts, list):
+        raise ValueError("furniture points must be a list of [x, y] pairs")
+    if not 3 <= len(pts) <= WALL_MAX_POINTS:
+        raise ValueError(f"a furniture outline has 3 to {WALL_MAX_POINTS} points")
+    points: list[list[float]] = []
+    for item in pts:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("each furniture point must be an [x, y] pair")
+        points.append(
+            [_unit(item[0], "furniture coordinates"), _unit(item[1], "furniture coordinates")]
+        )
+    if any(a == b for a, b in zip(points, points[1:] + points[:1], strict=True)):
+        raise ValueError("two consecutive furniture points are the same point")
+    return {"points": points}
+
+
+def parse_label(raw: object) -> dict[str, Any]:
+    """Validate a text label's position: ``{"x", "y", "size"}``; returns it canonical.
+
+    ``x``/``y`` in ``[0, 1]``; ``size`` (the text height as a fraction of the plan's
+    width) above 0 and at most 1. The text itself is the shape's ``label``.
+    """
+    geo = _keys(raw, "label", frozenset({"x", "y", "size"}))
+    size = _finite(geo["size"], "label size")
+    if not 0.0 < size <= LABEL_MAX_SIZE:
+        raise ValueError("label size must be above 0 and at most 1 (the plan's width)")
+    return {"x": _unit(geo["x"], "label x"), "y": _unit(geo["y"], "label y"), "size": size}
+
+
+def rect_corners(rect: Mapping[str, Any], *, aspect: float) -> list[tuple[float, float]]:
+    """The four normalized corners of a furniture ``rect`` on a plan ``aspect`` deep.
+
+    ``aspect`` is plan height / width. The rectangle is rotated in aspect-corrected
+    space ``(x, y * aspect)``, where ``w`` and ``h`` (fractions of the plan width) are
+    true lengths, then converted back to normalized coordinates.
+    """
+    a = math.radians(float(rect["angle"]))
+    ux, uy = math.cos(a), math.sin(a)
+    cx, cy = float(rect["cx"]), float(rect["cy"]) * aspect
+    hw, hh = float(rect["w"]) / 2, float(rect["h"]) / 2
+    corners: list[tuple[float, float]] = []
+    for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        dx, dy = sx * hw, sy * hh
+        corners.append((cx + dx * ux - dy * uy, (cy + dx * uy + dy * ux) / aspect))
+    return corners
+
+
+def check_furniture_fits(geometry: Mapping[str, Any], *, width: int, height: int) -> None:
+    """Raise ValueError if a furniture rectangle's rotated corner is off the plan.
+
+    A rotated rectangle near the edge can have a corner outside ``[0, 1]`` even when its
+    centre is inside. The server refuses it (a clamp would change its shape or size).
+    Outlines are already bounded point by point.
+    """
+    rect = geometry.get("rect")
+    if rect is None:
+        return
+    if min(width, height) <= 0:
+        raise ValueError("plan width and height must be positive")
+    for x, y in rect_corners(rect, aspect=height / width):
+        if not (-FIT_TOL <= x <= 1 + FIT_TOL and -FIT_TOL <= y <= 1 + FIT_TOL):
+            raise ValueError("a furniture rectangle must stay on the plan: a corner is outside it")
+
+
+def _segments_cross(
+    a: tuple[float, float], b: tuple[float, float], c: tuple[float, float], d: tuple[float, float]
+) -> bool:
+    """Do segments ab and cd intersect (touching counts)?"""
+
+    def orient(p: tuple[float, float], q: tuple[float, float], r: tuple[float, float]) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    d1, d2, d3, d4 = orient(c, d, a), orient(c, d, b), orient(a, b, c), orient(a, b, d)
+    if ((d1 > _EPS and d2 < -_EPS) or (d1 < -_EPS and d2 > _EPS)) and (
+        (d3 > _EPS and d4 < -_EPS) or (d3 < -_EPS and d4 > _EPS)
+    ):
+        return True
+    return (
+        (abs(d1) <= _EPS and _on_segment(a[0], a[1], c, d))
+        or (abs(d2) <= _EPS and _on_segment(b[0], b[1], c, d))
+        or (abs(d3) <= _EPS and _on_segment(c[0], c[1], a, b))
+        or (abs(d4) <= _EPS and _on_segment(d[0], d[1], a, b))
+    )
+
+
+def polygon_is_simple(points: Sequence[tuple[float, float]]) -> bool:
+    """True if no two non-adjacent edges of the polygon cross or touch."""
+    n = len(points)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue  # adjacent edges share a corner
+            if _segments_cross(points[i], points[(i + 1) % n], points[j], points[(j + 1) % n]):
+                return False
+    return True
+
+
+def polygon_area_mm2(
+    points: Sequence[tuple[float, float]], *, width: int, height: int, width_mm: float
+) -> float | None:
+    """Area in mm² of a normalized polygon on a plan ``width_mm`` wide (spec §6.3).
+
+    Shoelace in aspect-corrected units (``y * height / width``) times ``width_mm``
+    squared; always non-negative, whichever way the polygon winds. A polygon whose edges
+    cross itself has no meaningful area, so it gets ``None`` (the page shows none).
+    """
+    if min(width, height) <= 0 or not math.isfinite(width_mm) or width_mm <= 0:
+        raise ValueError("plan width, height and width_mm must be positive")
+    if len(points) < 3 or not polygon_is_simple(points):
+        return None
+    aspect = height / width
+    twice = 0.0
+    for (x0, y0), (x1, y1) in zip(points, [*points[1:], points[0]], strict=True):
+        twice += x0 * y1 * aspect - x1 * y0 * aspect
+    return abs(twice) / 2 * width_mm * width_mm

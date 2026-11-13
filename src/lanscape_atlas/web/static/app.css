@@ -392,3 +392,27 @@ fieldset.card legend { font-weight: 600; padding: 0 4px; }
 .fp-tools button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
 .fp-length-input { position: absolute; z-index: 2; width: 100px; font-size: 12.5px; padding: 2px 6px; }
 .fp-length-input.error { border-color: var(--danger); }
+.fp-text-input { width: 160px; }
+
+/* Furniture, labels and room areas (issue #11). Furniture sits under the walls with a
+   light fill; labels sit above the rooms and under the markers. Strokes are divided by
+   --fp-zoom and text sizes are set in JS by the zoom, so all stay constant on screen. */
+.fp-furniture-body { fill: var(--muted); fill-opacity: 0.16; stroke: var(--muted); stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.fp-view .fp-furniture-body { stroke-width: calc(1.5px / var(--fp-zoom, 1)); }
+.fp-furniture.unsaved .fp-furniture-body { stroke: var(--edge-wifi); }
+.fp-furniture.selected .fp-furniture-body { stroke: var(--accent); fill: var(--accent); fill-opacity: 0.12; }
+.fp-view .fp-furniture.selected .fp-furniture-body { stroke-width: calc(2.5px / var(--fp-zoom, 1)); }
+.fp-furniture-name { fill: var(--text); opacity: 0.8; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.fp-furniture-dims { opacity: 0.85; }
+.fp-texts { pointer-events: none; }
+.fp-label {
+  fill: var(--text); text-anchor: middle; dominant-baseline: middle; font-weight: 600; paint-order: stroke;
+  stroke: var(--surface); stroke-linejoin: round; vector-effect: non-scaling-stroke;
+}
+.fp-view .fp-label { stroke-width: calc(3px / var(--fp-zoom, 1)); }
+.fp-label.unsaved { fill: var(--edge-wifi); }
+.fp-label.selected { fill: var(--accent); }
+.fp-room-area { fill: var(--text); opacity: 0.65; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.fp-handle-line { stroke: var(--accent); vector-effect: non-scaling-stroke; }
+.fp-view .fp-handle-line { stroke-width: calc(1.5px / var(--fp-zoom, 1)); }
+.fp-handle-rotate { fill: var(--accent); }

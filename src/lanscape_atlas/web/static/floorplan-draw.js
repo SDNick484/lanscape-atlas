@@ -21,10 +21,19 @@
  * default; Alt held suppresses it): wall corners and room corners within SNAP_PX
  * screen pixels, else the grid (blank plans, and image plans with a scale).
  *
+ * Furniture and labels (issue #11): the Furniture rectangle tool drags corner to
+ * corner; in Select a rectangle has four resize handles (the opposite corner stays
+ * put) and a rotate handle (Shift: 15 degree steps). A rotated rectangle never leaves
+ * the plan: the move, resize or rotate stops where a corner would cross the edge (the
+ * server refuses it too). The Furniture outline tool takes clicks like a closed
+ * polyline. The Label tool opens a small text box at the click; Enter places it.
+ * Furniture and labels have text (a name, optional; the label's text, required),
+ * edited in the panel. With a scale a rectangle shows width x depth (Show lengths).
+ *
  * Shape kinds (KINDS below) say how each kind draws, is hit, moves and shows handles;
- * tools (TOOLS below) say what a press, click, double-click and hover do. Issue #11
- * adds furniture and labels by adding KINDS and TOOLS entries and a tool button
- * (data-tool) in the template; the rest of this file is kind-agnostic.
+ * tools (TOOLS below) say what a press, click, double-click and hover do. A kind may
+ * draw into the text layer (`layer: "texts"`, above room labels, below markers) instead
+ * of the shape layer (furniture, walls, doors, below rooms).
  *
  * Shapes never take pointer events (their SVG groups are pointer-events: none): the
  * Select tool hit-tests geometry in screen pixels instead, so outside Draw mode they
@@ -46,6 +55,13 @@
   var DOOR_NO_SCALE = 0.04; // default door width without a scale: 4% of the plan width
   var DOOR_MIN = 0.002;
   var EDITABLE = "input, textarea, select, button, [contenteditable]";
+  var ROT_PX = 24; // the rotate handle sits this far (screen px) outside the top edge
+  var MIN_SIDE = 0.002; // smallest furniture side, as a fraction of the plan width
+  var MIN_DRAG_PX = 6; // a furniture rectangle drag shorter than this is no rectangle
+  var LABEL_SIZE = 0.02; // a new label's text height, as a fraction of the plan width
+  var TEXT_MAX = 80; // server: SHAPE_LABEL_MAX
+  var FIT_TOL = 1e-6; // a corner may overshoot the plan by this much (server: 2e-6)
+  var SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]]; // rectangle corners, in order
 
   function round6(v) { return Math.round(v * 1e6) / 1e6; }
   function round4(v) { return Math.round(v * 1e4) / 1e4; }
@@ -124,6 +140,137 @@
     return !(g.closed && pts[n - 1][0] === pts[0][0] && pts[n - 1][1] === pts[0][1]);
   }
 
+  // The four normalized corners of furniture rect r on a plan of aspect A (height /
+  // width); the rectangle turns in aspect-corrected space (cf. geometry.rect_corners).
+  function rectCorners(r, A) {
+    var a = r.angle * Math.PI / 180, ux = Math.cos(a), uy = Math.sin(a);
+    var cx = r.cx, cy = r.cy * A;
+    return SIGNS.map(function (sg) {
+      var dx = sg[0] * r.w / 2, dy = sg[1] * r.h / 2;
+      return [cx + dx * ux - dy * uy, (cy + dx * uy + dy * ux) / A];
+    });
+  }
+
+  function rectFits(r, A) {
+    return r.w > 0 && r.h > 0 && rectCorners(r, A).every(function (c) {
+      return c[0] >= -FIT_TOL && c[0] <= 1 + FIT_TOL && c[1] >= -FIT_TOL && c[1] <= 1 + FIT_TOL;
+    });
+  }
+
+  function roundRect(r) {
+    return { cx: round6(r.cx), cy: round6(r.cy), w: round6(r.w), h: round6(r.h), angle: round4(r.angle) };
+  }
+
+  // The rectangle between t = 0 (orig, which fits) and t = 1 (make(1)) that goes
+  // furthest while still fitting the plan: t = 1 if it fits, else the largest t found
+  // by bisection. make(t) returns an unrounded rect.
+  function furthestFit(make, A) {
+    var full = roundRect(make(1));
+    if (rectFits(full, A)) { return full; }
+    var lo = 0, hi = 1, i;
+    for (i = 0; i < 16; i += 1) {
+      var mid = (lo + hi) / 2;
+      if (rectFits(roundRect(make(mid)), A)) { lo = mid; } else { hi = mid; }
+    }
+    return roundRect(make(lo));
+  }
+
+  // Resize: corner i goes toward plan point q, the opposite corner stays put.
+  function resizeRect(o, i, q, A) {
+    var a = o.angle * Math.PI / 180, ux = Math.cos(a), uy = Math.sin(a);
+    var sg = SIGNS[i];
+    var opp = [
+      o.cx - sg[0] * o.w / 2 * ux + sg[1] * o.h / 2 * uy,
+      o.cy * A - sg[0] * o.w / 2 * uy - sg[1] * o.h / 2 * ux,
+    ];
+    var dx = q[0] - opp[0], dy = q[1] * A - opp[1];
+    var lx = Math.max(MIN_SIDE, sg[0] * (dx * ux + dy * uy));
+    var ly = Math.max(MIN_SIDE, sg[1] * (-dx * uy + dy * ux));
+    return furthestFit(function (t) {
+      var w = o.w + (lx - o.w) * t, h = o.h + (ly - o.h) * t;
+      var cx = opp[0] + sg[0] * w / 2 * ux - sg[1] * h / 2 * uy;
+      var cy = opp[1] + sg[0] * w / 2 * uy + sg[1] * h / 2 * ux;
+      return { cx: cx, cy: cy / A, w: w, h: h, angle: o.angle };
+    }, A);
+  }
+
+  // Rotate: the rotate handle (above the top edge) turns toward plan point q; step > 0
+  // rounds the angle to that many degrees.
+  function rotateRect(o, q, A, step) {
+    var target = Math.atan2(q[1] * A - o.cy * A, q[0] - o.cx) * 180 / Math.PI + 90;
+    if (step > 0) { target = Math.round(target / step) * step; }
+    var delta = ((target - o.angle) % 360 + 540) % 360 - 180; // the short way round
+    return furthestFit(function (t) {
+      var ang = ((o.angle + delta * t + 180) % 360 + 360) % 360 - 180;
+      return { cx: o.cx, cy: o.cy, w: o.w, h: o.h, angle: ang };
+    }, A);
+  }
+
+  // Furniture outline rules the server enforces (geometry.parse_furniture).
+  function outlineOk(g) {
+    var pts = g.points, n = pts.length, i;
+    if (n < 3 || n > MAX_POINTS) { return false; }
+    for (i = 0; i < n; i += 1) {
+      var b = pts[(i + 1) % n];
+      if (pts[i][0] === b[0] && pts[i][1] === b[1]) { return false; }
+    }
+    return true;
+  }
+
+  function pointInPoly(p, poly) {
+    var inside = false, j = poly.length - 1, i;
+    for (i = 0; i < poly.length; i += 1) {
+      var a = poly[i], b = poly[j];
+      if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]) {
+        inside = !inside;
+      }
+      j = i;
+    }
+    return inside;
+  }
+
+  // Do segments ab and cd intersect (touching counts)? As geometry._segments_cross.
+  function segsCross(a, b, c, d) {
+    function orient(p, q, r) { return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]); }
+    function on(p, a2, b2) {
+      return Math.min(a2[0], b2[0]) - 1e-12 <= p[0] && p[0] <= Math.max(a2[0], b2[0]) + 1e-12 &&
+        Math.min(a2[1], b2[1]) - 1e-12 <= p[1] && p[1] <= Math.max(a2[1], b2[1]) + 1e-12;
+    }
+    var E = 1e-12;
+    var d1 = orient(c, d, a), d2 = orient(c, d, b), d3 = orient(a, b, c), d4 = orient(a, b, d);
+    if (((d1 > E && d2 < -E) || (d1 < -E && d2 > E)) && ((d3 > E && d4 < -E) || (d3 < -E && d4 > E))) {
+      return true;
+    }
+    return (Math.abs(d1) <= E && on(a, c, d)) || (Math.abs(d2) <= E && on(b, c, d)) ||
+      (Math.abs(d3) <= E && on(c, a, b)) || (Math.abs(d4) <= E && on(d, a, b));
+  }
+
+  function polygonIsSimple(pts) {
+    var n = pts.length, i, j;
+    for (i = 0; i < n; i += 1) {
+      for (j = i + 1; j < n; j += 1) {
+        if (j === i + 1 || (i === 0 && j === n - 1)) { continue; }
+        if (segsCross(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) { return false; }
+      }
+    }
+    return true;
+  }
+
+  // Area in mm2 of a normalized polygon (cf. geometry.polygon_area_mm2): shoelace in
+  // aspect-corrected units times widthMm squared, never negative; null for a polygon
+  // whose edges cross itself (it has no meaningful area).
+  function polygonAreaMm2(pts, aspect, widthMm) {
+    if (pts.length < 3 || !(widthMm > 0) || !polygonIsSimple(pts)) {
+      return null;
+    }
+    var twice = 0, i;
+    for (i = 0; i < pts.length; i += 1) {
+      var a = pts[i], b = pts[(i + 1) % pts.length];
+      twice += a[0] * b[1] * aspect - b[0] * a[1] * aspect;
+    }
+    return Math.abs(twice) / 2 * widthMm * widthMm;
+  }
+
   function segments(g) {
     var out = [], pts = g.points, i;
     for (i = 0; i + 1 < pts.length; i += 1) { out.push([pts[i], pts[i + 1]]); }
@@ -138,6 +285,13 @@
       lengthMm: lengthMm,
       pointAtLength: pointAtLength,
       wallOk: wallOk,
+      rectCorners: rectCorners,
+      rectFits: rectFits,
+      resizeRect: resizeRect,
+      rotateRect: rotateRect,
+      outlineOk: outlineOk,
+      polygonIsSimple: polygonIsSimple,
+      polygonAreaMm2: polygonAreaMm2,
     },
     create: create,
   };
@@ -161,9 +315,12 @@
     var mods = { shift: false, alt: false };
     var selectedId = null;
     var drag = null;
+    var rectDrag = null; // Furniture rectangle tool: {from, to, at} while dragging
+    var pendingLabel = null; // Label tool: the plan point its text box will place
     var discarded = false;
 
     var gShapes = svgEl("g", { "class": "fp-shapes" });
+    var gTexts = svgEl("g", { "class": "fp-texts" });
     var gLengths = svgEl("g", { "class": "fp-lengths" });
     var gOverlay = svgEl("g", { "class": "fp-draw-overlay" });
 
@@ -172,6 +329,8 @@
     var flipBtn = document.getElementById("door-flip");
     var deleteBtn = document.getElementById("shape-delete");
     var lengthIn = document.getElementById("draw-length");
+    var labelIn = document.getElementById("draw-text");
+    var textIn = document.getElementById("shape-text");
     var snapBox = document.getElementById("snap-toggle");
     var lengthsBox = document.getElementById("lengths-toggle");
 
@@ -349,7 +508,9 @@
     // picked), draw(shape) -> SVG element, hit(geometry, client) -> screen px distance,
     // handles(geometry) -> client points, dragHandle(shape, index, plan point),
     // move(geometry, original, plan delta), valid(geometry); optional corners(geometry)
-    // (snap targets) and lengths(shape, group) (measurement labels).
+    // (snap targets), lengths(shape, group) (measurement labels), layer ("texts" draws
+    // into the text layer) and invalid (the message when an edit leaves it invalid).
+    // hit() also gets the shape, for kinds whose size depends on its text.
     var KINDS = {
       wall: {
         z: 1,
@@ -419,7 +580,107 @@
         },
         valid: function () { return true; },
       },
+      furniture: {
+        z: 0,
+        draw: function (s) {
+          var g = svgEl("g", { "class": shapeClass(s, "fp-furniture"), "data-shape-id": s.id });
+          var pts = furnitureOutline(s.geometry);
+          g.appendChild(svgEl("polygon", { "class": "fp-furniture-body", points: pts.map(function (p) { var q = px(p); return f2(q[0]) + "," + f2(q[1]); }).join(" ") }));
+          if (s.label) {
+            var c = centroid(pts), q = px(c);
+            var t = svgEl("text", { "class": "fp-furniture-name", x: f2(q[0]), y: f2(q[1]), "font-size": ctx.size(1.3) });
+            if (dimsShown(s)) { t.setAttribute("dy", ctx.size(-0.8)); }
+            t.textContent = s.label;
+            g.appendChild(t);
+          }
+          return g;
+        },
+        hit: function (g, c) {
+          var pts = furnitureOutline(g).map(client);
+          if (pointInPoly(c, pts)) { return 0; }
+          var best = Infinity, i;
+          for (i = 0; i < pts.length; i += 1) { best = Math.min(best, segDist(c, pts[i], pts[(i + 1) % pts.length])); }
+          return best;
+        },
+        handles: function (g) {
+          if (!g.rect) { return g.points.map(function (q) { return client(q); }); }
+          var cs = rectCorners(g.rect, A).map(function (q) { return client(q); });
+          var mid = [(cs[0][0] + cs[1][0]) / 2, (cs[0][1] + cs[1][1]) / 2];
+          var ctr = client([g.rect.cx, g.rect.cy]);
+          var dx = mid[0] - ctr[0], dy = mid[1] - ctr[1], n = Math.hypot(dx, dy) || 1;
+          return cs.concat([[mid[0] + dx / n * ROT_PX, mid[1] + dy / n * ROT_PX]]);
+        },
+        dragHandle: function (s, i, raw) {
+          var g = s.geometry;
+          if (g.points) {
+            var p = [clamp01(raw[0]), clamp01(raw[1])];
+            g.points[i] = roundPt(mods.shift ? p : snap(p, { rooms: true, grid: true }).p);
+          } else if (i === 4) {
+            g.rect = rotateRect(g.rect, raw, A, mods.shift ? 15 : 0);
+          } else {
+            g.rect = resizeRect(g.rect, i, [clamp01(raw[0]), clamp01(raw[1])], A);
+          }
+        },
+        move: function (g, o, d) {
+          if (o.rect) {
+            d = moveBy(rectCorners(o.rect, A), d);
+            g.rect = copy(o.rect);
+            g.rect.cx = round6(o.rect.cx + d[0]);
+            g.rect.cy = round6(o.rect.cy + d[1]);
+          } else {
+            d = moveBy(o.points, d);
+            g.points = o.points.map(function (q) { return roundPt([q[0] + d[0], q[1] + d[1]]); });
+          }
+        },
+        valid: function (g) { return g.rect ? rectFits(g.rect, A) : outlineOk(g); },
+        invalid: "Two corners of an outline can't be on the same point: moved back.",
+        lengths: function (s, g) {
+          if (!s.geometry.rect) { return; }
+          var r = s.geometry.rect, q = px([r.cx, r.cy]);
+          var t = svgEl("text", { "class": "fp-length fp-furniture-dims", "data-shape-id": s.id, x: f2(q[0]), y: f2(q[1]), "font-size": ctx.size(1.2) });
+          if (s.label) { t.setAttribute("dy", ctx.size(0.8)); }
+          t.textContent = fmt(r.w * widthMm) + " \u00d7 " + fmt(r.h * widthMm);
+          g.appendChild(t);
+        },
+      },
+      label: {
+        z: 3,
+        layer: "texts",
+        draw: function (s) {
+          var q = px([s.geometry.x, s.geometry.y]);
+          var t = svgEl("text", { "class": shapeClass(s, "fp-label"), "data-shape-id": s.id, x: f2(q[0]), y: f2(q[1]), "font-size": labelFont(s.geometry) });
+          t.textContent = s.label || "";
+          return t;
+        },
+        hit: function (g, c, s) {
+          var ctr = client([g.x, g.y]);
+          var px1 = dist(client([0, 0]), client([1 / W, 0])); // screen px per plan px
+          var fs = g.size * W / view.zoom() * px1;
+          var hw = Math.max(1, (s && s.label ? s.label.length : 1)) * fs * 0.3, hh = fs * 0.5;
+          return Math.hypot(Math.max(0, Math.abs(c[0] - ctr[0]) - hw), Math.max(0, Math.abs(c[1] - ctr[1]) - hh));
+        },
+        move: function (g, o, d) {
+          d = moveBy([[o.x, o.y]], d);
+          g.x = round6(clamp01(o.x + d[0]));
+          g.y = round6(clamp01(o.y + d[1]));
+        },
+        valid: function () { return true; },
+      },
     };
+
+    function furnitureOutline(g) { return g.rect ? rectCorners(g.rect, A) : g.points; }
+
+    function centroid(pts) {
+      var x = 0, y = 0;
+      pts.forEach(function (p) { x += p[0]; y += p[1]; });
+      return [x / pts.length, y / pts.length];
+    }
+
+    // Does this furniture show width x depth? A rectangle, on a plan with a scale, with Show lengths on.
+    function dimsShown(s) { return !!(s.geometry.rect && lengthsOn()); }
+
+    // A label's text size (a fraction of the plan width at zoom 1) stays the same on screen.
+    function labelFont(g) { return (g.size * W / view.zoom()).toFixed(3); }
 
     // ---------------------------------------------------------------- render
 
@@ -430,11 +691,13 @@
 
     function render() {
       clear(gShapes);
+      clear(gTexts);
       clear(gLengths);
       var all = live();
       byZ().forEach(function (kind) {
+        var into = KINDS[kind].layer === "texts" ? gTexts : gShapes;
         all.forEach(function (s) {
-          if (s.kind === kind) { gShapes.appendChild(KINDS[kind].draw(s)); }
+          if (s.kind === kind) { into.appendChild(KINDS[kind].draw(s)); }
         });
       });
       if (lengthsOn()) {
@@ -456,12 +719,23 @@
       if (!active) {
         return;
       }
+      if (rectDrag) {
+        var rc = rectOf(rectDrag.from, rectDrag.to);
+        var corners = rectCorners(rc, A).map(function (p) { var q = px(p); return f2(q[0]) + "," + f2(q[1]); });
+        gOverlay.appendChild(svgEl("polygon", { "class": "fp-wall-draft", points: corners.join(" ") }));
+        if (widthMm > 0) {
+          var rq = px([rc.cx, rc.cy]);
+          var rl = svgEl("text", { "class": "fp-live-length", x: f2(rq[0]), y: f2(rq[1]), "font-size": ctx.size(1.5), "text-anchor": "middle" });
+          rl.textContent = fmt(rc.w * widthMm) + " \u00d7 " + fmt(rc.h * widthMm);
+          gOverlay.appendChild(rl);
+        }
+      }
       var t = hover && draft.length ? target(hover.p) : null;
       if (draft.length) {
         var pts = draft.concat(t ? [t.p] : []).map(function (p) { var q = px(p); return f2(q[0]) + "," + f2(q[1]); });
         gOverlay.appendChild(svgEl("polyline", { "class": "fp-wall-draft", points: pts.join(" ") }));
         draft.forEach(function (p, i) {
-          var start = i === 0 && tool === "polyline" && draft.length >= 3;
+          var start = i === 0 && closes() && draft.length >= 3;
           gOverlay.appendChild(dot(p, start ? "fp-draft-start" : "fp-draft-pt", start ? 1.1 : 0.5));
         });
         if (t && widthMm > 0) {
@@ -474,7 +748,7 @@
       var snapAt = null;
       if (t && t.kind === "point") {
         snapAt = t.p;
-      } else if (hover && !draft.length && (tool === "wall" || tool === "polyline")) {
+      } else if (hover && !draft.length && (tool === "wall" || tool === "polyline" || tool === "furniture-outline" || tool === "furniture-rect")) {
         var first = target(hover.p);
         if (first.kind === "point") { snapAt = first.p; }
       }
@@ -487,9 +761,16 @@
       }
       var sel = selectedId !== null ? shapes[selectedId] : null;
       if (sel && tool === "select" && KINDS[sel.kind] && KINDS[sel.kind].handles) {
-        KINDS[sel.kind].handles(sel.geometry).forEach(function (c, i) {
+        var hs = KINDS[sel.kind].handles(sel.geometry);
+        hs.forEach(function (c, i) {
           var p = view.toPlan(c[0], c[1]);
-          var h = dot(p, "fp-handle", 0.7);
+          var rotate = sel.kind === "furniture" && !!sel.geometry.rect && i === 4;
+          if (rotate) {
+            var corners = hs.slice(0, 2).map(function (q) { return view.toPlan(q[0], q[1]); });
+            var a = px([(corners[0][0] + corners[1][0]) / 2, (corners[0][1] + corners[1][1]) / 2]), b = px(p);
+            gOverlay.appendChild(svgEl("line", { "class": "fp-handle-line", x1: f2(a[0]), y1: f2(a[1]), x2: f2(b[0]), y2: f2(b[1]) }));
+          }
+          var h = dot(p, rotate ? "fp-handle fp-handle-rotate" : "fp-handle", 0.7);
           h.setAttribute("data-handle", String(i));
           gOverlay.appendChild(h);
         });
@@ -504,10 +785,10 @@
       updatePanel();
     }
 
-    function add(kind, geometry) {
+    function add(kind, geometry, text) {
       var id = nextTemp;
       nextTemp -= 1;
-      shapes[id] = { id: id, kind: kind, geometry: geometry, label: null };
+      shapes[id] = { id: id, kind: kind, geometry: geometry, label: text === undefined ? null : text };
       order.push(id);
       created[id] = true;
       changed();
@@ -543,6 +824,9 @@
     function setHint(text) {
       if (hintEl) { hintEl.textContent = text; }
     }
+
+    // Does a click on the first corner close the draft? (Polyline and furniture outline.)
+    function closes() { return tool === "polyline" || tool === "furniture-outline"; }
 
     function showLengthInput() {
       var want = active && widthMm > 0 && draft.length > 0 && (tool === "wall" || tool === "polyline");
@@ -582,6 +866,17 @@
       var pts = draft;
       draft = [];
       showLengthInput();
+      if (tool === "furniture-outline") {
+        var last = pts[pts.length - 1];
+        if (pts.length > 3 && last[0] === pts[0][0] && last[1] === pts[0][1]) { pts.pop(); }
+        if (pts.length >= 3) {
+          select(add("furniture", { points: pts }));
+        } else {
+          ctx.status("An outline needs at least 3 corners.", true);
+          renderOverlay();
+        }
+        return;
+      }
       if (pts.length >= (closed ? 3 : 2)) {
         add("wall", { points: pts, closed: closed });
       } else {
@@ -681,7 +976,7 @@
 
     function drawClick(e) {
       var raw = view.toPlan(e.clientX, e.clientY);
-      if (tool === "polyline" && draft.length >= 3 && dist([e.clientX, e.clientY], client(draft[0])) <= SNAP_PX) {
+      if (closes() && draft.length >= 3 && dist([e.clientX, e.clientY], client(draft[0])) <= SNAP_PX) {
         finishWall(true);
         return;
       }
@@ -725,6 +1020,26 @@
           if (draft.length >= 2) { finishWall(false); }
         },
       },
+      "furniture-rect": {
+        hint: "Drag from one corner of the furniture to the opposite corner. Then select it to rotate or resize it " +
+          "(the round handle above it turns it) and to name it.",
+        down: startRect,
+      },
+      "furniture-outline": {
+        hint: "Click to add the outline's corners. Double-click or Enter finishes it, a click on the first corner " +
+          "closes it, Escape cancels.",
+        click: drawClick,
+        dblclick: function () {
+          if (draft.length >= 2) { finishWall(true); }
+        },
+      },
+      label: {
+        hint: "Click where the text goes, type it and press Enter. Escape cancels.",
+        click: function (e) {
+          var p = target(view.toPlan(e.clientX, e.clientY)).p;
+          openLabel(p, e);
+        },
+      },
       door: {
         hint: "Point at a wall to see the door, then click to place it. Select it to change its width or flip it.",
         click: function (e) {
@@ -753,6 +1068,8 @@
       }
       tool = next;
       cancelDraft();
+      closeLabel();
+      cancelRect();
       if (next !== "select") { selectedId = null; }
       ctx.app.setAttribute("data-tool", next);
       var btns = panel ? panel.querySelectorAll("[data-tool]") : [];
@@ -762,6 +1079,106 @@
       setHint(TOOLS[next].hint);
       render();
       updatePanel();
+    }
+
+    // ------------------------------------------- furniture rectangle, label box
+
+    // The axis-aligned rect (angle 0) between two plan points.
+    function rectOf(a, b) {
+      return {
+        cx: round6((a[0] + b[0]) / 2),
+        cy: round6((a[1] + b[1]) / 2),
+        w: round6(Math.abs(b[0] - a[0])),
+        h: round6(Math.abs(b[1] - a[1]) * A),
+        angle: 0,
+      };
+    }
+
+    function endRect() {
+      document.removeEventListener("pointermove", onRectMove);
+      document.removeEventListener("pointerup", onRectUp);
+      document.removeEventListener("pointercancel", cancelRect);
+    }
+
+    function cancelRect() {
+      endRect();
+      if (rectDrag) {
+        rectDrag = null;
+        renderOverlay();
+      }
+    }
+
+    function startRect(e) {
+      e.preventDefault(); // no text selection while dragging
+      stage.focus({ preventScroll: true });
+      cancelRect();
+      var p = target(view.toPlan(e.clientX, e.clientY)).p;
+      rectDrag = { from: p, to: p, at: [e.clientX, e.clientY] };
+      document.addEventListener("pointermove", onRectMove);
+      document.addEventListener("pointerup", onRectUp);
+      document.addEventListener("pointercancel", cancelRect);
+    }
+
+    function onRectMove(e) {
+      if (!rectDrag) {
+        return;
+      }
+      mods.shift = e.shiftKey;
+      mods.alt = e.altKey;
+      rectDrag.to = target(view.toPlan(e.clientX, e.clientY)).p;
+      rectDrag.end = [e.clientX, e.clientY];
+      renderOverlay();
+    }
+
+    function onRectUp(e) {
+      var d = rectDrag;
+      endRect();
+      rectDrag = null;
+      if (!d) {
+        return;
+      }
+      var to = target(view.toPlan(e.clientX, e.clientY)).p;
+      var a = client(d.from), b = client(to);
+      var r = rectOf(d.from, to);
+      if (Math.abs(a[0] - b[0]) < MIN_DRAG_PX || Math.abs(a[1] - b[1]) < MIN_DRAG_PX || !(r.w > 0) || !(r.h > 0)) {
+        ctx.status("Drag from one corner to the opposite corner to size the furniture.", true);
+        renderOverlay();
+        return;
+      }
+      select(add("furniture", { rect: r }));
+    }
+
+    function closeLabel() {
+      pendingLabel = null;
+      if (labelIn) {
+        labelIn.value = "";
+        labelIn.hidden = true;
+      }
+    }
+
+    function openLabel(p, e) {
+      if (!labelIn) {
+        return;
+      }
+      pendingLabel = p;
+      var r = stage.getBoundingClientRect();
+      labelIn.style.left = clamp(e.clientX - r.left, 0, Math.max(0, r.width - 170)) + "px";
+      labelIn.style.top = clamp(e.clientY - r.top, 0, Math.max(0, r.height - 30)) + "px";
+      labelIn.value = "";
+      labelIn.hidden = false;
+      labelIn.focus({ preventScroll: true });
+    }
+
+    function placeLabel() {
+      var text = labelIn.value.trim();
+      if (!pendingLabel || !text) {
+        ctx.status("Type the label's text first.", true);
+        return;
+      }
+      var p = pendingLabel;
+      closeLabel();
+      stage.focus({ preventScroll: true });
+      select(add("label", { x: round6(clamp01(p[0])), y: round6(clamp01(p[1])), size: LABEL_SIZE }, text.slice(0, TEXT_MAX)));
     }
 
     // --------------------------------------------------------- select / drag
@@ -785,7 +1202,7 @@
           if (s.kind !== kinds[k]) {
             return;
           }
-          var d = KINDS[s.kind].hit(s.geometry, c);
+          var d = KINDS[s.kind].hit(s.geometry, c, s);
           if (d < bestD) {
             best = s;
             bestD = d;
@@ -844,7 +1261,7 @@
       var s = shapes[d.id];
       if (!KINDS[s.kind].valid(s.geometry)) {
         s.geometry = d.orig;
-        ctx.status("Two corners of a wall can't be on the same point: moved back.", true);
+        ctx.status(KINDS[s.kind].invalid || "Two corners of a wall can't be on the same point: moved back.", true);
         render();
         return;
       }
@@ -876,10 +1293,21 @@
 
     // --------------------------------------------------------------- panel
 
+    function updatePanelText() {
+      var s = selectedId !== null ? shapes[selectedId] : null;
+      if (textIn && s && (s.kind === "furniture" || s.kind === "label")) { textIn.value = s.label || ""; }
+    }
+
     function updatePanel() {
       var s = selectedId !== null ? shapes[selectedId] : null;
       if (flipBtn) { flipBtn.disabled = !(s && s.kind === "door"); }
       if (deleteBtn) { deleteBtn.disabled = !s; }
+      if (textIn) {
+        var texty = !!(s && (s.kind === "furniture" || s.kind === "label"));
+        textIn.disabled = !texty;
+        if (document.activeElement !== textIn) { textIn.value = texty && s.label ? s.label : ""; }
+        textIn.setAttribute("aria-label", s && s.kind === "label" ? "Label text" : "Furniture name (optional)");
+      }
     }
 
     // ---------------------------------------------------------------- events
@@ -903,15 +1331,21 @@
       if (!active || e.target === lengthIn || isEditable(e.target)) {
         return;
       }
-      if (draft.length && widthMm > 0 && lengthIn && !e.ctrlKey && !e.metaKey && !e.altKey && /^[0-9.]$/.test(e.key)) {
+      if (draft.length && widthMm > 0 && lengthIn && (tool === "wall" || tool === "polyline") && !e.ctrlKey && !e.metaKey && !e.altKey && /^[0-9.]$/.test(e.key)) {
         lengthIn.hidden = false;
         lengthIn.focus({ preventScroll: true }); // the key's character lands in the input
         return;
       }
       if (e.key === "Escape") {
-        if (draft.length) { cancelDraft(); } else { select(null); }
+        if (rectDrag) { cancelRect(); } else if (draft.length) { cancelDraft(); } else { select(null); }
       } else if (e.key === "Enter") {
-        if (tool === "polyline" && draft.length >= 2) { finishWall(false); } else { return; }
+        if (tool === "polyline" && draft.length >= 2) {
+          finishWall(false);
+        } else if (tool === "furniture-outline" && draft.length >= 2) {
+          finishWall(true);
+        } else {
+          return;
+        }
       } else if ((e.key === "Delete" || e.key === "Backspace") && selectedId !== null) {
         remove(selectedId);
       } else if (KEYS[e.key] && selectedId !== null && tool === "select") {
@@ -1002,6 +1436,42 @@
           if (selectedId !== null) { remove(selectedId); }
         });
       }
+      if (textIn) {
+        textIn.addEventListener("input", function () {
+          var s = selectedId !== null ? shapes[selectedId] : null;
+          if (!s || (s.kind !== "furniture" && s.kind !== "label")) {
+            return;
+          }
+          var text = textIn.value.slice(0, TEXT_MAX);
+          if (s.kind === "label" && !text.trim()) {
+            return; // a label always has text; the box shows the old text again on leaving
+          }
+          s.label = text;
+          touch(s.id);
+        });
+        textIn.addEventListener("change", updatePanelText);
+        textIn.addEventListener("blur", updatePanelText);
+        textIn.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === "Escape") {
+            e.preventDefault();
+            textIn.blur();
+            stage.focus({ preventScroll: true });
+          }
+        });
+      }
+      if (labelIn) {
+        labelIn.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            placeLabel();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            closeLabel();
+            stage.focus({ preventScroll: true });
+          }
+        });
+        labelIn.addEventListener("blur", closeLabel);
+      }
       if (snapBox) { snapBox.addEventListener("change", renderOverlay); }
       if (lengthsBox) { lengthsBox.addEventListener("change", render); }
     }
@@ -1020,7 +1490,7 @@
     return {
       // The SVG groups floorplan.js stacks: shapes under rooms, lengths over room
       // labels, the overlay (drafts, previews, handles) on top.
-      layers: { shapes: gShapes, lengths: gLengths, overlay: gOverlay },
+      layers: { shapes: gShapes, texts: gTexts, lengths: gLengths, overlay: gOverlay },
       redraw: render,
       setActive: function (on) {
         active = !!on;
@@ -1028,6 +1498,8 @@
         if (!active) {
           endDrag();
           drag = null;
+          cancelRect();
+          closeLabel();
           draft = [];
           hover = null;
           selectedId = null;
@@ -1037,9 +1509,15 @@
       },
       // Select-tool presses on a shape or handle drag it instead of panning the view.
       noPan: function (e) {
+        if (active && tool === "furniture-rect") {
+          return true; // a drag draws the rectangle
+        }
         return active && tool === "select" && !!e && hitAt(e.clientX, e.clientY) !== null;
       },
-      interrupt: cancelDrag,
+      interrupt: function () {
+        cancelDrag();
+        cancelRect();
+      },
       // Draw room: a corner within SNAP_PX of a wall corner takes it exactly.
       snapToWalls: function (p) {
         if (!snapOn() || mods.alt) {

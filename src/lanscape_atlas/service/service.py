@@ -76,7 +76,10 @@ from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event, EventBus
 from lanscape_atlas.floorplan.geometry import (
     check_aspect,
+    check_furniture_fits,
     parse_door,
+    parse_furniture,
+    parse_label,
     parse_polygon,
     parse_wall,
     point_in_polygon,
@@ -234,13 +237,21 @@ class ShapeRule:
 
     parse: Callable[[object], dict[str, Any]]
     label: str = "none"
+    # Checks that need the plan's pixel size (width, height) once it is known; raises
+    # ValueError. Run inside the transaction, after the staleness check.
+    fit: Callable[[dict[str, Any], int, int], None] | None = None
 
 
-# The drawable kinds. Issue #11 adds "furniture" and "label" here (the schema already
-# allows them); a kind in SHAPE_KINDS but not here is refused as "not supported yet".
+def _fit_furniture(geometry: dict[str, Any], width: int, height: int) -> None:
+    check_furniture_fits(geometry, width=width, height=height)
+
+
+# The drawable kinds; a kind in SHAPE_KINDS but not here is refused as "not supported yet".
 SHAPE_RULES: dict[str, ShapeRule] = {
     "wall": ShapeRule(parse_wall),
     "door": ShapeRule(parse_door),
+    "furniture": ShapeRule(parse_furniture, label="optional", fit=_fit_furniture),
+    "label": ShapeRule(parse_label, label="required"),
 }
 
 
@@ -951,6 +962,8 @@ class Service:
         - each shape against ``SHAPE_RULES`` for its kind (``ValueError``; kinds the
           schema allows but no rule covers yet are refused as "not supported yet");
           an edit keeps the shape's kind;
+        - plan-size checks (``ShapeRule.fit``): a furniture rectangle whose rotated
+          corners leave the plan is refused, not clamped (after the staleness check);
         - ``based_on``: the newest batch that touched any shape when the page loaded
           (``queries.last_shapes_batch``). A newer one raises ``StaleShapes`` before
           ids are looked up, so a shape deleted elsewhere reads as stale, not unknown;
@@ -978,10 +991,14 @@ class Service:
             if newest > based_on:
                 raise StaleShapes([newest])
             current = {i: self._row_dict("plan_shape", i) for i in ids}
+            plan_row = self._plan_row()
+            for kind, (geometry, _label) in new:
+                self._check_fit(kind, geometry, plan_row)
             changed: list[tuple[int, dict[str, Any]]] = []
             for e in edits:
                 row = current[e.id]
                 geometry, label = self._check_shape(str(row["kind"]), e.geometry, e.label)
+                self._check_fit(str(row["kind"]), geometry, plan_row)
                 target = {"geometry": geometry, "label": label}
                 diff = {f: v for f, v in target.items() if row[f] != v}
                 if diff:
@@ -1026,6 +1043,13 @@ class Service:
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"a shape id must be an int, got {value!r}")
         return value
+
+    @staticmethod
+    def _check_fit(kind: str, geometry: str, plan_row: sqlite3.Row) -> None:
+        """Run the kind's plan-size check (``ShapeRule.fit``) on canonical geometry JSON."""
+        fit = SHAPE_RULES[kind].fit
+        if fit is not None:
+            fit(json.loads(geometry), int(plan_row["width"]), int(plan_row["height"]))
 
     @staticmethod
     def _check_shape(kind: object, geometry: object, label: object) -> tuple[str, str | None]:

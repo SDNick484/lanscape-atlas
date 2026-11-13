@@ -19,7 +19,7 @@ import pytest
 
 from helpers.floorplan_fixtures import drag_to_room_centre
 from helpers.plan import SQ_POINTS
-from lanscape_atlas.floorplan.geometry import plan_length_mm
+from lanscape_atlas.floorplan.geometry import plan_length_mm, rect_corners
 
 pytest.importorskip("playwright.sync_api")
 
@@ -654,6 +654,7 @@ def test_layer_order_and_no_pointer_events_outside_draw(
         "fp-shapes",
         "fp-rooms",
         "fp-labels",
+        "fp-texts",
         "fp-lengths",
         "fp-devices",
         "fp-draft",
@@ -717,3 +718,331 @@ def test_angle_lock_geometry_is_aspect_corrected(page: Any, live_server: str) ->
     assert got["angle"] == pytest.approx(math.degrees(math.atan2(0.15, 0.3)))
     assert got["len"] == pytest.approx(math.hypot(5000, 5000))
     assert got["at"] == pytest.approx([0.1 + 3048 / 12192, 0.1])
+
+
+# ------------------------------------------- furniture, labels, areas (issue #11)
+
+
+def _full(db: Path) -> list[dict[str, Any]]:
+    return [
+        {"id": r[0], "kind": r[1], "geometry": json.loads(r[2]), "label": r[3]}
+        for r in _rows(db, "SELECT id, kind, geometry, label FROM plan_shape ORDER BY id")
+    ]
+
+
+def _seed_named(base: str, db: Path, kind: str, geometry: dict[str, Any], label: str) -> int:
+    based_on = _rows(
+        db, "SELECT coalesce(max(batch_id), 0) FROM change WHERE entity = 'plan_shape'"
+    )
+    body = {
+        "creates": [{"kind": kind, "geometry": geometry, "label": label}],
+        "updates": [],
+        "deletes": [],
+        "based_on": based_on[0][0],
+    }
+    r = _post(base, "/floorplan/shapes", json=body)
+    assert r.status_code == 200, r.text
+    return int(_full(db)[-1]["id"])
+
+
+def _centre(page: Any, selector: str) -> tuple[float, float]:
+    box = page.locator(selector).bounding_box()
+    assert box is not None, selector
+    return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+
+def _drag(page: Any, a: tuple[float, float], b: tuple[float, float]) -> None:
+    page.mouse.move(*a)
+    page.mouse.down()
+    page.mouse.move(*b, steps=10)
+    page.mouse.up()
+
+
+def _rect_fits(rect: dict[str, float]) -> bool:
+    return all(-2e-6 <= v <= 1 + 2e-6 for c in rect_corners(rect, aspect=ASPECT) for v in c)
+
+
+def test_draw_rotate_and_resize_a_rectangle(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)  # 40 ft x 30 ft
+    _open_draw(page, live_server, "furniture-rect")
+    _drag(page, _client(page, 0.3, 0.3), _client(page, 0.5, 0.5))
+    assert page.locator(".fp-furniture.unsaved").count() == 1
+    assert page.locator(".fp-furniture-dims").text_content() == "8' 0\" \u00d7 6' 0\""
+    page.fill("#shape-text", "Couch")
+    assert page.locator(".fp-furniture-name").text_content() == "Couch"
+    page.click("#tool-select")
+    # Rotate: the handle above the top edge, dragged to the right of the centre, turns
+    # the rectangle 90 degrees (aspect-corrected).
+    cx, cy = _client(page, 0.4, 0.4)
+    _drag(page, _centre(page, ".fp-handle-rotate"), (cx + 150, cy))
+    # Resize: corner 2 turned to the lower left; dragging it down lengthens the width.
+    corner = _centre(page, ".fp-handle[data-handle='2']")
+    _drag(page, corner, (corner[0], corner[1] + 40))
+    _save(page)
+    (shape,) = _full(db)
+    rect = shape["geometry"]["rect"]
+    assert (shape["kind"], shape["label"]) == ("furniture", "Couch")
+    assert rect["angle"] == pytest.approx(90.0, abs=0.01)
+    assert rect["w"] > 0.2 + 0.01 and rect["h"] == pytest.approx(0.15, abs=0.004)
+    # The opposite corner stayed where it was: local corner 0 of the turned rectangle.
+    before = rect_corners({"cx": 0.4, "cy": 0.4, "w": 0.2, "h": 0.15, "angle": 90.0}, aspect=ASPECT)
+    after = rect_corners(rect, aspect=ASPECT)
+    assert after[0] == pytest.approx(before[0], abs=0.004)
+    assert _rect_fits(rect)
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-furniture-name").text_content() == "Couch"
+    assert page.locator(".fp-furniture-dims").count() == 1
+
+
+def test_rectangle_drag_too_small_makes_nothing(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    _blank(live_server)
+    _open_draw(page, live_server, "furniture-rect")
+    cx, cy = _client(page, 0.4, 0.4)
+    _drag(page, (cx, cy), (cx + 3, cy + 3))
+    assert page.locator(".fp-furniture").count() == 0 and _dirty(page) == 0
+    assert "Drag from one corner" in page.locator("#fp-status").inner_text()
+
+
+def test_furniture_outline_by_clicks(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    _open_draw(page, live_server, "furniture-outline")
+    for x, y in [(0.2, 0.6), (0.5, 0.6), (0.5, 0.7)]:
+        _click(page, x, y)
+    _move(page, 0.35, 0.8)
+    assert page.locator(".fp-wall-draft").count() == 1
+    _click(page, 0.35, 0.8)
+    _click(page, 0.2, 0.6)  # the first corner closes it
+    assert page.locator(".fp-furniture").count() == 1
+    page.fill("#shape-text", "Island")
+    # A polygon with fewer than 3 corners is no outline.
+    _click(page, 0.7, 0.7)
+    _click(page, 0.8, 0.7)
+    page.keyboard.press("Enter")
+    assert page.locator(".fp-furniture").count() == 1
+    assert "at least 3" in page.locator("#fp-status").inner_text()
+    _save(page)
+    (shape,) = _full(db)
+    assert (shape["kind"], shape["label"]) == ("furniture", "Island")
+    assert len(shape["geometry"]["points"]) == 4 and "rect" not in shape["geometry"]
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-furniture-dims").count() == 0  # outlines show no dimensions
+
+
+def test_place_a_label(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    _open_draw(page, live_server, "label")
+    _click(page, 0.5, 0.2)
+    assert page.locator("#draw-text").is_visible()
+    page.keyboard.press("Enter")  # no text: nothing is placed
+    assert page.locator(".fp-label").count() == 0
+    page.keyboard.type("  Patio  ")
+    page.keyboard.press("Enter")
+    assert page.locator("#draw-text").is_hidden()
+    assert page.locator(".fp-label").text_content() == "Patio"
+    _click(page, 0.7, 0.4)
+    page.keyboard.type("Never placed")
+    page.keyboard.press("Escape")
+    assert page.locator(".fp-label").count() == 1
+    # Edit its text in Select: an empty box keeps the old text.
+    page.click("#tool-select")
+    _click(page, 0.5, 0.2)
+    assert page.locator(".fp-label.selected").count() == 1
+    page.fill("#shape-text", "")
+    assert page.locator(".fp-label").text_content() == "Patio"
+    page.fill("#shape-text", "Deck")
+    _save(page)
+    (shape,) = _full(db)
+    assert (shape["kind"], shape["label"]) == ("label", "Deck")
+    assert shape["geometry"]["size"] == 0.02
+    assert shape["geometry"]["x"] == pytest.approx(0.5, abs=0.003)
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-label").text_content() == "Deck"
+
+
+def test_label_and_furniture_move_delete_and_layers(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    rect = {"rect": {"cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.1, "angle": 0.0}}
+    rid = _seed_named(live_server, db, "furniture", rect, "Table")
+    lid = _seed_named(live_server, db, "label", {"x": 0.2, "y": 0.2, "size": 0.02}, "Hall")
+    _seed(live_server, db, ("wall", {"points": [[0.1, 0.5], [0.9, 0.5]], "closed": False}))
+    page.goto(f"{live_server}/floorplan")
+    # Furniture is the lowest layer, walls over it; the label is in the text layer.
+    kinds = page.evaluate(
+        "[...document.querySelectorAll('.fp-shapes > *')]"
+        ".map(e => e.getAttribute('class').split(' ')[0])"
+    )
+    assert kinds == ["fp-furniture", "fp-wall"]
+    assert page.locator(".fp-texts .fp-label").count() == 1
+    page.click("#mode-draw")
+    _click(page, 0.2, 0.2)
+    assert page.locator(f".fp-label.selected[data-shape-id='{lid}']").count() == 1
+    page.keyboard.press("Delete")
+    assert page.locator(".fp-label").count() == 0
+    # A press inside the furniture (off the wall) picks it; the wall wins where they meet.
+    _click(page, 0.42, 0.53)
+    assert page.locator(f".fp-furniture.selected[data-shape-id='{rid}']").count() == 1
+    _click(page, 0.3, 0.5)
+    assert page.locator(".fp-wall.selected").count() == 1
+    _click(page, 0.42, 0.53)
+    _drag(page, _client(page, 0.42, 0.53), _client(page, 0.52, 0.63))
+    _save(page)
+    shapes = {s["kind"]: s for s in _full(db)}
+    assert set(shapes) == {"furniture", "wall"}
+    moved = shapes["furniture"]["geometry"]["rect"]
+    assert moved["cx"] == pytest.approx(0.6, abs=0.004) and moved["cy"] == pytest.approx(
+        0.6, abs=0.004
+    )
+    assert shapes["furniture"]["label"] == "Table"
+
+
+def test_names_with_markup_render_as_text(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    evil = '<img src=x onerror="window.__pwned = 1"><b>x</b>'
+    rect = {"rect": {"cx": 0.4, "cy": 0.5, "w": 0.2, "h": 0.1, "angle": 0.0}}
+    _seed_named(live_server, db, "furniture", rect, evil)
+    _seed_named(live_server, db, "label", {"x": 0.7, "y": 0.2, "size": 0.02}, evil)
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-furniture-name").text_content() == evil
+    assert page.locator(".fp-label").text_content() == evil
+    assert page.locator("#plan-svg img, #plan-svg b, .fp-stage img[src='x']").count() == 0
+    page.click("#mode-draw")
+    page.click("#tool-select")
+    _click(page, 0.7, 0.2)
+    assert page.locator("#shape-text").input_value() == evil
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__pwned === undefined")
+    assert page.locator("#shape-text").evaluate("e => e.parentElement.querySelector('b') === null")
+
+
+def test_rotating_near_the_edge_stops_before_a_corner_leaves_the_plan(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    """The page never stores a rectangle with a corner off the plan; the server refuses one."""
+    db = _db(tmp_path)
+    _blank(live_server)  # 40 ft x 30 ft: aspect 0.75
+    wide = {"rect": {"cx": 0.5, "cy": 0.5, "w": 0.9, "h": 0.05, "angle": 0.0}}
+    _seed_named(live_server, db, "furniture", wide, "Bench")
+    _open_draw(page, live_server, "select")
+    _click(page, 0.5, 0.5)
+    cx, cy = _client(page, 0.5, 0.5)
+    # Turning it a quarter would need 0.9 / 0.75 = 1.2 plan heights.
+    _drag(page, _centre(page, ".fp-handle-rotate"), (cx + 200, cy))
+    _save(page)
+    (shape,) = _full(db)
+    rect = shape["geometry"]["rect"]
+    assert 0 < abs(rect["angle"]) < 90 and _rect_fits(rect)
+    assert abs(rect["angle"]) > 30  # it turned as far as it could, not just a hair
+    # Moving it can't push a corner off the plan either.
+    page.goto(f"{live_server}/floorplan")
+    page.click("#mode-draw")
+    page.click("#tool-select")
+    _click(page, 0.5, 0.5)
+    c2 = _client(page, 0.5, 0.5)
+    _drag(page, c2, (c2[0] + 400, c2[1] + 400))
+    _save(page)
+    (shape,) = _full(db)
+    assert _rect_fits(shape["geometry"]["rect"])
+
+
+def test_room_shows_its_area_on_a_blank_plan(page: Any, live_server: str) -> None:
+    _blank(live_server)  # 40 ft x 30 ft
+    room = {"name": "Room A", "polygon": json.dumps(SQ_POINTS)}  # 0.4 x 0.4 of it
+    assert _post(live_server, "/floorplan/rooms", data=room, follow_redirects=False).is_redirect
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-room-label").text_content() == "Room A"
+    assert page.locator(".fp-room-area").text_content() == "\u2248 192 sq ft"  # 16 ft x 12 ft
+
+
+def test_room_area_in_metres(page: Any, live_server: str) -> None:
+    _blank(live_server, "metric")  # 12 m x 9 m
+    room = {"name": "Room A", "polygon": json.dumps(SQ_POINTS)}
+    assert _post(live_server, "/floorplan/rooms", data=room, follow_redirects=False).is_redirect
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-room-area").text_content() == "\u2248 17.3 m\u00b2"  # 4.8 x 3.6
+
+
+def test_self_intersecting_room_shows_no_area(page: Any, live_server: str) -> None:
+    """A bow-tie room has no meaningful area: the page shows none (never a negative one)."""
+    _blank(live_server)
+    bowtie = [[0.1, 0.1], [0.5, 0.5], [0.5, 0.1], [0.1, 0.5]]
+    room = {"name": "Room B", "polygon": json.dumps(bowtie)}
+    assert _post(live_server, "/floorplan/rooms", data=room, follow_redirects=False).is_redirect
+    page.goto(f"{live_server}/floorplan")
+    assert page.locator(".fp-room-label").text_content() == "Room B"
+    assert page.locator(".fp-room-area").count() == 0
+    assert "-" not in page.locator("#plan-svg").text_content()
+
+
+def test_no_area_or_dimensions_without_a_scale(
+    page: Any, synthetic_plan_and_room: str, tmp_path: Path
+) -> None:
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    assert page.locator(".fp-room-label").count() == 1
+    assert page.locator(".fp-room-area").count() == 0
+
+
+def test_area_and_label_sizes_stay_constant_on_screen(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    room = {"name": "Room A", "polygon": json.dumps(SQ_POINTS)}
+    assert _post(live_server, "/floorplan/rooms", data=room, follow_redirects=False).is_redirect
+    _seed_named(live_server, db, "label", {"x": 0.7, "y": 0.2, "size": 0.02}, "Patio")
+    page.goto(f"{live_server}/floorplan")
+
+    def on_screen(sel: str) -> float:
+        return float(
+            page.evaluate(
+                """(sel) => {
+                const t = document.querySelector(sel);
+                const svg = document.getElementById('plan-svg');
+                return parseFloat(t.getAttribute('font-size')) * svg.getScreenCTM().a;
+            }""",
+                sel,
+            )
+        )
+
+    before = (on_screen(".fp-room-area"), on_screen(".fp-label"))
+    page.evaluate("window.LanscapeFP.view.zoomTo(5)")
+    after = (on_screen(".fp-room-area"), on_screen(".fp-label"))
+    assert after == pytest.approx(before, rel=0.05)
+
+
+def test_area_formatter_and_js_geometry_match_the_server(page: Any, live_server: str) -> None:
+    _blank(live_server)
+    page.goto(f"{live_server}/floorplan")
+    got = page.evaluate(
+        """() => {
+        const u = window.LanscapeFP.units, g = window.LanscapeFP.drawing.geom;
+        const sq = [[0.25, 0.2], [0.75, 0.2], [0.75, 0.8], [0.25, 0.8]];
+        return {
+          imperial: u.formatArea(180 * 304.8 * 304.8, 'imperial'),
+          rounds: u.formatArea(180.4 * 304.8 * 304.8, 'imperial'),
+          metric: u.formatArea(16.7e6, 'metric'),
+          tenth: u.formatArea(16.74e6, 'metric'),
+          bad: u.formatArea(NaN, 'metric'),
+          area: g.polygonAreaMm2(sq, 0.75, 12000),
+          rev: g.polygonAreaMm2(sq.slice().reverse(), 0.75, 12000),
+          bow: g.polygonAreaMm2([[0.1, 0.1], [0.5, 0.5], [0.5, 0.1], [0.1, 0.5]], 0.75, 12000),
+          corners: g.rectCorners({cx: 0.5, cy: 0.5, w: 0.4, h: 0.2, angle: 90}, 0.5),
+          fits: g.rectFits({cx: 0.5, cy: 0.1, w: 0.4, h: 0.2, angle: 90}, 0.5),
+        };
+    }"""
+    )
+    assert got["imperial"] == "≈ 180 sq ft" and got["rounds"] == "≈ 180 sq ft"
+    assert got["metric"] == "≈ 16.7 m²" and got["tenth"] == "≈ 16.7 m²"
+    assert got["bad"] == ""
+    assert got["area"] == pytest.approx(32.4e6) == got["rev"]  # the server's test value
+    assert got["bow"] is None
+    ys = sorted({round(c[1], 9) for c in got["corners"]})
+    assert ys == [0.1, 0.9] and got["fits"] is False

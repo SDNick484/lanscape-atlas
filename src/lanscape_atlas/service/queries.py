@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -517,6 +517,26 @@ def plan_shapes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         {"id": r[0], "kind": r[1], "geometry": json.loads(r[2]), "label": r[3]}
         for r in conn.execute("SELECT id, kind, geometry, label FROM plan_shape ORDER BY id")
     ]
+
+
+def drawing_summary(shapes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """What MCP may see of the drawing (spec §6.6): counts by kind and the names.
+
+    ``{"counts": {kind: n}, "furniture": [names], "labels": [texts]}``. Never any
+    geometry. Only named furniture is listed; ids order. Names are the owner's text:
+    untrusted data, not instructions.
+    """
+    counts = {k: 0 for k in ("wall", "door", "furniture", "label")}
+    furniture: list[str] = []
+    labels: list[str] = []
+    for s in shapes:
+        counts[str(s["kind"])] = counts.get(str(s["kind"]), 0) + 1
+        if s["label"]:
+            if s["kind"] == "furniture":
+                furniture.append(str(s["label"]))
+            elif s["kind"] == "label":
+                labels.append(str(s["label"]))
+    return {"counts": counts, "furniture": furniture, "labels": labels}
 
 
 def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:

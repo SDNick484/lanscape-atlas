@@ -310,6 +310,11 @@
     }
     els = svg.querySelectorAll("text.fp-room-label");
     for (i = 0; i < els.length; i += 1) { els[i].setAttribute("font-size", size(1.8)); }
+    els = svg.querySelectorAll("text.fp-room-area");
+    for (i = 0; i < els.length; i += 1) {
+      els[i].setAttribute("font-size", size(1.3));
+      els[i].setAttribute("dy", size(2.1));
+    }
   }
 
   function clear(el) {
@@ -324,6 +329,16 @@
     if (selected === d.id) { cls += " selected"; }
     if (dirty[d.id]) { cls += " dirty"; }
     return cls;
+  }
+
+  // "≈ 180 sq ft" for a room polygon on a plan with a scale; "" without a scale, or for
+  // an outline whose edges cross itself (no meaningful area).
+  function roomArea(poly) {
+    if (!UNITS || !FP.drawing || !(plan.width_mm > 0)) {
+      return "";
+    }
+    var mm2 = FP.drawing.geom.polygonAreaMm2(poly, plan.height / plan.width, plan.width_mm);
+    return mm2 === null ? "" : UNITS.formatArea(mm2, plan.units);
   }
 
   function drawPlan() {
@@ -357,6 +372,19 @@
       });
       text.textContent = r.name;
       gLabels.appendChild(text);
+      var area = roomArea(poly);
+      if (area) {
+        var at = svgEl("text", {
+          "class": "fp-room-area",
+          "data-room-id": r.id,
+          x: (cx / poly.length * W).toFixed(2),
+          y: (cy / poly.length * H).toFixed(2),
+          dy: size(2.1),
+          "font-size": size(1.3),
+        });
+        at.textContent = area;
+        gLabels.appendChild(at);
+      }
     });
     var gDevs = svgEl("g", { "class": "fp-devices" });
     order.forEach(function (id) {
@@ -382,6 +410,7 @@
     svg.appendChild(gRooms);
     svg.appendChild(gLabels);
     if (draw) {
+      svg.appendChild(draw.layers.texts);
       svg.appendChild(draw.layers.lengths);
     }
     svg.appendChild(gDevs);
