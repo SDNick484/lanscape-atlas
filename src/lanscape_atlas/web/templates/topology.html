@@ -2,6 +2,19 @@
 {% block title %}Topology{% endblock %}
 {% block content %}
 <div id="topology" class="topology" data-root="{{ root }}" data-csrf="{{ csrf }}">
+  <details id="topo-howto" class="topo-howto" open>
+    <summary>How to use this map</summary>
+    <ul>
+      <li><strong>Zoom:</strong> scroll, pinch the trackpad, or use + / &minus;. Fit shows everything.</li>
+      <li><strong>Pan:</strong> drag empty space.</li>
+      <li><strong>Move:</strong> drag a device (saved automatically).</li>
+      <li><strong>Search:</strong> type a name, IP or MAC and pick a result.</li>
+      <li><strong>Connect:</strong> shift-click two devices (or drag a box around them), then "Connect selected".</li>
+      <li><strong>Unmanaged switch or hub:</strong> "Add placeholder", connect it to its uplink, then connect each device behind it. That device's dashed router line then hides.</li>
+      <li><strong>Delete:</strong> click a solid line, then "Delete link". Dashed lines come from the router and can't be deleted.</li>
+      <li><strong>Colours:</strong> a device's fill is its room's colour (legend in the toolbar).</li>
+    </ul>
+  </details>
   <div class="topo-toolbar" role="toolbar" aria-label="Topology tools">
     <form id="topo-add" class="inline">
       <label class="sr-only" for="topo-name">Name</label>
@@ -17,6 +30,15 @@
     <button type="button" id="topo-connect" class="secondary" disabled title="Select two devices">Connect selected (wired)</button>
     <button type="button" id="topo-delete" class="secondary" disabled title="Select a manual link">Delete link</button>
     <button type="button" id="topo-fit" class="secondary">Fit</button>
+    <button type="button" id="topo-zoom-out" class="secondary" aria-label="Zoom out" title="Zoom out (-)">&minus;</button>
+    <button type="button" id="topo-zoom-in" class="secondary" aria-label="Zoom in" title="Zoom in (+)">+</button>
+    <div class="topo-search">
+      <label class="sr-only" for="topo-search">Search devices</label>
+      <input id="topo-search" type="search" role="combobox" placeholder="Find a device" maxlength="100"
+             autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="topo-search-list">
+      <ul id="topo-search-list" class="topo-search-list" role="listbox" aria-label="Search results" hidden></ul>
+    </div>
+    <span id="topo-places" class="topo-legend topo-places muted" role="group" aria-label="Rooms"></span>
     <span class="topo-legend muted" aria-label="Legend">
       <span class="leg-group">Colour:
         <span class="sw wired"></span>wired <span class="sw wifi"></span>wifi
@@ -27,7 +49,7 @@
   </div>
   <p id="topo-status" class="topo-status" role="status" aria-live="polite"></p>
   <div class="topo-body">
-    <div id="cy" class="topo-canvas" aria-label="Network topology graph"></div>
+    <div id="cy" class="topo-canvas" tabindex="0" aria-label="Network topology graph"></div>
     <aside id="topo-panel" class="card topo-panel" hidden>
       <h2 id="topo-panel-name"></h2>
       <dl>
@@ -37,9 +59,6 @@
       <a id="topo-panel-link" href="#">Open device page</a>
     </aside>
   </div>
-  <p class="muted topo-help">Drag devices to arrange them; positions are saved automatically.
-  Shift-click (or box-select) two devices to connect them. Dashed edges come from the router's
-  client list and cannot be deleted.</p>
 </div>
 <script src="{{ root }}/static/cytoscape.min.js" defer></script>
 <script src="{{ root }}/static/topology.js" defer></script>

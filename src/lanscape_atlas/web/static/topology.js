@@ -6,6 +6,7 @@
  *   POST /topology/links             {a_device_id, b_device_id, kind}
  *   POST /topology/links/{id}/delete
  *   POST /topology/placeholder       {name, type}
+ * and searches with GET /topology/search?q= (ranked {device_id, name, type}).
  *
  * Everything from the server is untrusted: the DOM is built with textContent
  * only (graph labels are drawn on the canvas by Cytoscape, never as HTML).
@@ -21,6 +22,10 @@
   var ROOT = host.getAttribute("data-root") || "";
   var CSRF = host.getAttribute("data-csrf") || "";
   var SAVE_DELAY_MS = 1000;
+  var PLACE_COLOURS = 10;
+  var ZOOM_STEP = 1.25;
+  var SEARCH_DELAY_MS = 200;
+  var HOWTO_KEY = "atlas.topology.howto";
 
   var statusEl = document.getElementById("topo-status");
   var panel = document.getElementById("topo-panel");
@@ -93,6 +98,9 @@
         type: typeof n.type === "string" ? n.type : "",
         online: n.online === true,
         placeholder: n.placeholder === true,
+        placeId: isId(n.place_id) ? n.place_id : null,
+        // Palette slot; -1 (no place, or a deleted one) keeps the neutral fill.
+        placeIdx: isId(n.place_id) ? n.place_id % PLACE_COLOURS : -1,
         saved: positioned
       },
       // Placeholders (no interfaces) can never be seen online: not dimmed.
@@ -144,6 +152,13 @@
       wifi: cssVar("--edge-wifi", "#b5711d"),
       node: cssVar("--node", "#e8eefb")
     };
+    var placeRules = [];
+    for (var i = 0; i < PLACE_COLOURS; i++) {
+      placeRules.push({
+        selector: "node[placeIdx = " + i + "]",
+        style: { "background-color": cssVar("--place-" + i, c.node) }
+      });
+    }
     return [
       {
         selector: "node",
@@ -167,9 +182,20 @@
       { selector: 'node[type = "router"]', style: { "shape": "diamond", "width": 34, "height": 34 } },
       { selector: 'node[type = "mesh_node"], node[type = "ap"]', style: { "shape": "hexagon", "width": 28, "height": 28 } },
       { selector: 'node[type = "switch"], node[type = "hub"]', style: { "shape": "round-rectangle", "width": 30, "height": 18 } },
+    ].concat(placeRules, [
       { selector: "node.lbl-alt", style: { "text-valign": "top", "text-margin-y": -4 } },
       { selector: "node.offline", style: { "opacity": 0.45, "border-color": c.offline } },
       { selector: "node:selected", style: { "border-color": c.accent, "border-width": 4, "opacity": 1 } },
+      {
+        selector: "node.pulse",
+        style: {
+          "border-color": c.accent,
+          "border-width": 7,
+          "opacity": 1,
+          "transition-property": "border-width, border-color",
+          "transition-duration": "0.25s"
+        }
+      },
       {
         selector: "edge",
         style: {
@@ -183,7 +209,7 @@
       { selector: 'edge[kind = "mesh_backhaul"]', style: { "line-color": c.wifi, "width": 3 } },
       { selector: "edge[!manual]", style: { "line-style": "dashed", "line-dash-pattern": [6, 4] } },
       { selector: "edge:selected", style: { "line-color": c.accent, "width": 3.5 } }
-    ];
+    ]);
   }
 
   // ------------------------------------------------------------- layout
@@ -429,6 +455,212 @@
 
   function hidePanel() { panel.hidden = true; }
 
+  // ---------------------------------------------------- legend and zoom
+
+  // One swatch per place that has at least one node, plus "no place". Place
+  // names are untrusted: textContent only.
+  function renderPlaceLegend(graph) {
+    var box = document.getElementById("topo-places");
+    if (!box) { return; }
+    while (box.firstChild) { box.removeChild(box.firstChild); }
+    var used = {};
+    (graph.nodes || []).forEach(function (n) {
+      if (isId(n.place_id)) { used[n.place_id] = true; }
+    });
+    function item(cls, label) {
+      var wrap = document.createElement("span");
+      wrap.className = "leg-item";
+      var sw = document.createElement("span");
+      sw.className = "sw-place " + cls;
+      sw.setAttribute("aria-hidden", "true");
+      var text = document.createElement("span");
+      text.className = "leg-name";
+      text.textContent = label;
+      wrap.appendChild(sw);
+      wrap.appendChild(text);
+      box.appendChild(wrap);
+    }
+    (graph.places || []).forEach(function (p) {
+      if (!p || !isId(p.id) || !used[p.id]) { return; }
+      var name = typeof p.name === "string" && p.name.trim() ? p.name : "#" + p.id;
+      item("p" + (p.id % PLACE_COLOURS), name);
+    });
+    item("none", "no place");
+  }
+
+  // Zoom about the centre of the view, clamped to the zoom limits. A no-op at a limit.
+  function zoomBy(factor) {
+    if (!cy) { return; }
+    var next = Math.min(cy.maxZoom(), Math.max(cy.minZoom(), cy.zoom() * factor));
+    if (next === cy.zoom()) { return; }
+    cy.zoom({ level: next, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+  }
+
+  function onZoomKey(ev) {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) { return; }
+    if (ev.key === "+" || ev.key === "=") {
+      ev.preventDefault();
+      zoomBy(ZOOM_STEP);
+    } else if (ev.key === "-" || ev.key === "_") {
+      ev.preventDefault();
+      zoomBy(1 / ZOOM_STEP);
+    }
+  }
+
+  // ------------------------------------------------------------- how-to
+
+  function initHowTo() {
+    var box = document.getElementById("topo-howto");
+    if (!box) { return; }
+    try {
+      // Open unless the visitor closed it before; storage may be unavailable.
+      if (window.localStorage.getItem(HOWTO_KEY) === "closed") { box.open = false; }
+    } catch (e) { /* default: open */ }
+    box.addEventListener("toggle", function () {
+      try {
+        window.localStorage.setItem(HOWTO_KEY, box.open ? "open" : "closed");
+      } catch (e) { /* ignore */ }
+    });
+  }
+
+  // ------------------------------------------------------------- search
+
+  var searchInput = document.getElementById("topo-search");
+  var searchList = document.getElementById("topo-search-list");
+  var searchTimer = null;
+  var searchSeq = 0;
+  var searchActive = -1;
+
+  function searchOptions() { return searchList ? searchList.children : []; }
+
+  function closeSearch() {
+    if (!searchList) { return; }
+    searchList.hidden = true;
+    searchActive = -1;
+    searchInput.setAttribute("aria-expanded", "false");
+    searchInput.removeAttribute("aria-activedescendant");
+  }
+
+  function setActive(i) {
+    var opts = searchOptions();
+    if (!opts.length) { return; }
+    searchActive = (i + opts.length) % opts.length;
+    for (var k = 0; k < opts.length; k++) {
+      opts[k].setAttribute("aria-selected", k === searchActive ? "true" : "false");
+    }
+    searchInput.setAttribute("aria-activedescendant", opts[searchActive].id);
+    opts[searchActive].scrollIntoView({ block: "nearest" });
+  }
+
+  function renderResults(results) {
+    while (searchList.firstChild) { searchList.removeChild(searchList.firstChild); }
+    searchActive = -1;
+    searchInput.removeAttribute("aria-activedescendant");
+    var shown = 0;
+    results.forEach(function (r) {
+      if (!r || !isId(r.device_id)) { return; }
+      var li = document.createElement("li");
+      li.id = "topo-search-opt-" + shown;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", "false");
+      li.setAttribute("data-device-id", String(r.device_id));
+      var name = typeof r.name === "string" && r.name.trim() ? r.name : "#" + r.device_id;
+      var nameEl = document.createElement("span");
+      nameEl.textContent = name;
+      li.appendChild(nameEl);
+      if (typeof r.type === "string" && r.type) {
+        var typeEl = document.createElement("span");
+        typeEl.className = "muted";
+        typeEl.textContent = " " + r.type;
+        li.appendChild(typeEl);
+      }
+      // mousedown, not click: runs before the input's blur can close the list.
+      li.addEventListener("mousedown", function (ev) {
+        ev.preventDefault();
+        pickResult(r.device_id);
+      });
+      searchList.appendChild(li);
+      shown += 1;
+    });
+    if (!shown) {
+      var none = document.createElement("li");
+      none.className = "muted";
+      none.setAttribute("role", "presentation");
+      none.textContent = "No matches";
+      searchList.appendChild(none);
+    }
+    searchList.hidden = false;
+    searchInput.setAttribute("aria-expanded", "true");
+  }
+
+  function runSearch() {
+    searchTimer = null;
+    var q = searchInput.value.trim();
+    var seq = ++searchSeq;
+    if (!q) { closeSearch(); return; }
+    request("GET", "/topology/search?q=" + encodeURIComponent(q)).then(function (results) {
+      if (seq !== searchSeq) { return; }  // a newer query is in flight
+      renderResults(Array.isArray(results) ? results : []);
+    }).catch(function (err) {
+      if (seq !== searchSeq) { return; }
+      closeSearch();
+      setStatus("Search failed: " + err.message, true);
+    });
+  }
+
+  function pickResult(deviceId) {
+    closeSearch();
+    if (!cy) { return; }
+    var node = cy.getElementById(nodeKey(deviceId));
+    if (node.empty()) {
+      setStatus("That device is not on the graph.", true);
+      return;
+    }
+    searchInput.value = node.data("label");
+    cy.elements().unselect();
+    node.select();
+    showPanel(node);
+    // Pan explicitly: `center: {eles}` would centre the node's box including its label.
+    var zoom = Math.min(cy.maxZoom(), Math.max(cy.zoom(), 1.5));
+    var pos = node.position();
+    cy.animate(
+      { zoom: zoom, pan: { x: cy.width() / 2 - pos.x * zoom, y: cy.height() / 2 - pos.y * zoom } },
+      { duration: 300 }
+    );
+    node.addClass("pulse");
+    setTimeout(function () { node.removeClass("pulse"); }, 1000);
+  }
+
+  function onSearchKey(ev) {
+    var open = !searchList.hidden;
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (!open && searchInput.value.trim()) { runSearch(); return; }
+      setActive(searchActive + 1);
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      setActive(searchActive < 0 ? -1 : searchActive - 1);
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      var opts = searchOptions();
+      var opt = open && opts.length ? opts[searchActive >= 0 ? searchActive : 0] : null;
+      var id = opt ? Number(opt.getAttribute("data-device-id")) : 0;
+      if (isId(id)) { pickResult(id); }
+    } else if (ev.key === "Escape") {
+      if (open) { ev.preventDefault(); closeSearch(); }
+    }
+  }
+
+  function initSearch() {
+    if (!searchInput || !searchList) { return; }
+    searchInput.addEventListener("input", function () {
+      if (searchTimer !== null) { clearTimeout(searchTimer); }
+      searchTimer = setTimeout(runSearch, SEARCH_DELAY_MS);
+    });
+    searchInput.addEventListener("keydown", onSearchKey);
+    searchInput.addEventListener("blur", closeSearch);
+  }
+
   // --------------------------------------------------------------- init
 
   function init(graph) {
@@ -450,6 +682,7 @@
       maxZoom: 4
     });
     window.atlasCy = cy;
+    renderPlaceLegend(graph);
     layoutUnpositioned(graph);
     staggerLabels();
     cy.fit(undefined, 30);
@@ -477,7 +710,12 @@
   document.getElementById("topo-fit").addEventListener("click", function () {
     if (cy) { cy.fit(undefined, 30); }
   });
+  document.getElementById("topo-zoom-in").addEventListener("click", function () { zoomBy(ZOOM_STEP); });
+  document.getElementById("topo-zoom-out").addEventListener("click", function () { zoomBy(1 / ZOOM_STEP); });
+  document.getElementById("cy").addEventListener("keydown", onZoomKey);
   document.getElementById("topo-add").addEventListener("submit", onAdd);
+  initHowTo();
+  initSearch();
   window.addEventListener("beforeunload", function () {
     if (saveTimer !== null) {
       clearTimeout(saveTimer);
