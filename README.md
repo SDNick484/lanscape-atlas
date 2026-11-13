@@ -76,6 +76,12 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
   Turning roaming off leaves the device in that room's list, ready to be dropped.
 - **Undo.** Every plan, room and placement change is a batch in History and can be
   undone like any other change.
+- **Zoom and pan** work in every mode. Zoom from 1x (*Fit*, the whole plan) to 8x with
+  the mouse wheel or a trackpad pinch (about the pointer), a two-finger pinch on a touch
+  screen, the *+* / *−* buttons, or the `+`, `-` and `0` (fit) keys while the plan has
+  focus. Pan by dragging empty plan space, or hold Space and drag anywhere on the plan;
+  a press that moves less than 4 px is still a click, so *Draw room* corners work as
+  before. Device markers and labels keep their size on screen. The view is not saved.
 
 HTTP: `GET /api/v1/floorplan` returns the plan, rooms and device placements,
 `PUT /api/v1/floorplan/rooms` saves a room, and `POST /api/v1/floorplan/placements`

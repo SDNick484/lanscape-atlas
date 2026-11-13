@@ -5,7 +5,10 @@
  * createElement/createElementNS and textContent only, never innerHTML.
  *
  * Coordinates are normalized to [0, 1]; the SVG viewBox is the plan's pixel size,
- * so a point is drawn at (x * width, y * height).
+ * so a point is drawn at (x * width, y * height). Zoom and pan live in
+ * floorplan-view.js (loaded first); every client -> plan conversion goes through
+ * its LanscapeFP.view.toPlan, and marker, corner and label sizes are divided by the
+ * zoom so they stay the same size on screen.
  *
  * Place mode: drag a device from the list onto a room (the first room by id whose
  * polygon contains the drop point); drag a placed device within its room, or nudge
@@ -31,6 +34,8 @@
   var NUDGE = 0.005;
   var UNNAMED = "(unnamed)";
 
+  var FP = (window.LanscapeFP = window.LanscapeFP || {});
+  var view = FP.view || null; // null when there is no plan yet
   var DATA = JSON.parse(dataEl.textContent || "{}");
   var plan = DATA.plan || null;
   var svg = document.getElementById("plan-svg");
@@ -182,6 +187,26 @@
     return Math.max(plan.width, plan.height) / 100;
   }
 
+  // A size of k units in plan pixels that stays the same on screen at any zoom.
+  function size(k) {
+    return (unit() * k / (view ? view.zoom() : 1)).toFixed(3);
+  }
+
+  // Re-size markers, draft corners and room labels after a zoom change.
+  function applySizes() {
+    if (!svg || !plan) {
+      return;
+    }
+    var i, els = svg.querySelectorAll("circle.fp-dev");
+    for (i = 0; i < els.length; i += 1) { els[i].setAttribute("r", size(0.9)); }
+    els = svg.querySelectorAll(".fp-draft circle");
+    for (i = 0; i < els.length; i += 1) {
+      els[i].setAttribute("r", size(els[i].classList.contains("fp-draft-start") ? 1.1 : 0.5));
+    }
+    els = svg.querySelectorAll("text.fp-room-label");
+    for (i = 0; i < els.length; i += 1) { els[i].setAttribute("font-size", size(1.8)); }
+  }
+
   function clear(el) {
     while (el.firstChild) {
       el.removeChild(el.firstChild);
@@ -200,7 +225,7 @@
     if (!svg || !plan) {
       return;
     }
-    var W = plan.width, H = plan.height, u = unit();
+    var W = plan.width, H = plan.height;
     clear(svg);
     var gRooms = svgEl("g", { "class": "fp-rooms" });
     var gLabels = svgEl("g", { "class": "fp-labels" });
@@ -219,7 +244,7 @@
         "class": "fp-room-label",
         x: (cx / poly.length * W).toFixed(2),
         y: (cy / poly.length * H).toFixed(2),
-        "font-size": (u * 1.8).toFixed(2),
+        "font-size": size(1.8),
       });
       text.textContent = r.name;
       gLabels.appendChild(text);
@@ -235,7 +260,7 @@
         "data-device-id": d.id,
         cx: (d.x * W).toFixed(2),
         cy: (d.y * H).toFixed(2),
-        r: (u * 0.9).toFixed(2),
+        r: size(0.9),
         tabindex: 0,
         role: "button",
         "aria-label": label(d.name),
@@ -256,7 +281,7 @@
     if (!draft.length) {
       return g;
     }
-    var W = plan.width, H = plan.height, u = unit();
+    var W = plan.width, H = plan.height;
     var pts = draft.map(function (p) { return (p[0] * W).toFixed(2) + "," + (p[1] * H).toFixed(2); });
     g.appendChild(svgEl(draftClosed ? "polygon" : "polyline", { points: pts.join(" ") }));
     draft.forEach(function (p, i) {
@@ -265,7 +290,7 @@
         "class": start ? "fp-draft-start" : "fp-draft-pt",
         cx: (p[0] * W).toFixed(2),
         cy: (p[1] * H).toFixed(2),
-        r: (u * (start ? 1.1 : 0.5)).toFixed(2),
+        r: size(start ? 1.1 : 0.5),
       }));
     });
     return g;
@@ -449,27 +474,38 @@
 
   // ------------------------------------------------- pointer: plan markers
 
+  // Client point of a pointer event -> normalized plan point, under the view transform.
   function planPoint(evt) {
-    var rect = svg.getBoundingClientRect();
-    return [(evt.clientX - rect.left) / rect.width, (evt.clientY - rect.top) / rect.height];
+    return view.toPlan(evt.clientX, evt.clientY);
   }
 
-  function trackPointer(onMove, onUp) {
-    function up(e) {
+  var stopTracking = null; // cancels the drag in progress, if any
+
+  function trackPointer(onMove, onUp, onCancel) {
+    function off() {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", up);
       document.removeEventListener("pointercancel", cancel);
+      stopTracking = null;
+    }
+    function up(e) {
+      off();
       onUp(e);
     }
     function cancel() {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", up);
-      document.removeEventListener("pointercancel", cancel);
+      off();
+      if (onCancel) {
+        onCancel();
+      }
       render();
+    }
+    if (stopTracking) {
+      stopTracking();
     }
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", cancel);
+    stopTracking = cancel;
   }
 
   function dragMarker(evt, d) {
@@ -515,11 +551,13 @@
     }, function (e) {
       ghost.remove();
       dropOnPlan(d, e);
+    }, function () {
+      ghost.remove();
     });
   }
 
   function dropOnPlan(d, e) {
-    if (!svg || mode !== "place") {
+    if (!svg || !view || mode !== "place" || !view.inStage(e.clientX, e.clientY)) {
       return;
     }
     var p = planPoint(e);
@@ -651,6 +689,24 @@
 
   // -------------------------------------------------------------- wiring
 
+  function wireView() {
+    if (!view) {
+      return;
+    }
+    view.configure({
+      // Devices and the draft's first corner are handles: a press on them never pans.
+      noPan: function (target) {
+        return !!(target && target.closest && target.closest("[data-device-id], .fp-draft-start"));
+      },
+      interrupt: function () {
+        if (stopTracking) {
+          stopTracking();
+        }
+      },
+      change: applySizes,
+    });
+  }
+
   function wire() {
     // Unsaved placements live only in this page: warn before it is left.
     window.addEventListener("beforeunload", function (evt) {
@@ -728,4 +784,5 @@
   load();
   wire();
   render();
+  wireView();
 })();
