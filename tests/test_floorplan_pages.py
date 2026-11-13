@@ -120,6 +120,30 @@ def test_page_draws_plan_rooms_and_stable_selectors(
     assert "file_name" not in json.dumps(data)
 
 
+def test_page_loads_view_script_first_and_zoom_controls(client_csrf: TestClient) -> None:
+    # No plan: no stage, so no zoom controls (the scripts still load and do nothing).
+    html = client_csrf.get("/floorplan").text
+    assert 'id="zoom-in"' not in html and 'id="fp-view"' not in html
+    assert 'id="fp-search"' not in html
+    assert _upload(client_csrf, "p.png", png_bytes(1600, 1200)).status_code == 303
+    html = client_csrf.get("/floorplan").text
+    view_js = html.index('src="/static/floorplan-view.js" defer')
+    page_js = html.index('src="/static/floorplan.js" defer')
+    search_js = html.index('src="/static/floorplan-search.js" defer')
+    assert view_js < page_js < search_js
+    for id_ in ("zoom-in", "zoom-out", "zoom-fit", "fp-view", "fp-search", "fp-search-list"):
+        assert f'id="{id_}"' in html
+    # The image and the SVG overlay share the one transformed wrapper.
+    stage = html[html.index('id="fp-view"') :]
+    assert stage.index('id="plan-img"') < stage.index('id="plan-svg"') < stage.index("</svg>")
+    for path in (
+        "/static/floorplan-view.js",
+        "/static/floorplan.js",
+        "/static/floorplan-search.js",
+    ):
+        assert client_csrf.get(path).status_code == 200
+
+
 def test_offline_device_is_drawn_dimmed(
     client: TestClient, svc: Service, make_device: Callable[..., int], plan_seeded: None
 ) -> None:

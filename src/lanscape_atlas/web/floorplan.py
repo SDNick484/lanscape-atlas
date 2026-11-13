@@ -19,6 +19,13 @@ Writes:
   token in ``X-CSRF-Token``; errors are JSON (``app._wants_json``), and a stale
   ``based_on`` answers 409 with the reload message (``app._stale_write``).
 
+``GET /floorplan/search?q=`` (spec §4.2, same-origin page route like
+``/topology/search``): devices ranked by ``web.search`` (same matcher, caps and order as
+Topology), then rooms whose name contains ``q`` ignoring case (a literal substring
+test, so ``%`` and ``_`` are not wildcards), name-prefix first. Every result carries
+``kind``: ``{"kind": "device", "device_id", "name", "type"}`` or
+``{"kind": "room", "place_id", "name"}``.
+
 ``GET /floorplan/plan.<ext>`` serves only ``data_dir/floorplan/<file_name>`` with the
 file name from the database, never a path from the request.
 """
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlencode
@@ -61,6 +69,7 @@ from lanscape_atlas.web.pages import (
     csrf_form,
     render,
 )
+from lanscape_atlas.web.search import SEARCH_LIMIT, SearchQuery, search_devices
 
 router = APIRouter(include_in_schema=False)
 
@@ -250,6 +259,35 @@ def _page(
 @router.get("/floorplan", response_class=HTMLResponse)
 def floorplan_page(request: Request) -> HTMLResponse:
     return _page(request, _flash(request))
+
+
+def search_rooms(
+    conn: sqlite3.Connection, q: str, *, limit: int = SEARCH_LIMIT
+) -> list[dict[str, Any]]:
+    """Rooms whose name contains ``q`` (case-insensitive, literal), prefix matches first.
+
+    The caller holds ``service.lock``. A blank ``q`` gives ``[]``.
+    """
+    text = q.strip().casefold()
+    if not text:
+        return []
+    hits = []
+    for place_id, name in conn.execute("SELECT id, name FROM place"):
+        folded = str(name).casefold()
+        if text in folded:
+            hits.append((0 if folded.startswith(text) else 1, folded, int(place_id), str(name)))
+    hits.sort()
+    return [{"kind": "room", "place_id": h[2], "name": h[3]} for h in hits[:limit]]
+
+
+@router.get("/floorplan/search")
+def floorplan_search(request: Request, q: SearchQuery = "") -> list[dict[str, Any]]:
+    """Ranked devices (``web.search``) then matching rooms, for the page's search box."""
+    svc = _service(request)
+    with svc.lock:
+        devices = search_devices(svc.conn, q, window_min=svc.ip_match_window_min)
+        rooms = search_rooms(svc.conn, q)
+    return [{"kind": "device", **d} for d in devices] + rooms
 
 
 @router.get("/floorplan/plan.{ext}", response_model=None)

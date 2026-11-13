@@ -5,7 +5,10 @@
  * createElement/createElementNS and textContent only, never innerHTML.
  *
  * Coordinates are normalized to [0, 1]; the SVG viewBox is the plan's pixel size,
- * so a point is drawn at (x * width, y * height).
+ * so a point is drawn at (x * width, y * height). Zoom and pan live in
+ * floorplan-view.js (loaded first); every client -> plan conversion goes through
+ * its LanscapeFP.view.toPlan, and marker, corner and label sizes are divided by the
+ * zoom so they stay the same size on screen.
  *
  * Place mode: drag a device from the list onto a room (the first room by id whose
  * polygon contains the drop point); drag a placed device within its room, or nudge
@@ -15,6 +18,10 @@
  *
  * Layout mode: click to add corners, close on the first corner or "Close room",
  * then name the room; the plain HTML form posts it to /floorplan/rooms.
+ *
+ * LanscapeFP.page.revealDevice / revealRoom / clearFound are what the search box
+ * (floorplan-search.js) calls when a result is picked: they move the view, select or
+ * pulse a marker, and highlight the room and the tray entry.
  */
 (function () {
   "use strict";
@@ -31,6 +38,8 @@
   var NUDGE = 0.005;
   var UNNAMED = "(unnamed)";
 
+  var FP = (window.LanscapeFP = window.LanscapeFP || {});
+  var view = FP.view || null; // null when there is no plan yet
   var DATA = JSON.parse(dataEl.textContent || "{}");
   var plan = DATA.plan || null;
   var svg = document.getElementById("plan-svg");
@@ -50,6 +59,8 @@
   var mode = "place";
   var draft = [];
   var draftClosed = false;
+  var foundRoom = null; // place id highlighted by a search pick
+  var foundTray = null; // device id whose tray entry a search pick highlighted
 
   // ----------------------------------------------------------- geometry
   // Port of floorplan/geometry.py: points on an edge or vertex count as inside.
@@ -182,6 +193,26 @@
     return Math.max(plan.width, plan.height) / 100;
   }
 
+  // A size of k units in plan pixels that stays the same on screen at any zoom.
+  function size(k) {
+    return (unit() * k / (view ? view.zoom() : 1)).toFixed(3);
+  }
+
+  // Re-size markers, draft corners and room labels after a zoom change.
+  function applySizes() {
+    if (!svg || !plan) {
+      return;
+    }
+    var i, els = svg.querySelectorAll("circle.fp-dev");
+    for (i = 0; i < els.length; i += 1) { els[i].setAttribute("r", size(0.9)); }
+    els = svg.querySelectorAll(".fp-draft circle");
+    for (i = 0; i < els.length; i += 1) {
+      els[i].setAttribute("r", size(els[i].classList.contains("fp-draft-start") ? 1.1 : 0.5));
+    }
+    els = svg.querySelectorAll("text.fp-room-label");
+    for (i = 0; i < els.length; i += 1) { els[i].setAttribute("font-size", size(1.8)); }
+  }
+
   function clear(el) {
     while (el.firstChild) {
       el.removeChild(el.firstChild);
@@ -200,7 +231,7 @@
     if (!svg || !plan) {
       return;
     }
-    var W = plan.width, H = plan.height, u = unit();
+    var W = plan.width, H = plan.height;
     clear(svg);
     var gRooms = svgEl("g", { "class": "fp-rooms" });
     var gLabels = svgEl("g", { "class": "fp-labels" });
@@ -212,14 +243,15 @@
       var pts = poly.map(function (p) { return (p[0] * W).toFixed(2) + "," + (p[1] * H).toFixed(2); });
       var sel = selected !== null ? devices[selected] : null;
       var heardHere = !!(sel && sel.heard && sel.heard.place_id === r.id);
-      gRooms.appendChild(svgEl("polygon", { "class": "fp-room" + (heardHere ? " room--heard" : ""), "data-room-id": r.id, points: pts.join(" ") }));
+      var cls = "fp-room" + (heardHere ? " room--heard" : "") + (foundRoom === r.id ? " fp-room--found" : "");
+      gRooms.appendChild(svgEl("polygon", { "class": cls, "data-room-id": r.id, points: pts.join(" ") }));
       var cx = 0, cy = 0;
       poly.forEach(function (p) { cx += p[0]; cy += p[1]; });
       var text = svgEl("text", {
         "class": "fp-room-label",
         x: (cx / poly.length * W).toFixed(2),
         y: (cy / poly.length * H).toFixed(2),
-        "font-size": (u * 1.8).toFixed(2),
+        "font-size": size(1.8),
       });
       text.textContent = r.name;
       gLabels.appendChild(text);
@@ -235,7 +267,7 @@
         "data-device-id": d.id,
         cx: (d.x * W).toFixed(2),
         cy: (d.y * H).toFixed(2),
-        r: (u * 0.9).toFixed(2),
+        r: size(0.9),
         tabindex: 0,
         role: "button",
         "aria-label": label(d.name),
@@ -256,7 +288,7 @@
     if (!draft.length) {
       return g;
     }
-    var W = plan.width, H = plan.height, u = unit();
+    var W = plan.width, H = plan.height;
     var pts = draft.map(function (p) { return (p[0] * W).toFixed(2) + "," + (p[1] * H).toFixed(2); });
     g.appendChild(svgEl(draftClosed ? "polygon" : "polyline", { points: pts.join(" ") }));
     draft.forEach(function (p, i) {
@@ -265,7 +297,7 @@
         "class": start ? "fp-draft-start" : "fp-draft-pt",
         cx: (p[0] * W).toFixed(2),
         cy: (p[1] * H).toFixed(2),
-        r: (u * (start ? 1.1 : 0.5)).toFixed(2),
+        r: size(start ? 1.1 : 0.5),
       }));
     });
     return g;
@@ -366,7 +398,8 @@
 
   function trayItem(d, inRoom, roomId) {
     var li = document.createElement("li");
-    li.className = "fp-item" + (dirty[d.id] ? " dirty" : "") + (d.online ? "" : " offline");
+    li.className = "fp-item" + (dirty[d.id] ? " dirty" : "") + (d.online ? "" : " offline") +
+      (foundTray === d.id ? " fp-found" : "");
     li.setAttribute("data-tray-device", String(d.id));
     var name = document.createElement("span");
     name.className = "fp-name";
@@ -449,27 +482,38 @@
 
   // ------------------------------------------------- pointer: plan markers
 
+  // Client point of a pointer event -> normalized plan point, under the view transform.
   function planPoint(evt) {
-    var rect = svg.getBoundingClientRect();
-    return [(evt.clientX - rect.left) / rect.width, (evt.clientY - rect.top) / rect.height];
+    return view.toPlan(evt.clientX, evt.clientY);
   }
 
-  function trackPointer(onMove, onUp) {
-    function up(e) {
+  var stopTracking = null; // cancels the drag in progress, if any
+
+  function trackPointer(onMove, onUp, onCancel) {
+    function off() {
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", up);
       document.removeEventListener("pointercancel", cancel);
+      stopTracking = null;
+    }
+    function up(e) {
+      off();
       onUp(e);
     }
     function cancel() {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", up);
-      document.removeEventListener("pointercancel", cancel);
+      off();
+      if (onCancel) {
+        onCancel();
+      }
       render();
+    }
+    if (stopTracking) {
+      stopTracking();
     }
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", cancel);
+    stopTracking = cancel;
   }
 
   function dragMarker(evt, d) {
@@ -515,11 +559,13 @@
     }, function (e) {
       ghost.remove();
       dropOnPlan(d, e);
+    }, function () {
+      ghost.remove();
     });
   }
 
   function dropOnPlan(d, e) {
-    if (!svg || mode !== "place") {
+    if (!svg || !view || mode !== "place" || !view.inStage(e.clientX, e.clientY)) {
       return;
     }
     var p = planPoint(e);
@@ -612,6 +658,109 @@
     drawPlan();
   }
 
+  // --------------------------------------------------------------- search
+
+  function pulse(el) {
+    el.classList.remove("fp-pulse");
+    void el.getBoundingClientRect(); // restart the animation
+    el.classList.add("fp-pulse");
+    setTimeout(function () { el.classList.remove("fp-pulse"); }, 1000);
+  }
+
+  function showStage() {
+    if (view) {
+      view.stage.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function fitRoom(placeId) {
+    var poly = polygonOf(placeId);
+    if (!poly || !view) {
+      return false;
+    }
+    var xs = poly.map(function (p) { return p[0]; }), ys = poly.map(function (p) { return p[1]; });
+    view.fitBox(Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys));
+    showStage();
+    return true;
+  }
+
+  // Scroll the device's tray entry into view; clears the tray filter if it hides it.
+  function showTrayEntry(id) {
+    var sel = '[data-tray-device="' + id + '"]';
+    var li = trayEl ? trayEl.querySelector(sel) : null;
+    if (!li && filterEl && filterEl.value) {
+      filterEl.value = "";
+      drawTrays();
+      li = trayEl.querySelector(sel);
+    }
+    if (li) {
+      li.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function clearFound() {
+    if (foundRoom === null && foundTray === null) {
+      return;
+    }
+    foundRoom = null;
+    foundTray = null;
+    render();
+  }
+
+  function revealRoom(placeId) {
+    var r = roomById[placeId];
+    if (!r) {
+      setStatus("That room is not on this page yet: reload to see it.", true);
+      return;
+    }
+    foundRoom = r.id;
+    foundTray = null;
+    render();
+    if (!fitRoom(r.id)) {
+      setStatus("That room has no outline on the plan yet.", true);
+    }
+  }
+
+  function revealDevice(id) {
+    var d = devices[id];
+    if (!d) {
+      setStatus("That device is not on this page yet: reload to see it.", true);
+      return;
+    }
+    foundRoom = null;
+    foundTray = null;
+    if (onPlan(d)) {
+      render();
+      if (view) {
+        view.showPoint(d.x, d.y, 3);
+        showStage();
+      }
+      if (mode === "place") {
+        select(d.id);
+      }
+      var c = marker(d.id);
+      if (c) {
+        pulse(c);
+      }
+      return;
+    }
+    if (selected !== null) {
+      select(null);
+    }
+    foundTray = d.id;
+    var inRoom = d.place_id !== null && roomById[d.place_id];
+    if (inRoom) {
+      foundRoom = d.place_id;
+    }
+    render();
+    if (inRoom) {
+      fitRoom(d.place_id);
+    }
+    showTrayEntry(d.id);
+  }
+
+  FP.page = { revealDevice: revealDevice, revealRoom: revealRoom, clearFound: clearFound };
+
   // ---------------------------------------------------------------- save
 
   function save() {
@@ -650,6 +799,24 @@
   }
 
   // -------------------------------------------------------------- wiring
+
+  function wireView() {
+    if (!view) {
+      return;
+    }
+    view.configure({
+      // Devices and the draft's first corner are handles: a press on them never pans.
+      noPan: function (target) {
+        return !!(target && target.closest && target.closest("[data-device-id], .fp-draft-start"));
+      },
+      interrupt: function () {
+        if (stopTracking) {
+          stopTracking();
+        }
+      },
+      change: applySizes,
+    });
+  }
 
   function wire() {
     // Unsaved placements live only in this page: warn before it is left.
@@ -728,4 +895,5 @@
   load();
   wire();
   render();
+  wireView();
 })();

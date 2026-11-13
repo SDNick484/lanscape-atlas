@@ -8,6 +8,19 @@
     <button type="button" id="discard-changes" class="secondary" disabled>Discard</button>
     <button type="button" id="mode-layout" class="secondary" aria-pressed="false">Draw room</button>
     {% endif %}
+    {% if svg %}
+    <div class="fp-search">
+      <label class="sr-only" for="fp-search">Search devices and rooms</label>
+      <input id="fp-search" type="search" role="combobox" placeholder="Find a device or room" maxlength="100"
+             autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="fp-search-list">
+      <ul id="fp-search-list" class="fp-search-list" role="listbox" aria-label="Search results" hidden></ul>
+    </div>
+    <div class="fp-nav" role="group" aria-label="View">
+      <button type="button" id="zoom-out" class="secondary" aria-label="Zoom out" title="Zoom out (-)">&minus;</button>
+      <button type="button" id="zoom-in" class="secondary" aria-label="Zoom in" title="Zoom in (+)">+</button>
+      <button type="button" id="zoom-fit" class="secondary" title="Fit the whole plan (0)">Fit</button>
+    </div>
+    {% endif %}
     <form id="plan-upload" class="inline push" method="post" action="{{ root }}/floorplan/plan" enctype="multipart/form-data">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label for="plan-file" class="muted">{{ "Replace plan" if plan else "Upload plan" }}</label>
@@ -20,7 +33,8 @@
   <div class="fp-body">
     <div class="fp-main">
     {% if svg %}
-      <div id="floorplan" class="fp-stage">
+      <div id="floorplan" class="fp-stage" tabindex="0" role="group" data-zoom="1" aria-label="Floor plan: scroll or pinch to zoom, drag empty space to pan">
+        <div id="fp-view" class="fp-view">
         <img id="plan-img" src="{{ plan.url }}" width="{{ svg.w }}" height="{{ svg.h }}" alt="Floor plan image" draggable="false">
         <svg id="plan-svg" class="fp-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ svg.w }} {{ svg.h }}" preserveAspectRatio="none" data-unit="{{ '%.3f'|format(svg.unit) }}" aria-label="Rooms and devices">
           <g class="fp-rooms">
@@ -40,6 +54,7 @@
           </g>
           <g class="fp-draft"></g>
         </svg>
+        </div>
       </div>
       <div id="room-draw" class="card fp-draw" hidden>
         <p class="muted">Click on the plan to add corners. Click the first corner or <em>Close room</em> to finish.
@@ -58,7 +73,9 @@
       </div>
       <p class="muted fp-help">Drag devices from the list onto a room. Drag a placed device to move it
       within its room, or select it and use the arrow keys. Changes are kept until you press
-      <em>Save changes</em>.</p>
+      <em>Save changes</em>. Zoom with the wheel, a pinch or the + / &minus; buttons;
+      drag empty space (or hold Space and drag) to pan; <em>Fit</em> shows the whole plan.
+      Search finds a device or room and shows it.</p>
     {% else %}
       <p class="card empty">No floor plan yet. Upload a PNG, JPG or SVG image (up to 10 MiB) to start.</p>
     {% endif %}
@@ -120,5 +137,7 @@
   </datalist>
   <script type="application/json" id="fp-data">{{ data_json|safe }}</script>
 </div>
+<script src="{{ root }}/static/floorplan-view.js" defer></script>
 <script src="{{ root }}/static/floorplan.js" defer></script>
+<script src="{{ root }}/static/floorplan-search.js" defer></script>
 {% endblock %}
