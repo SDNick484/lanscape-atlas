@@ -13,6 +13,8 @@
  * normalized plan coordinates ([0, 1] across the plan); they read the wrapper's
  * on-screen box, which already includes the transform.
  *
+ * showPoint() and fitBox() serve the search box (floorplan-search.js).
+ *
  * Zoom is 1x (fit) to 8x: toolbar buttons and the + / = / - / 0 keys (x1.25 about the
  * view centre), wheel and trackpad pinch about the pointer, two-finger touch pinch.
  * Pan: drag on empty plan space (a press that moves less than 4 px stays a click), or
@@ -127,6 +129,24 @@
     s = MIN;
     tx = 0;
     ty = 0;
+    apply();
+  }
+
+  // Centre the plan point (x, y), zooming in to at least `minZoom` (as far as the
+  // clamp allows near the plan's edges).
+  function showPoint(x, y, minZoom) {
+    s = clamp(Math.max(s, minZoom || MIN), MIN, MAX);
+    tx = 0.5 - x * s;
+    ty = 0.5 - y * s;
+    apply();
+  }
+
+  // Zoom and pan so the plan box (x0, y0)-(x1, y1) fills the view with a margin.
+  function fitBox(x0, y0, x1, y1) {
+    var w = Math.max(x1 - x0, 1e-6), h = Math.max(y1 - y0, 1e-6);
+    s = clamp(Math.min(1 / (w * 1.2), 1 / (h * 1.2)), MIN, MAX);
+    tx = 0.5 - (x0 + x1) / 2 * s;
+    ty = 0.5 - (y0 + y1) / 2 * s;
     apply();
   }
 
@@ -352,6 +372,9 @@
     zoomBy: zoomBy,
     fit: fit,
     panBy: panBy,
+    showPoint: showPoint,
+    fitBox: fitBox,
+    stage: stage,
     // The page script supplies noPan, interrupt and change.
     configure: function (h) {
       Object.keys(h).forEach(function (k) {

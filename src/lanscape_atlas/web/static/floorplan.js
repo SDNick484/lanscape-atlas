@@ -18,6 +18,10 @@
  *
  * Layout mode: click to add corners, close on the first corner or "Close room",
  * then name the room; the plain HTML form posts it to /floorplan/rooms.
+ *
+ * LanscapeFP.page.revealDevice / revealRoom / clearFound are what the search box
+ * (floorplan-search.js) calls when a result is picked: they move the view, select or
+ * pulse a marker, and highlight the room and the tray entry.
  */
 (function () {
   "use strict";
@@ -55,6 +59,8 @@
   var mode = "place";
   var draft = [];
   var draftClosed = false;
+  var foundRoom = null; // place id highlighted by a search pick
+  var foundTray = null; // device id whose tray entry a search pick highlighted
 
   // ----------------------------------------------------------- geometry
   // Port of floorplan/geometry.py: points on an edge or vertex count as inside.
@@ -237,7 +243,8 @@
       var pts = poly.map(function (p) { return (p[0] * W).toFixed(2) + "," + (p[1] * H).toFixed(2); });
       var sel = selected !== null ? devices[selected] : null;
       var heardHere = !!(sel && sel.heard && sel.heard.place_id === r.id);
-      gRooms.appendChild(svgEl("polygon", { "class": "fp-room" + (heardHere ? " room--heard" : ""), "data-room-id": r.id, points: pts.join(" ") }));
+      var cls = "fp-room" + (heardHere ? " room--heard" : "") + (foundRoom === r.id ? " fp-room--found" : "");
+      gRooms.appendChild(svgEl("polygon", { "class": cls, "data-room-id": r.id, points: pts.join(" ") }));
       var cx = 0, cy = 0;
       poly.forEach(function (p) { cx += p[0]; cy += p[1]; });
       var text = svgEl("text", {
@@ -391,7 +398,8 @@
 
   function trayItem(d, inRoom, roomId) {
     var li = document.createElement("li");
-    li.className = "fp-item" + (dirty[d.id] ? " dirty" : "") + (d.online ? "" : " offline");
+    li.className = "fp-item" + (dirty[d.id] ? " dirty" : "") + (d.online ? "" : " offline") +
+      (foundTray === d.id ? " fp-found" : "");
     li.setAttribute("data-tray-device", String(d.id));
     var name = document.createElement("span");
     name.className = "fp-name";
@@ -649,6 +657,109 @@
     document.getElementById("room-close").disabled = draft.length < 3;
     drawPlan();
   }
+
+  // --------------------------------------------------------------- search
+
+  function pulse(el) {
+    el.classList.remove("fp-pulse");
+    void el.getBoundingClientRect(); // restart the animation
+    el.classList.add("fp-pulse");
+    setTimeout(function () { el.classList.remove("fp-pulse"); }, 1000);
+  }
+
+  function showStage() {
+    if (view) {
+      view.stage.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function fitRoom(placeId) {
+    var poly = polygonOf(placeId);
+    if (!poly || !view) {
+      return false;
+    }
+    var xs = poly.map(function (p) { return p[0]; }), ys = poly.map(function (p) { return p[1]; });
+    view.fitBox(Math.min.apply(null, xs), Math.min.apply(null, ys), Math.max.apply(null, xs), Math.max.apply(null, ys));
+    showStage();
+    return true;
+  }
+
+  // Scroll the device's tray entry into view; clears the tray filter if it hides it.
+  function showTrayEntry(id) {
+    var sel = '[data-tray-device="' + id + '"]';
+    var li = trayEl ? trayEl.querySelector(sel) : null;
+    if (!li && filterEl && filterEl.value) {
+      filterEl.value = "";
+      drawTrays();
+      li = trayEl.querySelector(sel);
+    }
+    if (li) {
+      li.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function clearFound() {
+    if (foundRoom === null && foundTray === null) {
+      return;
+    }
+    foundRoom = null;
+    foundTray = null;
+    render();
+  }
+
+  function revealRoom(placeId) {
+    var r = roomById[placeId];
+    if (!r) {
+      setStatus("That room is not on this page yet: reload to see it.", true);
+      return;
+    }
+    foundRoom = r.id;
+    foundTray = null;
+    render();
+    if (!fitRoom(r.id)) {
+      setStatus("That room has no outline on the plan yet.", true);
+    }
+  }
+
+  function revealDevice(id) {
+    var d = devices[id];
+    if (!d) {
+      setStatus("That device is not on this page yet: reload to see it.", true);
+      return;
+    }
+    foundRoom = null;
+    foundTray = null;
+    if (onPlan(d)) {
+      render();
+      if (view) {
+        view.showPoint(d.x, d.y, 3);
+        showStage();
+      }
+      if (mode === "place") {
+        select(d.id);
+      }
+      var c = marker(d.id);
+      if (c) {
+        pulse(c);
+      }
+      return;
+    }
+    if (selected !== null) {
+      select(null);
+    }
+    foundTray = d.id;
+    var inRoom = d.place_id !== null && roomById[d.place_id];
+    if (inRoom) {
+      foundRoom = d.place_id;
+    }
+    render();
+    if (inRoom) {
+      fitRoom(d.place_id);
+    }
+    showTrayEntry(d.id);
+  }
+
+  FP.page = { revealDevice: revealDevice, revealRoom: revealRoom, clearFound: clearFound };
 
   // ---------------------------------------------------------------- save
 

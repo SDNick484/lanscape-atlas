@@ -456,3 +456,135 @@ def test_markers_and_labels_keep_their_screen_size(
     w8b = marker.bounding_box()
     # Its box includes the stroke, 4 px instead of 2 px when selected.
     assert w8b is not None and w8b["width"] == pytest.approx(w1 + 2, abs=1)
+
+
+# ------------------------------------------------------------------- search (§4.2)
+
+ROOM_B = [[0.6, 0.6], [0.9, 0.6], [0.9, 0.9], [0.6, 0.9]]
+
+
+def _add_room_b(base: str) -> None:
+    with httpx.Client(base_url=base) as c:
+        c.get("/topology")
+        h = {"X-CSRF-Token": c.cookies.get("atlas_csrf", "")}
+        c.post(
+            "/floorplan/rooms", data={"name": "Room B", "polygon": json.dumps(ROOM_B)}, headers=h
+        )
+
+
+def _pick(page: Any, text: str, option: str) -> None:
+    page.fill("#fp-search", text)
+    opt = page.locator("#fp-search-list [role=option]", has_text=option).first
+    opt.wait_for()
+    opt.click()
+
+
+def test_search_for_a_placed_device_centres_it(
+    page: Any, synthetic_plan_and_room: str, tmp_path: Path
+) -> None:
+    db = tmp_path / "live.db"
+    dev = _add_device(db, "Frobnicator")
+    _place(synthetic_plan_and_room, dev, _room_a(db), 0.3, 0.2)
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    page.fill("#fp-search", "frobn")
+    page.wait_for_selector("#fp-search-list [role=option]")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("Enter")
+    assert _zoom(page) >= 3
+    marker = page.locator(f"[data-device-id='{dev}']")
+    box = marker.bounding_box()
+    stage = _stage_box(page)
+    assert box is not None
+    assert box["x"] + box["width"] / 2 == pytest.approx(stage["x"] + stage["width"] / 2, abs=2)
+    assert box["y"] + box["height"] / 2 == pytest.approx(stage["y"] + stage["height"] / 2, abs=2)
+    cls = marker.get_attribute("class") or ""
+    assert "selected" in cls and "fp-pulse" in cls
+    assert page.locator("#fp-sel-name").text_content() == "Frobnicator"
+    assert page.locator("#fp-search-list").is_hidden()
+    page.wait_for_function(
+        f"!document.querySelector(\"[data-device-id='{dev}']\").classList.contains('fp-pulse')"
+    )
+
+
+def test_search_for_a_room_highlights_it(page: Any, synthetic_plan_and_room: str) -> None:
+    _add_room_b(synthetic_plan_and_room)
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    _pick(page, "room b", "Room B")
+    room_b = page.locator("polygon.fp-room").nth(1)  # rooms are drawn in id order
+    assert "fp-room--found" in (room_b.get_attribute("class") or "")
+    assert "fp-room--found" not in (
+        page.locator("polygon.fp-room").first.get_attribute("class") or ""
+    )
+    assert _zoom(page) > 1
+    # The whole room is in view: its corners are inside the stage.
+    m = PlanMap(page)
+    for x, y in ((0.6, 0.6), (0.9, 0.9)):
+        assert _visible(page, *m.client(x, y))
+    # Typing a new query and clearing it drops the highlight.
+    page.fill("#fp-search", "")
+    page.wait_for_function("!document.querySelector('.fp-room--found')")
+
+
+def test_search_for_a_roaming_device_fits_its_room_and_tray_entry(
+    page: Any, synthetic_plan_and_room: str, tmp_path: Path
+) -> None:
+    db = tmp_path / "live.db"
+    for i in range(40):
+        _add_device(db, f"Filler {i:02d}")
+    phone = _add_device(db, "Zed Phone")
+    body = {
+        "placements": [
+            {"device_id": phone, "place_id": _room_a(db), "x": None, "y": None, "roaming": True}
+        ],
+        "based_on": {str(phone): 0},
+    }
+    with httpx.Client(base_url=synthetic_plan_and_room) as c:
+        c.get("/topology")
+        h = {"X-CSRF-Token": c.cookies.get("atlas_csrf", "")}
+        assert c.post("/floorplan/placements", json=body, headers=h).status_code == 200
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    page.fill("#tray-filter", "filler")  # hides the entry; picking it must bring it back
+    _pick(page, "zed", "Zed Phone")
+    entry = page.locator(f"[data-tray-device='{phone}']")
+    assert "fp-found" in (entry.get_attribute("class") or "")
+    assert entry.is_visible() and entry.evaluate(
+        "el => { const t = document.getElementById('tray').getBoundingClientRect();"
+        " const r = el.getBoundingClientRect(); return r.top >= t.top && r.bottom <= t.bottom; }"
+    )
+    room_a = page.locator("polygon.fp-room").first
+    assert "fp-room--found" in (room_a.get_attribute("class") or "")
+    assert _zoom(page) > 1
+
+
+def test_search_for_an_unassigned_device_highlights_its_tray_entry(
+    page: Any, synthetic_plan_and_room: str, tmp_path: Path
+) -> None:
+    db = tmp_path / "live.db"
+    for i in range(40):
+        _add_device(db, f"Filler {i:02d}")
+    lone = _add_device(db, "Zed Sensor")
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    _pick(page, "zed sen", "Zed Sensor")
+    entry = page.locator(f"[data-tray-device='{lone}']")
+    assert "fp-found" in (entry.get_attribute("class") or "")
+    assert entry.evaluate(
+        "el => { const t = document.getElementById('tray').getBoundingClientRect();"
+        " const r = el.getBoundingClientRect(); return r.top >= t.top && r.bottom <= t.bottom; }"
+    )
+    assert _zoom(page) == 1
+    assert page.locator(".fp-room--found").count() == 0
+
+
+def test_search_escape_closes_and_markup_names_are_text(
+    page: Any, synthetic_plan_and_room: str, tmp_path: Path
+) -> None:
+    _add_device(tmp_path / "live.db", "<i>odd</i>")
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    page.fill("#fp-search", "odd")
+    opt = page.locator("#fp-search-list [role=option]").first
+    opt.wait_for()
+    assert "<i>odd</i>" in (opt.text_content() or "")
+    assert page.locator("#fp-search-list i").count() == 0
+    page.keyboard.press("Escape")
+    assert page.locator("#fp-search-list").is_hidden()
+    assert page.locator("#fp-search").get_attribute("aria-expanded") == "false"

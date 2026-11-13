@@ -9,6 +9,12 @@
     <button type="button" id="mode-layout" class="secondary" aria-pressed="false">Draw room</button>
     {% endif %}
     {% if svg %}
+    <div class="fp-search">
+      <label class="sr-only" for="fp-search">Search devices and rooms</label>
+      <input id="fp-search" type="search" role="combobox" placeholder="Find a device or room" maxlength="100"
+             autocomplete="off" aria-autocomplete="list" aria-expanded="false" aria-controls="fp-search-list">
+      <ul id="fp-search-list" class="fp-search-list" role="listbox" aria-label="Search results" hidden></ul>
+    </div>
     <div class="fp-nav" role="group" aria-label="View">
       <button type="button" id="zoom-out" class="secondary" aria-label="Zoom out" title="Zoom out (-)">&minus;</button>
       <button type="button" id="zoom-in" class="secondary" aria-label="Zoom in" title="Zoom in (+)">+</button>
@@ -68,7 +74,8 @@
       <p class="muted fp-help">Drag devices from the list onto a room. Drag a placed device to move it
       within its room, or select it and use the arrow keys. Changes are kept until you press
       <em>Save changes</em>. Zoom with the wheel, a pinch or the + / &minus; buttons;
-      drag empty space (or hold Space and drag) to pan; <em>Fit</em> shows the whole plan.</p>
+      drag empty space (or hold Space and drag) to pan; <em>Fit</em> shows the whole plan.
+      Search finds a device or room and shows it.</p>
     {% else %}
       <p class="card empty">No floor plan yet. Upload a PNG, JPG or SVG image (up to 10 MiB) to start.</p>
     {% endif %}
@@ -132,4 +139,5 @@
 </div>
 <script src="{{ root }}/static/floorplan-view.js" defer></script>
 <script src="{{ root }}/static/floorplan.js" defer></script>
+<script src="{{ root }}/static/floorplan-search.js" defer></script>
 {% endblock %}
