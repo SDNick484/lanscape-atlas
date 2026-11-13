@@ -24,6 +24,7 @@ ranges, not a real network.
   actions to name, type, claim, or mark known/unwanted.
 - **Topology** view: router, mesh nodes, switches, devices. Discovered links are
   dashed, manual links solid; drag to arrange, add placeholders for unmanaged switches.
+  See [Topology](#topology) below.
 - **History** of every change, grouped by batch, with per-batch **Undo**.
 - **Status** page with collector health and counts.
 - **HTTP API** under `/api/v1` (OpenAPI via FastAPI) and an **MCP server** at `/mcp`
@@ -32,6 +33,28 @@ ranges, not a real network.
 - **Floor plan** (Phase 2): upload a plan, draw rooms, place devices. See below.
 - **Bluetooth Find** (Phase 3): where was my remote or phone last heard, by room, from
   ESP32 Bluetooth proxies through Home Assistant. See below.
+
+## Topology
+
+The Topology page draws the network as a graph. A "How to use this map" box at the top
+explains the controls (open the first time, then it remembers whether you closed it).
+
+- **Navigate:** scroll or pinch to zoom, drag empty space to pan, `+` / `-` buttons
+  (or the `+`, `=` and `-` keys while the graph has focus) zoom by 25% about the centre of
+  the view. Fit shows everything.
+- **Search:** the "Find a device" box matches name, hostname, vendor, IP and MAC. Use the
+  arrow keys and Enter (or click) to pick a result: the device is selected, centred at a
+  zoom of at least 1.5, and pulses once. An exact IP or full MAC ranks first, then names
+  that start with what you typed.
+- **Colours:** a device's fill is its room's colour (ten colours, repeated beyond ten
+  rooms; the toolbar legend lists the rooms that have devices). The border still shows
+  online / offline and selection.
+- **Connections:** discovered links come from the router's client list and are dashed;
+  links you draw are solid. Shift-click two devices (or drag a box round them) and use
+  "Connect selected". For an unmanaged switch or hub, "Add placeholder", connect it to its
+  uplink, then connect each device behind it: once a device is wired by hand to a switch
+  or hub, its dashed router line is hidden (routers, mesh nodes and access points keep
+  theirs). Deleting the manual link brings the dashed line back.
 
 ## Floor plan
 

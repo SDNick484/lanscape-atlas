@@ -160,8 +160,23 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 /* Topology view */
 :root { --node: #e8eefb; --edge-wired: #6b6b70; --edge-wifi: #b5711d; }
+/* Place fills (index = place id % 10): distinct from the neutral node fill and light/dark enough to keep the green/grey/blue border readable. */
+:root {
+  --place-0: #cfe0ff; --place-1: #ffd9b3;
+  --place-2: #d4ecc4; --place-3: #f6c9de;
+  --place-4: #e0d1f5; --place-5: #fff0a8;
+  --place-6: #b8e8e4; --place-7: #f2c4c0;
+  --place-8: #d9d2c0; --place-9: #c4d4dc;
+}
 @media (prefers-color-scheme: dark) {
   :root { --node: #24324d; --edge-wired: #9a9aa2; --edge-wifi: #e3a54f; }
+  :root {
+    --place-0: #2f4b86; --place-1: #7a4a1e;
+    --place-2: #3b6a2f; --place-3: #7c3558;
+    --place-4: #5a3d86; --place-5: #6e6120;
+    --place-6: #226560; --place-7: #7d3a36;
+    --place-8: #5c5645; --place-9: #425763;
+  }
 }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -193,7 +208,24 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .topo-panel dd { margin: 0; }
 .topo-panel .state.online { color: var(--online); }
 .topo-panel .state.offline { color: var(--muted); }
-.topo-help { font-size: 12px; margin-top: 8px; }
+.topo-howto { font-size: 13px; margin: 0 0 8px; }
+.topo-howto summary { cursor: pointer; font-weight: 500; }
+.topo-howto ul { margin: 6px 0 0; padding-left: 20px; }
+.topo-howto li { margin: 2px 0; }
+.topo-search { position: relative; }
+.topo-search input { width: 190px; }
+.topo-search-list {
+  position: absolute; z-index: 5; top: calc(100% + 2px); left: 0; min-width: 100%; width: max-content; max-width: 320px;
+  max-height: 260px; overflow-y: auto; margin: 0; padding: 2px 0; list-style: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 12%);
+}
+.topo-search-list li { padding: 4px 10px; cursor: pointer; overflow-wrap: anywhere; }
+.topo-search-list li[aria-selected="true"], .topo-search-list li:hover { background: var(--node); }
+.topo-search-list li[role="presentation"] { cursor: default; }
+.topo-places .leg-item { display: inline-flex; align-items: center; gap: 4px; }
+.sw-place { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--muted); background: var(--node); }
+.sw-place.none { background: var(--node); }
 
 /* Floor plan view */
 .fp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 6px; }
@@ -259,3 +291,14 @@ form.inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 /* Find: one shared claim form under the candidate table. */
 fieldset.card { margin: 12px 0 0; min-width: 0; }
 fieldset.card legend { font-weight: 600; padding: 0 4px; }
+
+.sw-place.p0 { background: var(--place-0); }
+.sw-place.p1 { background: var(--place-1); }
+.sw-place.p2 { background: var(--place-2); }
+.sw-place.p3 { background: var(--place-3); }
+.sw-place.p4 { background: var(--place-4); }
+.sw-place.p5 { background: var(--place-5); }
+.sw-place.p6 { background: var(--place-6); }
+.sw-place.p7 { background: var(--place-7); }
+.sw-place.p8 { background: var(--place-8); }
+.sw-place.p9 { background: var(--place-9); }
