@@ -3,8 +3,11 @@
 from lanscape_atlas.service.service import (
     PROVENANCE_FIELDS,
     USER_FIELDS,
+    NewShape,
     Placement,
     Service,
+    ShapeEdit,
+    StaleShapes,
     StaleWrite,
     UndoConflict,
 )
@@ -12,8 +15,11 @@ from lanscape_atlas.service.service import (
 __all__ = [
     "PROVENANCE_FIELDS",
     "USER_FIELDS",
+    "NewShape",
     "Placement",
     "Service",
+    "ShapeEdit",
+    "StaleShapes",
     "StaleWrite",
     "UndoConflict",
 ]

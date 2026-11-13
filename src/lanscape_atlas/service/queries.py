@@ -501,6 +501,24 @@ def last_placement_batch(conn: sqlite3.Connection, device_id: int) -> int:
     return int(row[0]) if row is not None and row[0] is not None else 0
 
 
+def last_shapes_batch(conn: sqlite3.Connection) -> int:
+    """Newest batch id that touched any drawn shape (``plan_shape``), or 0 if none.
+
+    Covers ``save_shapes`` and undo batches. The page sends it back as ``based_on``;
+    ``Service.save_shapes`` refuses (``StaleShapes``) when a newer one exists.
+    """
+    row = conn.execute("SELECT MAX(batch_id) FROM change WHERE entity = 'plan_shape'").fetchone()
+    return int(row[0]) if row is not None and row[0] is not None else 0
+
+
+def plan_shapes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every drawn shape, by id: ``{id, kind, geometry (parsed JSON), label}``."""
+    return [
+        {"id": r[0], "kind": r[1], "geometry": json.loads(r[2]), "label": r[3]}
+        for r in conn.execute("SELECT id, kind, geometry, label FROM plan_shape ORDER BY id")
+    ]
+
+
 def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:
     """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
     rows = conn.execute(
@@ -532,6 +550,9 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
     carries ``heard: {"place_id", "at"}`` (``place_id`` is None for an unlinked scanner);
     the sighting is chosen like ``ble_queries.last_heard`` (newest, then stronger, then
     lower scanner id), but for all devices in one query.
+
+    ``shapes`` are the drawn shapes (``plan_shapes``) and ``shapes_batch`` the
+    ``last_shapes_batch`` the page sends back as ``based_on`` when it saves them.
     """
     heard = _heard_by_device(conn, now)
     plan_row = conn.execute(
@@ -614,4 +635,6 @@ def floor_plan_view(conn: sqlite3.Connection, *, now: datetime) -> dict[str, Any
         "placed": placed,
         "roaming": roaming,
         "unplaced": unplaced,
+        "shapes": plan_shapes(conn),
+        "shapes_batch": last_shapes_batch(conn),
     }

@@ -1,11 +1,16 @@
-"""Pure geometry helpers for floor plan rooms (normalized 0..1 coordinates)."""
+"""Pure geometry helpers for floor plan rooms and drawn shapes (normalized 0..1 coordinates)."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 _EPS = 1e-12
+WALL_MAX_POINTS = 500
+# A door's angle is in degrees in aspect-corrected space; one full turn either way.
+DOOR_MAX_ANGLE = 360.0
+DOOR_FLIPS = range(4)
 
 
 def parse_polygon(raw: object) -> list[tuple[float, float]]:
@@ -78,3 +83,93 @@ def plan_length_mm(dx: float, dy: float, *, width: int, height: int, width_mm: f
     if min(width, height) <= 0 or not math.isfinite(width_mm) or width_mm <= 0:
         raise ValueError("plan width, height and width_mm must be positive")
     return math.hypot(dx * width_mm, dy * width_mm * height / width)
+
+
+# ------------------------------------------------------------- drawn shapes (§6.1)
+
+
+def _finite(value: object, what: str) -> float:
+    """``value`` as a finite float; bools and non-numbers are refused."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{what} must be a number")
+    try:
+        f = float(value)
+    except OverflowError:
+        raise ValueError(f"{what} must be finite") from None
+    if not math.isfinite(f):
+        raise ValueError(f"{what} must be finite")
+    return f
+
+
+def _unit(value: object, what: str) -> float:
+    f = _finite(value, what)
+    if not 0.0 <= f <= 1.0:
+        raise ValueError(f"{what} must be in [0, 1]")
+    return f
+
+
+def _keys(raw: object, kind: str, keys: frozenset[str]) -> Mapping[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{kind} geometry must be an object")
+    if set(raw) != keys:
+        raise ValueError(f"{kind} geometry must have exactly the keys {sorted(keys)}")
+    return raw
+
+
+def parse_wall(raw: object) -> dict[str, Any]:
+    """Validate a wall: ``{"points": [[x, y], ...], "closed": bool}``; returns it canonical.
+
+    2 to 500 points, each finite and in ``[0, 1]``. Two consecutive points may not be
+    the same (so a two-point wall is never zero-length); a closed wall needs at least 3
+    points and its last point may not repeat its first (closing is implied).
+    """
+    geo = _keys(raw, "wall", frozenset({"points", "closed"}))
+    closed = geo["closed"]
+    if not isinstance(closed, bool):
+        raise ValueError("wall closed must be true or false")
+    pts = geo["points"]
+    if not isinstance(pts, list):
+        raise ValueError("wall points must be a list of [x, y] pairs")
+    if not 2 <= len(pts) <= WALL_MAX_POINTS:
+        raise ValueError(f"a wall has 2 to {WALL_MAX_POINTS} points")
+    points: list[list[float]] = []
+    for item in pts:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError("each wall point must be an [x, y] pair")
+        points.append([_unit(item[0], "wall coordinates"), _unit(item[1], "wall coordinates")])
+    if closed and len(points) < 3:
+        raise ValueError("a closed wall needs at least 3 points")
+    pairs = list(zip(points[:-1], points[1:], strict=True))
+    if closed:
+        pairs.append((points[-1], points[0]))
+    if any(a == b for a, b in pairs):
+        raise ValueError("two consecutive wall points are the same point")
+    return {"points": points, "closed": closed}
+
+
+def parse_door(raw: object) -> dict[str, Any]:
+    """Validate a door: ``{"x", "y", "angle", "width", "flip"}``; returns it canonical.
+
+    ``x``/``y``: the centre of the opening on the wall line, in ``[0, 1]``. ``angle``:
+    the wall's direction in degrees in aspect-corrected space (so 90 looks square on a
+    non-square plan), within one turn either way. ``width``: the opening as a fraction
+    of the plan's width, in ``(0, 1]``. ``flip``: 0 to 3; bit 0 swings the door to the
+    other side of the wall, bit 1 moves the hinge to the other end of the opening.
+    """
+    geo = _keys(raw, "door", frozenset({"x", "y", "angle", "width", "flip"}))
+    angle = _finite(geo["angle"], "door angle")
+    if abs(angle) > DOOR_MAX_ANGLE:
+        raise ValueError("door angle must be between -360 and 360 degrees")
+    width = _finite(geo["width"], "door width")
+    if not 0.0 < width <= 1.0:
+        raise ValueError("door width must be above 0 and at most 1 (the plan's width)")
+    flip = geo["flip"]
+    if isinstance(flip, bool) or not isinstance(flip, int) or flip not in DOOR_FLIPS:
+        raise ValueError("door flip must be 0, 1, 2 or 3")
+    return {
+        "x": _unit(geo["x"], "door x"),
+        "y": _unit(geo["y"], "door y"),
+        "angle": angle,
+        "width": width,
+        "flip": flip,
+    }

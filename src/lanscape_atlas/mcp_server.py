@@ -31,7 +31,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ValidationError
 
 from lanscape_atlas.collectors.nmap import ScanRefused
-from lanscape_atlas.service import Service, StaleWrite, UndoConflict, queries
+from lanscape_atlas.service import Service, StaleShapes, StaleWrite, UndoConflict, queries
 from lanscape_atlas.service import ble_queries as bq
 from lanscape_atlas.web.ble_api import (
     age_seconds,
@@ -88,6 +88,8 @@ def error_message(exc: BaseException) -> str | None:
         if not exc.conflicting and exc.reason:
             return f"undo conflict: {exc.reason}"
         return f"undo conflict with batches {list(exc.conflicting)}"
+    if isinstance(exc, StaleShapes):  # page-only today; checked before its base class
+        return f"{exc}; reload the floor plan and redo the drawing edits"
     if isinstance(exc, StaleWrite):
         return (
             f"placement changed since it was read for devices {list(exc.conflicting)}; "
@@ -326,6 +328,10 @@ def build_mcp(
         in place_devices' based_on."""
         with service.lock:
             view = queries.floor_plan_view(service.conn, now=service.clock())
+        # Drawn shapes are page-only pictures; no geometry here (spec §6.6, issue #11
+        # adds a summary).
+        view.pop("shapes", None)
+        view.pop("shapes_batch", None)
         plan = view["plan"]
         if plan is not None:
             view["plan"] = {

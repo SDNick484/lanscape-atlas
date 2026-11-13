@@ -9,9 +9,10 @@ text so ``None`` and numbers round-trip.
 Transactions: the public user-facing writes (``update_device``, ``set_place``,
 ``add_link``, ``remove_link``, ``create_placeholder_device``, ``claim_interface``,
 ``claim_ble``, ``unclaim_ble``, ``hide_ble``, ``unhide_ble``, ``link_scanner``,
-``undo``) each own one ``BEGIN IMMEDIATE`` transaction, hold ``self.lock`` for its duration, and
-publish ``change.applied`` after commit. The Bluetooth collector writes
-(``record_ble_minutes``, ``upsert_scanners``) and the prunes
+``place_devices``, ``save_shapes``, ``undo``) each own one ``BEGIN IMMEDIATE``
+transaction, hold ``self.lock`` for its duration, and publish ``change.applied``
+after commit. The Bluetooth collector writes (``record_ble_minutes``,
+``upsert_scanners``) and the prunes
 (``prune_observations``, ``prune_ble``) also own one transaction each but are
 not change-logged and publish nothing. ``begin_batch`` and
 ``record_collector_field`` do NOT open or commit a transaction: the caller
@@ -33,6 +34,13 @@ creation; turning a blank plan into an image plan logs a row-level **replacement
 field-by-field undo would pass through a refused row. Scale, units and image
 replacement are plain field changes. A pre-v5 first upload (per-field rows with NULL
 old values, ``sha256`` the marker) still undoes by deleting the row.
+
+Drawn shapes (schema v6): ``save_shapes`` logs a created ``plan_shape`` as a row-level
+creation and a deleted one as a row-level deletion (each snapshot carries the row's
+``field_source``, so undo re-inserts it with the same id and provenance); an edit logs
+``geometry``/``label`` field changes. ``geometry`` is canonical JSON text and is logged
+as that text. A ``plan_shape`` batch also blocks undoing the plan's creation (see
+``_Change.reshapes_plan``).
 
 Bluetooth: a BLE claim logs the ``ble_identity`` row as a row-level creation
 (after the new device's creation and owned ``name``/``type`` when it claims as a
@@ -66,7 +74,13 @@ from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, HIDDEN_LABEL_MAX
 from lanscape_atlas.bluetooth.match import Identity, check_canonical, hidden_digest
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event, EventBus
-from lanscape_atlas.floorplan.geometry import check_aspect, parse_polygon, point_in_polygon
+from lanscape_atlas.floorplan.geometry import (
+    check_aspect,
+    parse_door,
+    parse_polygon,
+    parse_wall,
+    point_in_polygon,
+)
 from lanscape_atlas.service import ble_queries, queries
 
 USER_FIELDS = frozenset(
@@ -124,6 +138,11 @@ BLANK_MIN_MM = 1_000
 BLANK_MAX_MM = 300_000
 # Largest real-world plan width a scale may set (1 km): a typo guard, not a physical limit.
 SCALE_MAX_MM = 1_000_000.0
+_PLAN_SHAPE_COLUMNS = ("id", "kind", "geometry", "label", "created_at")
+# Every kind the schema allows (0006_plan_shape.sql); SHAPE_RULES says which are drawable.
+SHAPE_KINDS = frozenset({"wall", "door", "furniture", "label"})
+SHAPES_MAX = 5_000
+SHAPE_LABEL_MAX = 80
 _BLE_IDENTITY_COLUMNS = ("id", "device_id", "kind", "value", "created_at")
 _BLE_HIDDEN_COLUMNS = ("id", "digest", "label", "hidden_at")
 # Row-level entities that stand for one BLE identity (compared by salted digest in undo).
@@ -173,6 +192,58 @@ class StaleWrite(Exception):
         self.conflicting = conflicting
 
 
+class StaleShapes(StaleWrite):
+    """Raised by ``save_shapes`` when a batch newer than ``based_on`` touched any shape.
+
+    ``conflicting`` holds that newest batch id (not device ids, unlike ``StaleWrite``).
+    """
+
+    def __init__(self, conflicting: list[int]) -> None:
+        Exception.__init__(
+            self, f"the drawing changed since it was loaded (batch {conflicting[-1]})"
+        )
+        self.conflicting = conflicting
+
+
+@dataclass(frozen=True)
+class NewShape:
+    """A shape for ``Service.save_shapes`` to create. ``geometry`` is validated by kind."""
+
+    kind: str
+    geometry: Any
+    label: str | None = None
+
+
+@dataclass(frozen=True)
+class ShapeEdit:
+    """A shape's new ``geometry`` and ``label`` for ``Service.save_shapes`` (kind is kept)."""
+
+    id: int
+    geometry: Any
+    label: str | None = None
+
+
+@dataclass(frozen=True)
+class ShapeRule:
+    """How ``save_shapes`` validates one kind of shape.
+
+    ``parse`` takes the raw geometry and returns it canonical (or raises ``ValueError``).
+    ``label`` is ``"none"`` (must be None), ``"optional"`` or ``"required"``; a label
+    is stripped and at most ``SHAPE_LABEL_MAX`` characters.
+    """
+
+    parse: Callable[[object], dict[str, Any]]
+    label: str = "none"
+
+
+# The drawable kinds. Issue #11 adds "furniture" and "label" here (the schema already
+# allows them); a kind in SHAPE_KINDS but not here is refused as "not supported yet".
+SHAPE_RULES: dict[str, ShapeRule] = {
+    "wall": ShapeRule(parse_wall),
+    "door": ShapeRule(parse_door),
+}
+
+
 @dataclass(frozen=True)
 class Placement:
     """One device's requested placement for ``Service.place_devices``.
@@ -203,6 +274,8 @@ _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
     "ble_hidden": frozenset(_BLE_HIDDEN_COLUMNS) - {"id"},
     # Only link_scanner writes this; name/last_seen are collector data, not logged.
     "ble_scanner": frozenset({"device_id"}),
+    # save_shapes writes rows whole and edits geometry/label.
+    "plan_shape": frozenset(_PLAN_SHAPE_COLUMNS) - {"id"},
 }
 _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "device": _DEVICE_COLUMNS,
@@ -211,6 +284,7 @@ _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "floor_plan": _FLOOR_PLAN_COLUMNS,
     "ble_identity": _BLE_IDENTITY_COLUMNS,
     "ble_hidden": _BLE_HIDDEN_COLUMNS,
+    "plan_shape": _PLAN_SHAPE_COLUMNS,
 }
 
 
@@ -715,8 +789,8 @@ class Service:
     def _plan_has_drawing(self) -> bool:
         """True if any room polygon or drawn shape exists (the aspect rule then applies).
 
-        ``plan_shape`` arrives with schema v6 (issue #10); until that table exists only
-        room polygons count, so this works on either schema.
+        Shapes are ``plan_shape`` rows (schema v6). The table check stays so this also
+        works on a connection still at an older schema (tests build those).
         """
         if self.conn.execute("SELECT 1 FROM place WHERE polygon IS NOT NULL LIMIT 1").fetchone():
             return True
@@ -861,6 +935,136 @@ class Service:
             raise ValueError(f"device {p.device_id}: x and y must both be set or both be None")
         if has_x and p.place_id is None:
             raise ValueError(f"device {p.device_id}: a point needs a place_id")
+
+    def save_shapes(
+        self,
+        actor: str,
+        *,
+        creates: Sequence[NewShape],
+        updates: Sequence[ShapeEdit],
+        deletes: Sequence[int],
+        based_on: int,
+    ) -> int:
+        """Create, edit and delete drawn shapes in one batch; returns the batch id (0 if none).
+
+        Everything is checked before anything is written, in one transaction:
+        - each shape against ``SHAPE_RULES`` for its kind (``ValueError``; kinds the
+          schema allows but no rule covers yet are refused as "not supported yet");
+          an edit keeps the shape's kind;
+        - ``based_on``: the newest batch that touched any shape when the page loaded
+          (``queries.last_shapes_batch``). A newer one raises ``StaleShapes`` before
+          ids are looked up, so a shape deleted elsewhere reads as stale, not unknown;
+        - ids: each listed once across ``updates`` and ``deletes``, and existing
+          (``KeyError`` otherwise);
+        - at most ``SHAPES_MAX`` shapes on the plan afterwards.
+        Deletions, then edits (only changed fields are logged), then creations.
+        """
+        self._check_actor(actor)
+        new = [
+            (c.kind, self._check_shape(c.kind, c.geometry, c.label)) for c in self._news(creates)
+        ]
+        edits = self._edits(updates)
+        gone = [self._shape_id(d) for d in deletes]
+        if isinstance(based_on, bool) or not isinstance(based_on, int):
+            raise ValueError(f"based_on must be an int, got {based_on!r}")
+        ids = [e.id for e in edits] + gone
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        if dupes:
+            raise ValueError(f"shapes listed more than once: {dupes}")
+        batch_id = 0
+        with self._write_txn():
+            self._plan_row()
+            newest = queries.last_shapes_batch(self.conn)
+            if newest > based_on:
+                raise StaleShapes([newest])
+            current = {i: self._row_dict("plan_shape", i) for i in ids}
+            changed: list[tuple[int, dict[str, Any]]] = []
+            for e in edits:
+                row = current[e.id]
+                geometry, label = self._check_shape(str(row["kind"]), e.geometry, e.label)
+                target = {"geometry": geometry, "label": label}
+                diff = {f: v for f, v in target.items() if row[f] != v}
+                if diff:
+                    changed.append((e.id, diff))
+            total = self.conn.execute("SELECT count(*) FROM plan_shape").fetchone()[0]
+            if int(total) - len(gone) + len(new) > SHAPES_MAX:
+                raise ValueError(f"a plan holds at most {SHAPES_MAX} shapes")
+            if not (gone or changed or new):
+                return 0
+            batch_id = self.begin_batch(actor)
+            for shape_id in gone:
+                old = self._snapshot("plan_shape", shape_id)
+                self._log_change(batch_id, "plan_shape", shape_id, "*", old, None)
+                self._delete_entity("plan_shape", shape_id)
+            for shape_id, diff in changed:
+                for field, value in diff.items():
+                    old_value = current[shape_id][field]
+                    self._write_field(
+                        batch_id, "plan_shape", shape_id, field, old_value, value, actor
+                    )
+            for kind, (geometry, label) in new:
+                self._create_shape(batch_id, actor, kind, geometry, label)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    @staticmethod
+    def _news(creates: Sequence[NewShape]) -> list[NewShape]:
+        for c in creates:
+            if not isinstance(c, NewShape):
+                raise ValueError(f"expected a NewShape, got {c!r}")
+        return list(creates)
+
+    def _edits(self, updates: Sequence[ShapeEdit]) -> list[ShapeEdit]:
+        for u in updates:
+            if not isinstance(u, ShapeEdit):
+                raise ValueError(f"expected a ShapeEdit, got {u!r}")
+            self._shape_id(u.id)
+        return list(updates)
+
+    @staticmethod
+    def _shape_id(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"a shape id must be an int, got {value!r}")
+        return value
+
+    @staticmethod
+    def _check_shape(kind: object, geometry: object, label: object) -> tuple[str, str | None]:
+        """Validate one shape; returns its canonical geometry JSON text and label."""
+        if not isinstance(kind, str) or kind not in SHAPE_KINDS:
+            raise ValueError(f"shape kind must be one of {sorted(SHAPE_KINDS)}, got {kind!r}")
+        rule = SHAPE_RULES.get(kind)
+        if rule is None:
+            raise ValueError(f"{kind} shapes are not supported yet")
+        canonical = json.dumps(rule.parse(geometry), sort_keys=True, separators=(",", ":"))
+        if label is not None and not isinstance(label, str):
+            raise ValueError(f"a {kind} label must be a string or None")
+        text = label.strip() if label is not None else None
+        if rule.label == "none":
+            if label is not None:
+                raise ValueError(f"a {kind} has no label")
+        elif text == "" or text is None:
+            if rule.label == "required":
+                raise ValueError(f"a {kind} needs a label")
+            text = None
+        if text is not None and len(text) > SHAPE_LABEL_MAX:
+            raise ValueError(f"a {kind} label is at most {SHAPE_LABEL_MAX} characters")
+        return canonical, text
+
+    def _create_shape(
+        self, batch_id: int, actor: str, kind: str, geometry: str, label: str | None
+    ) -> int:
+        """Insert a shape and log it as a row-level creation (with its field_source)."""
+        now = self._now()
+        shape_id = self._insert_row(
+            "plan_shape",
+            {"id": None, "kind": kind, "geometry": geometry, "label": label, "created_at": now},
+        )
+        for field in ("kind", "geometry") if label is None else ("kind", "geometry", "label"):
+            self._restore_source("plan_shape", shape_id, field, actor, now)
+        self._log_change(
+            batch_id, "plan_shape", shape_id, "*", None, self._snapshot("plan_shape", shape_id)
+        )
+        return shape_id
 
     def add_link(
         self,
@@ -1792,9 +1996,10 @@ class Service:
             )
 
     def _snapshot(self, entity: str, entity_id: int) -> dict[str, Any]:
-        """Full row as a dict, plus its ``field_source`` rows (if any) for a device."""
+        """Full row as a dict, plus its ``field_source`` rows (if any) for a device,
+        the floor plan or a drawn shape."""
         snap = self._row_dict(entity, entity_id)
-        if entity in ("device", "floor_plan"):
+        if entity in ("device", "floor_plan", "plan_shape"):
             sources = {
                 str(r[0]): [str(r[1]), str(r[2])]
                 for r in self.conn.execute(

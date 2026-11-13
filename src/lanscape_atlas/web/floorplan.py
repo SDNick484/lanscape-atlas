@@ -25,6 +25,11 @@ Writes:
 - ``POST /floorplan/placements``: JSON in the ``/api/v1/floorplan/placements`` shape,
   token in ``X-CSRF-Token``; errors are JSON (``app._wants_json``), and a stale
   ``based_on`` answers 409 with the reload message (``app._stale_write``).
+- ``POST /floorplan/shapes``: JSON ``{"creates": [{kind, geometry, label}], "updates":
+  [{id, geometry, label}], "deletes": [id], "based_on": batch}``, token in
+  ``X-CSRF-Token``, from the page's Draw mode; ``Service.save_shapes``. Errors are JSON;
+  a stale ``based_on`` answers 409 with the drawing's own reload message. There is no
+  ``/api/v1`` or MCP write for shapes: drawing is page-only (spec §2).
 
 ``GET /floorplan/search?q=`` (spec §4.2, same-origin page route like
 ``/topology/search``): devices ranked by ``web.search`` (same matcher, caps and order as
@@ -51,7 +56,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Request
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
@@ -61,10 +66,12 @@ from lanscape_atlas.floorplan.image import (
     store_plan_file,
     validate_upload,
 )
-from lanscape_atlas.service import Service
+from lanscape_atlas.service import NewShape, Service, ShapeEdit
 from lanscape_atlas.service import queries as q
+from lanscape_atlas.service.service import SHAPE_LABEL_MAX, SHAPES_MAX
 from lanscape_atlas.web.floorplan_api import (
     STALE_MESSAGE,
+    STALE_SHAPES_MESSAGE,
     Number,
     PlacementsBody,
     RoomBody,
@@ -101,6 +108,7 @@ SAVED_MESSAGES = {
     "blank": "Blank plan created. Click on the plan to draw your first room.",
     "units": "Units changed.",
     "scale": "Scale saved.",
+    "shapes": "Drawing saved.",
 }
 # Millimetres per display unit for the blank-plan form (feet or metres).
 UNIT_MM = {"imperial": 304.8, "metric": 1000.0}
@@ -134,7 +142,11 @@ def _plan_url(root: str, plan: dict[str, Any]) -> str:
 
 
 def page_data(view: dict[str, Any], root: str) -> dict[str, Any]:
-    """The JSON the page script reads: ``floor_plan_view`` minus the file name."""
+    """The JSON the page script reads: ``floor_plan_view`` minus the file name.
+
+    ``shapes`` (drawn walls and doors) and ``shapes_batch`` (sent back as ``based_on``)
+    feed Draw mode (``static/floorplan-draw.js``).
+    """
     plan = view["plan"]
     return {
         "plan": None
@@ -151,6 +163,8 @@ def page_data(view: dict[str, Any], root: str) -> dict[str, Any]:
         "placed": view["placed"],
         "roaming": view["roaming"],
         "unplaced": view["unplaced"],
+        "shapes": view["shapes"],
+        "shapes_batch": view["shapes_batch"],
     }
 
 
@@ -237,6 +251,8 @@ def _trays(view: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _flash(request: Request) -> tuple[str, str] | None:
     params = request.query_params
+    if params.get("stale") == "shapes":
+        return ("error", STALE_SHAPES_MESSAGE)
     if params.get("stale"):
         return ("error", STALE_MESSAGE)
     msg = SAVED_MESSAGES.get(params.get("saved", ""))
@@ -473,3 +489,50 @@ def set_scale(request: Request, body: ScaleBody) -> dict[str, int]:
 @router.post("/floorplan/placements", dependencies=[CsrfHeader])
 def save_placements(request: Request, body: PlacementsBody) -> dict[str, int]:
     return {"batch_id": apply_placements(_service(request), ACTOR, body)}
+
+
+# A request bound only: the Service strips the label and enforces SHAPE_LABEL_MAX.
+ShapeLabel = Annotated[StrictStr, Field(max_length=4 * SHAPE_LABEL_MAX)] | None
+
+
+class ShapeCreateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Annotated[StrictStr, Field(max_length=20)]
+    geometry: dict[str, Any]
+    label: ShapeLabel = None
+
+
+class ShapeUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: StrictInt
+    geometry: dict[str, Any]
+    label: ShapeLabel = None
+
+
+class ShapesBody(BaseModel):
+    """``Service.save_shapes`` arguments; the geometry itself is checked by the Service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    creates: Annotated[list[ShapeCreateBody], Field(max_length=SHAPES_MAX)] = Field(
+        default_factory=list
+    )
+    updates: Annotated[list[ShapeUpdateBody], Field(max_length=SHAPES_MAX)] = Field(
+        default_factory=list
+    )
+    deletes: Annotated[list[StrictInt], Field(max_length=SHAPES_MAX)] = Field(default_factory=list)
+    based_on: StrictInt
+
+
+@router.post("/floorplan/shapes", dependencies=[CsrfHeader])
+def save_shapes(request: Request, body: ShapesBody) -> dict[str, int]:
+    batch_id = _service(request).save_shapes(
+        ACTOR,
+        creates=[NewShape(c.kind, c.geometry, c.label) for c in body.creates],
+        updates=[ShapeEdit(u.id, u.geometry, u.label) for u in body.updates],
+        deletes=list(body.deletes),
+        based_on=body.based_on,
+    )
+    return {"batch_id": batch_id}

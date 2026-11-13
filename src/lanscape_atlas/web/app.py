@@ -49,13 +49,13 @@ from lanscape_atlas.ingest import Ingestor
 from lanscape_atlas.mcp_server import build_mcp
 from lanscape_atlas.oui import OuiDB
 from lanscape_atlas.scheduler import CollectorRunner, start_scheduler, stop_scheduler
-from lanscape_atlas.service import Service, StaleWrite, UndoConflict
+from lanscape_atlas.service import Service, StaleShapes, StaleWrite, UndoConflict
 from lanscape_atlas.store.db import migrate, open_db
 from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.ble_api import router as ble_router
 from lanscape_atlas.web.deep_scan import start_deep_scan
-from lanscape_atlas.web.floorplan_api import STALE_MESSAGE
+from lanscape_atlas.web.floorplan_api import STALE_MESSAGE, STALE_SHAPES_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
 
 log = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ def _message(exc: BaseException, default: str) -> str:
     return default
 
 
-JSON_PAGE_PATHS = ("/floorplan/placements", "/floorplan/scale")
+JSON_PAGE_PATHS = ("/floorplan/placements", "/floorplan/scale", "/floorplan/shapes")
 
 
 def _wants_json(scope: Scope) -> bool:
@@ -176,8 +176,9 @@ async def _undo_conflict(request: Request, exc: Exception) -> Response:
 async def _stale_write(request: Request, exc: Exception) -> Response:
     # JSON on every path: the floor plan page's fetch calls rely on it too.
     assert isinstance(exc, StaleWrite)
+    message = STALE_SHAPES_MESSAGE if isinstance(exc, StaleShapes) else STALE_MESSAGE
     return JSONResponse(
-        {"detail": "conflict", "conflicting": list(exc.conflicting), "message": STALE_MESSAGE},
+        {"detail": "conflict", "conflicting": list(exc.conflicting), "message": message},
         status_code=409,
     )
 

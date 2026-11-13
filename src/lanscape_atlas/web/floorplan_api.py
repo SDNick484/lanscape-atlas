@@ -22,6 +22,10 @@ router = APIRouter(prefix="/api/v1/floorplan")
 
 MAX_ITEMS = 1000
 STALE_MESSAGE = "Some devices changed since this page loaded. Reload to see the latest values."
+STALE_SHAPES_MESSAGE = (
+    "The drawing changed since this page loaded (another tab, or an undo). Nothing was"
+    " saved. Reload to see the latest drawing."
+)
 Number = StrictInt | StrictFloat
 
 
