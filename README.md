@@ -70,10 +70,10 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
     under 6 px on screen, only the heavier lines show. The page opens in *Draw room*
     mode, ready for the first room.
 - **Add an image to a blank plan** with *Add an image*. The blank plan's real width
-  carries over as the image's scale. With no rooms drawn, an image of any aspect ratio
-  is accepted (the plan's depth then follows the image). **Once rooms exist, an image
-  whose aspect ratio differs from the plan is refused: crop it to the plan's
-  proportions first.** There is no way back from image to blank, other than undo.
+  carries over as the image's scale. With no rooms or walls drawn, an image of any
+  aspect ratio is accepted (the plan's depth then follows the image). **Once rooms or
+  walls exist, an image whose aspect ratio differs from the plan is refused: crop it
+  to the plan's proportions first.** There is no way back from image to blank, other than undo.
 - **Set scale** (image plans). Press *Set scale*, click the two ends of something whose
   length you know (a wall, a door), type that length and press *Save scale* or Enter.
   Lengths can be written `14'6"`, `14' 6"`, `14 ft`, `174 in`, `4.4 m` or `440 cm`; a
@@ -96,10 +96,41 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
 - **Roaming devices** (phones, laptops) belong to a room's list but have no point on
   the plan. Tick *roaming* next to the device in the list, or press *Mark roaming* (and *Mark fixed* to undo it) on its device page.
   Turning roaming off leaves the device in that room's list, ready to be dropped.
-- **Undo.** Every plan, room and placement change (including creating a blank plan,
-  adding an image, the scale and the units) is a batch in History and can be undone
-  like any other change. Undoing the plan's creation is refused while rooms drawn
-  after it still exist: undo or redraw those first.
+- **Draw walls and doors.** Press *Draw* and pick a tool. Drawing is a picture only:
+  rooms stay the outlines made with *Draw room*, and placement and Bluetooth use those.
+  - *Wall*: click the start, then the end. *Polyline*: each click adds a corner;
+    double-click or Enter ends it, a click on the first corner closes it, Escape cancels.
+    A second click on the same spot (a double-click) never makes a zero-length wall.
+  - *Typed length* (plans with a scale): after the first point, type a length (`10'`,
+    `3.5 m`, the same formats as *Set scale*) and press Enter; the next point goes
+    exactly that far toward the pointer. A length that would run off the plan is refused.
+  - *Shift* locks a wall to 0°, 45° or 90°, measured on the real plan, so 45° looks
+    square on a plan that is not.
+  - *Snap* (toolbar, on by default; hold Alt to stop it for a moment): a point within
+    8 px of a wall corner or a room corner takes it exactly, otherwise it goes to the
+    1 ft (or 0.5 m) grid on a blank plan or an image plan with a scale. *Draw room*
+    corners snap to wall corners too, so rooms line up with the walls.
+  - *Door*: point at a wall to see the door (80 cm or 32 in wide, 4% of the plan's
+    width on an image without a scale), click to place it. It sits on the wall's line
+    at the wall's angle and is drawn as a gap in the wall with its swing.
+  - *Select*: click a wall or door, drag it to move it, drag a wall corner to reshape
+    it or a door's end to change its width; *Flip door* cycles which side it swings to
+    and which end the hinge is on; Delete (or *Delete*) removes it; the arrow keys
+    nudge it.
+  - With a scale, each wall segment shows its length (*Show lengths* in the toolbar)
+    and a wall being drawn shows its length as you go.
+  - Nothing is written until *Save changes*; *Discard* drops the pending drawing, and
+    leaving the page asks first. While a drawing edit is pending the page stays in
+    Draw mode, and while a placement is pending *Draw* is disabled, so one save never
+    mixes the two. If another tab (or an undo) changed the drawing since the page
+    loaded, the save is refused (409), nothing is written and the page reloads with a
+    message. Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
+  - Drawing is page-only: there is no API or MCP write for it, and `get_floor_plan`
+    leaves the shapes out. `GET /api/v1/floorplan` lists them (`shapes`).
+- **Undo.** Every plan, room, placement and drawing change (including creating a blank
+  plan, adding an image, the scale and the units) is a batch in History and can be
+  undone like any other change. Undoing the plan's creation is refused while rooms or
+  walls and doors drawn after it still exist: undo or delete those first.
 - **Zoom and pan** work in every mode. Zoom from 1x (*Fit*, the whole plan) to 8x with
   the mouse wheel or a trackpad pinch (about the pointer), a two-finger pinch on a touch
   screen, the *+* / *−* buttons, or the `+`, `-` and `0` (fit) keys while the plan has
@@ -134,7 +165,8 @@ scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
 before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
 directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
 Schema v5 (blank plans and scale) rebuilds the `floor_plan` table on start; an existing
-plan keeps its image, has no scale and shows imperial units until you change them.
+plan keeps its image, has no scale and shows imperial units until you change them. Schema v6 adds the
+`plan_shape` table for drawn walls and doors; nothing existing changes.
 
 ## Bluetooth (Find)
 

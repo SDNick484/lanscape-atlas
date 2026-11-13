@@ -205,3 +205,27 @@ def test_no_shapes_api_write_route(client_with_token: TestClient, blank: None) -
     """Drawing is page-only (spec §2): no JSON API write for shapes."""
     r = client_with_token.post("/api/v1/floorplan/shapes", json=_body())
     assert r.status_code in (404, 405)
+
+
+# ------------------------------------------------------------------ Draw mode markup
+
+
+def test_page_has_draw_mode(client: TestClient, blank: None) -> None:
+    html = client.get("/floorplan").text
+    assert 'id="mode-draw"' in html and 'id="shape-draw"' in html
+    for tool in ("select", "wall", "polyline", "door"):
+        assert f'data-tool="{tool}"' in html
+    assert 'id="snap-toggle" checked' in html and 'id="lengths-toggle" checked' in html
+    assert 'src="/static/floorplan-draw.js"' in html
+    assert html.index("floorplan-draw.js") < html.index("/static/floorplan.js")
+
+
+def test_lengths_toggle_only_with_a_scale(client: TestClient, svc: Service) -> None:
+    svc.set_floor_plan("user", width=1600, height=1200, sha256="a" * 64, file_name="p.png")
+    html = client.get("/floorplan").text
+    assert 'id="mode-draw"' in html and 'id="lengths-toggle"' not in html
+
+
+def test_page_without_plan_has_no_draw_mode(client: TestClient) -> None:
+    html = client.get("/floorplan").text
+    assert 'id="mode-draw"' not in html and 'id="shape-draw"' not in html

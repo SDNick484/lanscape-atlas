@@ -7,6 +7,7 @@
     <button type="button" id="save-changes" disabled>Save changes</button>
     <button type="button" id="discard-changes" class="secondary" disabled>Discard</button>
     <button type="button" id="mode-layout" class="secondary" aria-pressed="false">Draw room</button>
+    <button type="button" id="mode-draw" class="secondary" aria-pressed="false" title="Draw walls and doors">Draw</button>
     {% if not plan.blank %}
     <button type="button" id="mode-scale" class="secondary" aria-pressed="false">Set scale</button>
     {% endif %}
@@ -18,6 +19,10 @@
     </form>
     {% endif %}
     <span id="fp-size" class="muted fp-size"></span>
+    <label class="fp-toggle" title="Snap to wall and room corners, and to the grid (hold Alt to stop snapping)"><input type="checkbox" id="snap-toggle" checked> Snap</label>
+    {% if plan.width_mm %}
+    <label class="fp-toggle"><input type="checkbox" id="lengths-toggle" checked> Show lengths</label>
+    {% endif %}
     {% endif %}
     {% if svg %}
     <div class="fp-search">
@@ -75,6 +80,7 @@
           <g class="fp-draft"></g>
         </svg>
         </div>
+        <input id="draw-length" class="fp-length-input" maxlength="40" autocomplete="off" placeholder="length" aria-label="Length of the next segment, for example 10' or 3 m" hidden>
       </div>
       <div id="room-draw" class="card fp-draw" hidden>
         <p class="muted">Click on the plan to add corners. Click the first corner or <em>Close room</em> to finish.
@@ -102,6 +108,20 @@
           <button type="button" id="scale-cancel" class="secondary">Cancel</button>
         </div>
         <p id="scale-error" class="error-text" role="alert"></p>
+      </div>
+      <div id="shape-draw" class="card fp-draw" hidden>
+        <div class="inline fp-tools" role="group" aria-label="Drawing tool">
+          <button type="button" id="tool-select" class="secondary" data-tool="select" aria-pressed="true">Select</button>
+          <button type="button" id="tool-wall" class="secondary" data-tool="wall" aria-pressed="false">Wall</button>
+          <button type="button" id="tool-polyline" class="secondary" data-tool="polyline" aria-pressed="false">Polyline</button>
+          <button type="button" id="tool-door" class="secondary" data-tool="door" aria-pressed="false">Door</button>
+          <button type="button" id="door-flip" class="secondary" disabled>Flip door</button>
+          <button type="button" id="shape-delete" class="secondary" disabled>Delete</button>
+        </div>
+        <p id="draw-hint" class="muted"></p>
+        <p class="muted">Walls and doors are a picture: rooms stay the outlines drawn with <em>Draw room</em>.
+        Shift locks a wall to 0°, 45° or 90°; Alt stops snapping while held. Changes are kept until you
+        press <em>Save changes</em>.</p>
       </div>
       <p class="muted fp-help">Drag devices from the list onto a room. Drag a placed device to move it
       within its room, or select it and use the arrow keys. Changes are kept until you press
@@ -204,6 +224,7 @@
 </div>
 <script src="{{ root }}/static/floorplan-units.js" defer></script>
 <script src="{{ root }}/static/floorplan-view.js" defer></script>
+<script src="{{ root }}/static/floorplan-draw.js" defer></script>
 <script src="{{ root }}/static/floorplan.js" defer></script>
 <script src="{{ root }}/static/floorplan-search.js" defer></script>
 {% endblock %}
