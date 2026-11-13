@@ -314,8 +314,11 @@ def build_mcp(
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
     def get_floor_plan() -> dict[str, Any]:
-        """The floor plan: plan (width and height in pixels and updated_at, or null when no
-        plan is uploaded; no image or file name), rooms (id, name, polygon: a list of
+        """The floor plan: plan (null when there is none; else width, height, updated_at,
+        blank, width_mm and units: a blank plan has no image and its width and height are
+        millimetres, an image plan's are pixels; width_mm is the plan's real-world width,
+        null for an image without a scale; units is "imperial" or "metric", for display
+        only; no image or file name), rooms (id, name, polygon: a list of
         [x, y] points), placed (fixed devices with a point), roaming (devices assigned to
         a room only, no point) and unplaced (no room, or a room but no point; each has
         place_id, null if none). Coordinates are normalized 0..1 across the plan image
@@ -325,7 +328,9 @@ def build_mcp(
             view = queries.floor_plan_view(service.conn, now=service.clock())
         plan = view["plan"]
         if plan is not None:
-            view["plan"] = {k: plan[k] for k in ("width", "height", "updated_at")}
+            view["plan"] = {
+                k: plan[k] for k in ("width", "height", "updated_at", "blank", "width_mm", "units")
+            }
         return view
 
     @tool(

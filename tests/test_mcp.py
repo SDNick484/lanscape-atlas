@@ -504,8 +504,27 @@ async def test_get_floor_plan_has_no_file_names(mcp_client: Any, plan_seeded: No
         out = _data(await _call(c, "get_floor_plan"))
     text = json.dumps(out)
     assert "file_name" not in text and "sha256" not in text and "plan.png" not in text
-    assert set(out["plan"]) == {"width", "height", "updated_at"}
+    assert set(out["plan"]) == {"width", "height", "updated_at", "blank", "width_mm", "units"}
     assert (out["plan"]["width"], out["plan"]["height"]) == (1600, 1200)
+    assert (out["plan"]["blank"], out["plan"]["width_mm"], out["plan"]["units"]) == (
+        False,
+        None,
+        "imperial",
+    )
+
+
+async def test_get_floor_plan_blank_plan(mcp_client: Any, svc: Any) -> None:
+    svc.create_blank_plan("user", width_mm=12_000, height_mm=9_000, units="metric")
+    async with mcp_client() as c:
+        out = _data(await _call(c, "get_floor_plan"))
+    assert out["plan"] == {
+        "width": 12_000,
+        "height": 9_000,
+        "updated_at": out["plan"]["updated_at"],
+        "blank": True,
+        "width_mm": 12_000.0,
+        "units": "metric",
+    }
 
 
 async def test_get_floor_plan_without_plan(mcp_client: Any) -> None:

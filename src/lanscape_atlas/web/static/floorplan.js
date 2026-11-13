@@ -17,7 +17,17 @@
  * reloads the page with the server's message.
  *
  * Layout mode: click to add corners, close on the first corner or "Close room",
- * then name the room; the plain HTML form posts it to /floorplan/rooms.
+ * then name the room; the plain HTML form posts it to /floorplan/rooms. A new blank
+ * plan opens in Layout mode (?layout=1).
+ *
+ * Blank plan (spec §5.3): #plan-grid stands in for the image, with 1 ft (or 0.5 m)
+ * squares and a heavier line every 10 ft (or 5 m); the plan's width and height are mm.
+ * When a square would be under 6 screen px only the heavy lines show
+ * (data-grid="coarse" on the stage, "fine" otherwise).
+ *
+ * Scale mode (image plans): click two points, type the real distance between them
+ * (LanscapeFP.units.parse), and the page posts the plan's real width to
+ * /floorplan/scale. A length that does not parse shows a message and saves nothing.
  *
  * LanscapeFP.page.revealDevice / revealRoom / clearFound are what the search box
  * (floorplan-search.js) calls when a result is picked: they move the view, select or
@@ -47,6 +57,11 @@
   var saveBtn = document.getElementById("save-changes");
   var discardBtn = document.getElementById("discard-changes");
   var layoutBtn = document.getElementById("mode-layout");
+  var scaleBtn = document.getElementById("mode-scale");
+  var gridEl = document.getElementById("plan-grid");
+  var sizeEl = document.getElementById("fp-size");
+  var UNITS = FP.units;
+  var GRID_MIN_PX = 6; // below this many screen px per square only the heavy lines show
   var trayEl = document.getElementById("tray");
   var filterEl = document.getElementById("tray-filter");
 
@@ -161,10 +176,12 @@
     var n = Object.keys(dirty).length;
     saveBtn.disabled = false;
     discardBtn.disabled = false;
-    if (layoutBtn) {
-      layoutBtn.disabled = true;
-      layoutBtn.title = "Save or discard your changes first";
-    }
+    [layoutBtn, scaleBtn].forEach(function (b) {
+      if (b) {
+        b.disabled = true;
+        b.title = "Save or discard your changes first";
+      }
+    });
     setStatus(n + " unsaved change" + (n === 1 ? "" : "s") + ".");
   }
 
@@ -198,8 +215,64 @@
     return (unit() * k / (view ? view.zoom() : 1)).toFixed(3);
   }
 
+  // ---------------------------------------------------- blank plan grid
+
+  // Lines every `step` mm across a W x H mm plan, skipping multiples of `skip`.
+  function gridLines(g, step, skip) {
+    var W = plan.width, H = plan.height, k, v;
+    for (k = 0; k * step <= W + 1e-6; k += 1) {
+      v = k * step;
+      if (!skip || Math.abs(v / skip - Math.round(v / skip)) > 1e-6) {
+        g.appendChild(svgEl("line", { x1: v.toFixed(1), y1: 0, x2: v.toFixed(1), y2: H }));
+      }
+    }
+    for (k = 0; k * step <= H + 1e-6; k += 1) {
+      v = k * step;
+      if (!skip || Math.abs(v / skip - Math.round(v / skip)) > 1e-6) {
+        g.appendChild(svgEl("line", { x1: 0, y1: v.toFixed(1), x2: W, y2: v.toFixed(1) }));
+      }
+    }
+  }
+
+  function drawGrid() {
+    if (!gridEl || !plan || !plan.blank || !UNITS) {
+      return;
+    }
+    var step = UNITS.grid(plan.units);
+    var minor = gridEl.querySelector(".fp-grid-minor");
+    var major = gridEl.querySelector(".fp-grid-major");
+    clear(minor);
+    clear(major);
+    gridLines(minor, step.minor, step.major);
+    gridLines(major, step.major, 0);
+    major.appendChild(svgEl("rect", { "class": "fp-grid-edge", x: 0, y: 0, width: plan.width, height: plan.height }));
+    updateGrid();
+  }
+
+  // Hide the 1 ft / 0.5 m lines when a square is under GRID_MIN_PX on screen.
+  function updateGrid() {
+    if (!gridEl || !plan || !plan.blank || !UNITS || !view) {
+      return;
+    }
+    var shown = gridEl.getBoundingClientRect().width; // includes the zoom
+    var px = UNITS.grid(plan.units).minor / plan.width * shown;
+    var fine = px >= GRID_MIN_PX;
+    gridEl.querySelector(".fp-grid-minor").setAttribute("display", fine ? "inline" : "none");
+    view.stage.setAttribute("data-grid", fine ? "fine" : "coarse");
+  }
+
+  // The plan's real size in the toolbar (when it has a scale).
+  function showSize() {
+    if (!sizeEl || !plan || !UNITS || !(plan.width_mm > 0)) {
+      return;
+    }
+    var depth = plan.width_mm * plan.height / plan.width;
+    sizeEl.textContent = UNITS.format(plan.width_mm, plan.units) + " \u00d7 " + UNITS.format(depth, plan.units);
+  }
+
   // Re-size markers, draft corners and room labels after a zoom change.
   function applySizes() {
+    updateGrid();
     if (!svg || !plan) {
       return;
     }
@@ -613,15 +686,24 @@
 
   // -------------------------------------------------------------- layout
 
+  // mode: "place", "layout" (draw a room) or "scale" (set the plan's scale).
   function setMode(next) {
     mode = next;
-    app.classList.toggle("layout", mode === "layout");
+    // Both drawing modes share the "layout" look: crosshair, devices dimmed and inert.
+    app.classList.toggle("layout", mode !== "place");
     layoutBtn.setAttribute("aria-pressed", mode === "layout" ? "true" : "false");
     document.getElementById("room-draw").hidden = mode !== "layout";
+    if (scaleBtn) {
+      scaleBtn.setAttribute("aria-pressed", mode === "scale" ? "true" : "false");
+      document.getElementById("scale-draw").hidden = mode !== "scale";
+    }
     resetDraft();
     select(null);
     drawTrays(); // roaming checkboxes are only live while placing
-    setStatus(mode === "layout" ? "Click on the plan to add the room's corners." : "");
+    setStatus(
+      mode === "layout" ? "Click on the plan to add the room's corners." :
+      mode === "scale" ? "Click the two ends of something whose length you know." : ""
+    );
   }
 
   function resetDraft() {
@@ -629,6 +711,13 @@
     draftClosed = false;
     document.getElementById("room-form").hidden = true;
     document.getElementById("room-close").disabled = true;
+    if (scaleBtn) {
+      var input = document.getElementById("scale-length");
+      input.value = "";
+      input.disabled = true;
+      document.getElementById("scale-save").disabled = true;
+      document.getElementById("scale-error").textContent = "";
+    }
     drawPlan();
   }
 
@@ -656,6 +745,79 @@
     draft.push([round4(clamp01(p[0])), round4(clamp01(p[1]))]);
     document.getElementById("room-close").disabled = draft.length < 3;
     drawPlan();
+  }
+
+  // --------------------------------------------------------------- scale
+
+  // Length of the drawn line as a fraction of the plan's width (aspect-corrected).
+  function draftSpan() {
+    var dx = draft[1][0] - draft[0][0], dy = draft[1][1] - draft[0][1];
+    return Math.hypot(dx, dy * plan.height / plan.width);
+  }
+
+  function onScaleClick(evt) {
+    if (mode !== "scale") {
+      return;
+    }
+    var p = planPoint(evt);
+    var pt = [clamp01(p[0]), clamp01(p[1])];
+    draft = draft.length >= 2 ? [pt] : draft.concat([pt]);
+    var input = document.getElementById("scale-length");
+    var ready = draft.length === 2;
+    input.disabled = !ready;
+    document.getElementById("scale-save").disabled = !ready;
+    document.getElementById("scale-error").textContent = "";
+    drawPlan();
+    if (ready) {
+      var now = plan.width_mm > 0 && UNITS ? " It measures " + UNITS.format(draftSpan() * plan.width_mm, plan.units) + " at the current scale." : "";
+      setStatus("Type the line's real length." + now);
+      input.focus();
+    } else {
+      setStatus("Now click the other end.");
+    }
+  }
+
+  function scaleError(text) {
+    document.getElementById("scale-error").textContent = text;
+    setStatus(text, true);
+  }
+
+  function saveScale() {
+    if (mode !== "scale" || draft.length !== 2 || !UNITS) {
+      return;
+    }
+    var got = UNITS.parse(document.getElementById("scale-length").value);
+    if (got.error) {
+      scaleError(got.error);
+      return;
+    }
+    var span = draftSpan();
+    if (!(span > 1e-4)) {
+      scaleError("The two points are too close together: click two points further apart.");
+      return;
+    }
+    var btn = document.getElementById("scale-save");
+    btn.disabled = true;
+    setStatus("Saving…");
+    fetch(ROOT + "/floorplan/scale", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-CSRF-Token": CSRF },
+      body: JSON.stringify({ width_mm: got.mm / span }),
+    }).then(function (r) {
+      return r.json().then(function (data) { return { r: r, data: data }; }, function () { return { r: r, data: null }; });
+    }).then(function (res) {
+      if (res.r.ok) {
+        window.location.assign(ROOT + "/floorplan?saved=scale");
+        return;
+      }
+      var detail = res.data && res.data.detail;
+      scaleError(typeof detail === "string" ? detail : "Could not save the scale (HTTP " + res.r.status + ").");
+      btn.disabled = false;
+    }, function () {
+      scaleError("Network error: the scale was not saved.");
+      btn.disabled = false;
+    });
   }
 
   // --------------------------------------------------------------- search
@@ -845,10 +1007,24 @@
         }
       });
       svg.addEventListener("click", onLayoutClick);
+      svg.addEventListener("click", onScaleClick);
       svg.addEventListener("keydown", onKey);
       document.getElementById("room-close").addEventListener("click", closeDraft);
       document.getElementById("room-cancel").addEventListener("click", function () { setMode("place"); });
       layoutBtn.addEventListener("click", function () { setMode(mode === "layout" ? "place" : "layout"); });
+      if (scaleBtn) {
+        scaleBtn.addEventListener("click", function () { setMode(mode === "scale" ? "place" : "scale"); });
+        document.getElementById("scale-cancel").addEventListener("click", function () { setMode("place"); });
+        document.getElementById("scale-save").addEventListener("click", saveScale);
+        document.getElementById("scale-length").addEventListener("keydown", function (evt) {
+          if (evt.key === "Enter") {
+            evt.preventDefault();
+            saveScale();
+          } else if (evt.key === "Escape") {
+            setMode("place");
+          }
+        });
+      }
       saveBtn.addEventListener("click", save);
       discardBtn.addEventListener("click", function () {
         dirty = {};
@@ -895,5 +1071,11 @@
   load();
   wire();
   render();
+  drawGrid();
+  showSize();
   wireView();
+  window.addEventListener("resize", updateGrid);
+  if (layoutBtn && /(?:^|[?&])layout=1(?:&|$)/.test(window.location.search)) {
+    setMode("layout"); // a new blank plan opens ready to draw its first room
+  }
 })();

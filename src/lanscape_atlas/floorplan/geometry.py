@@ -66,3 +66,15 @@ def check_aspect(old_w: int, old_h: int, new_w: int, new_h: int) -> None:
         raise ValueError("image dimensions must be positive")
     if not math.isclose(old_w / old_h, new_w / new_h, rel_tol=1e-3):
         raise ValueError("aspect ratio differs from the existing floor plan image")
+
+
+def plan_length_mm(dx: float, dy: float, *, width: int, height: int, width_mm: float) -> float:
+    """Real-world length in mm of the normalized plan delta ``(dx, dy)``.
+
+    ``width``/``height`` are the plan's size in its own units (pixels for an image,
+    mm for a blank plan) and ``width_mm`` its real width; the plan is ``width_mm *
+    height / width`` deep, so ``dy`` is scaled by that depth (spec §5.1).
+    """
+    if min(width, height) <= 0 or not math.isfinite(width_mm) or width_mm <= 0:
+        raise ValueError("plan width, height and width_mm must be positive")
+    return math.hypot(dx * width_mm, dy * width_mm * height / width)

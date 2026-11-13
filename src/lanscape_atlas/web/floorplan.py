@@ -15,6 +15,13 @@ Writes:
 - ``POST /floorplan/rooms`` (form ``name``, ``polygon`` JSON text) and
   ``POST /floorplan/rooms/{id}/name`` (form ``new_name``): 303 back to the page with
   a flash, or the page re-rendered with a 422 flash.
+- ``POST /floorplan/blank`` (form ``width``, ``depth`` as decimal numbers in feet or
+  metres, ``units`` ``imperial``/``metric``): ``Service.create_blank_plan``; 303 to the
+  page in Layout mode (``?layout=1``), or the page re-rendered with a 422 flash.
+- ``POST /floorplan/units`` (form ``units``): ``Service.set_plan_units``; 303 or 422.
+- ``POST /floorplan/scale``: JSON ``{"width_mm": number}``, token in ``X-CSRF-Token``,
+  from the page's Set scale tool (the page works out ``width_mm`` from the drawn line
+  and the typed length); ``Service.set_plan_scale``.
 - ``POST /floorplan/placements``: JSON in the ``/api/v1/floorplan/placements`` shape,
   token in ``X-CSRF-Token``; errors are JSON (``app._wants_json``), and a stale
   ``based_on`` answers 409 with the reload message (``app._stale_write``).
@@ -27,13 +34,15 @@ test, so ``%`` and ``_`` are not wildcards), name-prefix first. Every result car
 ``{"kind": "room", "place_id", "name"}``.
 
 ``GET /floorplan/plan.<ext>`` serves only ``data_dir/floorplan/<file_name>`` with the
-file name from the database, never a path from the request.
+file name from the database, never a path from the request; a blank plan has no file,
+so it answers 404.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Annotated, Any
@@ -42,7 +51,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Request
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, HTMLResponse, Response
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
@@ -56,6 +65,7 @@ from lanscape_atlas.service import Service
 from lanscape_atlas.service import queries as q
 from lanscape_atlas.web.floorplan_api import (
     STALE_MESSAGE,
+    Number,
     PlacementsBody,
     RoomBody,
     apply_placements,
@@ -88,7 +98,12 @@ SAVED_MESSAGES = {
     "room": "Room saved",
     "rename": "Room renamed.",
     "placements": "Changes saved.",
+    "blank": "Blank plan created. Click on the plan to draw your first room.",
+    "units": "Units changed.",
+    "scale": "Scale saved.",
 }
+# Millimetres per display unit for the blank-plan form (feet or metres).
+UNIT_MM = {"imperial": 304.8, "metric": 1000.0}
 UNNAMED = "(unnamed)"
 
 
@@ -124,7 +139,14 @@ def page_data(view: dict[str, Any], root: str) -> dict[str, Any]:
     return {
         "plan": None
         if plan is None
-        else {"width": plan["width"], "height": plan["height"], "url": _plan_url(root, plan)},
+        else {
+            "width": plan["width"],
+            "height": plan["height"],
+            "url": None if plan["blank"] else _plan_url(root, plan),
+            "blank": plan["blank"],
+            "width_mm": plan["width_mm"],
+            "units": plan["units"],
+        },
         "rooms": view["rooms"],
         "placed": view["placed"],
         "roaming": view["roaming"],
@@ -401,6 +423,51 @@ def rename_room(request: Request, place_id: PathId, form: Form) -> Response:
     except ValueError as e:
         return _page(request, ("error", _message(e)), 422)
     return _redirect(request, "/floorplan?saved=rename")
+
+
+def _blank_side(form: Any, key: str, label: str, per_unit: float) -> float:
+    text = _text(form, key).strip()
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"{label} must be a number") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be a number")
+    return value * per_unit
+
+
+@router.post("/floorplan/blank", response_model=None)
+def create_blank(request: Request, form: Form) -> Response:
+    units = _text(form, "units")
+    try:
+        if units not in UNIT_MM:
+            raise ValueError("choose feet or metres")
+        width = _blank_side(form, "width", "width", UNIT_MM[units])
+        depth = _blank_side(form, "depth", "depth", UNIT_MM[units])
+        _service(request).create_blank_plan(ACTOR, width_mm=width, height_mm=depth, units=units)
+    except ValueError as e:
+        return _page(request, ("error", _message(e)), 422)
+    return _redirect(request, "/floorplan?saved=blank&layout=1")
+
+
+@router.post("/floorplan/units", response_model=None)
+def set_units(request: Request, form: Form) -> Response:
+    try:
+        _service(request).set_plan_units(ACTOR, _text(form, "units"))
+    except ValueError as e:
+        return _page(request, ("error", _message(e)), 422)
+    return _redirect(request, "/floorplan?saved=units")
+
+
+class ScaleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    width_mm: Number
+
+
+@router.post("/floorplan/scale", dependencies=[CsrfHeader])
+def set_scale(request: Request, body: ScaleBody) -> dict[str, int]:
+    return {"batch_id": _service(request).set_plan_scale(ACTOR, width_mm=body.width_mm)}
 
 
 @router.post("/floorplan/placements", dependencies=[CsrfHeader])

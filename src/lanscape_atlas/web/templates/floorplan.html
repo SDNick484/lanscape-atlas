@@ -7,6 +7,17 @@
     <button type="button" id="save-changes" disabled>Save changes</button>
     <button type="button" id="discard-changes" class="secondary" disabled>Discard</button>
     <button type="button" id="mode-layout" class="secondary" aria-pressed="false">Draw room</button>
+    {% if not plan.blank %}
+    <button type="button" id="mode-scale" class="secondary" aria-pressed="false">Set scale</button>
+    {% endif %}
+    {% if plan.width_mm %}
+    <form id="units-form" class="inline fp-units" method="post" action="{{ root }}/floorplan/units" aria-label="Display units">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" name="units" value="imperial" class="secondary" id="units-imperial" aria-pressed="{{ 'true' if plan.units == 'imperial' else 'false' }}">ft</button>
+      <button type="submit" name="units" value="metric" class="secondary" id="units-metric" aria-pressed="{{ 'true' if plan.units == 'metric' else 'false' }}">m</button>
+    </form>
+    {% endif %}
+    <span id="fp-size" class="muted fp-size"></span>
     {% endif %}
     {% if svg %}
     <div class="fp-search">
@@ -21,12 +32,14 @@
       <button type="button" id="zoom-fit" class="secondary" title="Fit the whole plan (0)">Fit</button>
     </div>
     {% endif %}
+    {% if plan %}
     <form id="plan-upload" class="inline push" method="post" action="{{ root }}/floorplan/plan" enctype="multipart/form-data">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <label for="plan-file" class="muted">{{ "Replace plan" if plan else "Upload plan" }}</label>
+      <label for="plan-file" class="muted">{{ "Add an image" if plan.blank else "Replace image" }}</label>
       <input type="file" id="plan-file" name="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" required>
       <button type="submit" class="secondary">Upload</button>
     </form>
+    {% endif %}
   </div>
   <p id="fp-status" class="fp-status" role="status" aria-live="polite"></p>
 
@@ -35,7 +48,14 @@
     {% if svg %}
       <div id="floorplan" class="fp-stage" tabindex="0" role="group" data-zoom="1" aria-label="Floor plan: scroll or pinch to zoom, drag empty space to pan">
         <div id="fp-view" class="fp-view">
+        {%- if plan.blank %}
+        <svg id="plan-grid" class="fp-grid" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ svg.w }} {{ svg.h }}" width="{{ svg.w }}" height="{{ svg.h }}" preserveAspectRatio="none" aria-hidden="true">
+          <g class="fp-grid-minor"></g>
+          <g class="fp-grid-major"></g>
+        </svg>
+        {%- else %}
         <img id="plan-img" src="{{ plan.url }}" width="{{ svg.w }}" height="{{ svg.h }}" alt="Floor plan image" draggable="false">
+        {%- endif %}
         <svg id="plan-svg" class="fp-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {{ svg.w }} {{ svg.h }}" preserveAspectRatio="none" data-unit="{{ '%.3f'|format(svg.unit) }}" aria-label="Rooms and devices">
           <g class="fp-rooms">
             {%- for r in svg.rooms %}
@@ -71,13 +91,58 @@
           <button type="submit" id="room-save">Save room</button>
         </form>
       </div>
+      <div id="scale-draw" class="card fp-draw" hidden>
+        <p class="muted">Click two points on the plan a known distance apart (a wall, a door),
+        then type that distance: <code>14' 6"</code>, <code>14 ft</code>, <code>174 in</code>,
+        <code>4.4 m</code> or <code>440 cm</code>.</p>
+        <div class="inline">
+          <label for="scale-length">Length</label>
+          <input id="scale-length" maxlength="40" autocomplete="off" disabled aria-describedby="scale-error">
+          <button type="button" id="scale-save" disabled>Save scale</button>
+          <button type="button" id="scale-cancel" class="secondary">Cancel</button>
+        </div>
+        <p id="scale-error" class="error-text" role="alert"></p>
+      </div>
       <p class="muted fp-help">Drag devices from the list onto a room. Drag a placed device to move it
       within its room, or select it and use the arrow keys. Changes are kept until you press
       <em>Save changes</em>. Zoom with the wheel, a pinch or the + / &minus; buttons;
       drag empty space (or hold Space and drag) to pan; <em>Fit</em> shows the whole plan.
       Search finds a device or room and shows it.</p>
     {% else %}
-      <p class="card empty">No floor plan yet. Upload a PNG, JPG or SVG image (up to 10 MiB) to start.</p>
+      <p class="card empty">No floor plan yet. Upload an image of your floor plan, or start a
+      blank plan with its real size and draw on a grid.</p>
+      <div class="fp-start">
+        <section class="card">
+          <h2>Upload an image</h2>
+          <form id="plan-upload" method="post" action="{{ root }}/floorplan/plan" enctype="multipart/form-data">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <p class="muted">A PNG, JPG or SVG image, up to 10 MiB.</p>
+            <label for="plan-file" class="sr-only">Image file</label>
+            <input type="file" id="plan-file" name="file" accept=".png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml" required>
+            <button type="submit">Upload an image</button>
+          </form>
+        </section>
+        <section class="card">
+          <h2>Start a blank plan</h2>
+          <form id="blank-form" method="post" action="{{ root }}/floorplan/blank">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <p class="muted">The whole floor's outer size, 1 m to 300 m (3.3 ft to 984 ft) each way.</p>
+            <div class="inline">
+              <label for="blank-width">Width</label>
+              <input id="blank-width" name="width" inputmode="decimal" size="6" required autocomplete="off">
+              <span aria-hidden="true">&times;</span>
+              <label for="blank-depth">Depth</label>
+              <input id="blank-depth" name="depth" inputmode="decimal" size="6" required autocomplete="off">
+              <label for="blank-units" class="sr-only">Units</label>
+              <select id="blank-units" name="units">
+                <option value="imperial">feet</option>
+                <option value="metric">metres</option>
+              </select>
+            </div>
+            <button type="submit">Start a blank plan</button>
+          </form>
+        </section>
+      </div>
     {% endif %}
     </div>
 
@@ -137,6 +202,7 @@
   </datalist>
   <script type="application/json" id="fp-data">{{ data_json|safe }}</script>
 </div>
+<script src="{{ root }}/static/floorplan-units.js" defer></script>
 <script src="{{ root }}/static/floorplan-view.js" defer></script>
 <script src="{{ root }}/static/floorplan.js" defer></script>
 <script src="{{ root }}/static/floorplan-search.js" defer></script>

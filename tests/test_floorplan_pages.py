@@ -114,7 +114,14 @@ def test_page_draws_plan_rooms_and_stable_selectors(
     assert f'data-device-id="{dev}"' in html
     assert 'src="/floorplan/plan.png' in html
     data = _data_block(html)
-    assert data["plan"] == {"width": 1600, "height": 1200, "url": data["plan"]["url"]}
+    assert data["plan"] == {
+        "width": 1600,
+        "height": 1200,
+        "url": data["plan"]["url"],
+        "blank": False,
+        "width_mm": None,
+        "units": "imperial",
+    }
     assert data["rooms"] == [{"id": room, "name": "Room A", "polygon": SQ_POINTS}]
     assert data["placed"][0]["device_id"] == dev
     assert "file_name" not in json.dumps(data)

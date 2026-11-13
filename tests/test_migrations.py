@@ -9,10 +9,10 @@ from lanscape_atlas.store import db
 from lanscape_atlas.store.db import migrate, open_db
 
 
-def test_fresh_database_reaches_v4(tmp_path):
+def test_fresh_database_reaches_v5(tmp_path):
     conn = open_db(tmp_path / "a.db")
-    assert migrate(conn) == 4
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrate(conn) == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     assert conn.execute("SELECT name FROM sqlite_master WHERE name='floor_plan'").fetchone()
     cols = {r[1] for r in conn.execute("PRAGMA table_info(device)")}
     assert "roaming" in cols
@@ -27,22 +27,22 @@ def test_v1_database_upgrades_and_keeps_rows(tmp_path):
         "VALUES('2026-10-01T00:00:00Z','2026-10-01T00:00:00Z')"
     )
     conn.commit()
-    assert migrate(conn) == 4
+    assert migrate(conn) == 5
     row = conn.execute("SELECT roaming FROM device").fetchone()
     assert row[0] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
-def test_migrate_is_idempotent_at_v4(tmp_path):
+def test_migrate_is_idempotent_at_v5(tmp_path):
     conn = open_db(tmp_path / "e.db")
-    assert migrate(conn) == 4
-    assert migrate(conn) == 4
+    assert migrate(conn) == 5
+    assert migrate(conn) == 5
     assert conn.execute("SELECT count(*) FROM ble_salt").fetchone()[0] == 1
 
 
 def test_newer_database_is_refused(tmp_path):
     conn = open_db(tmp_path / "c.db")
-    conn.execute("PRAGMA user_version = 5")
+    conn.execute("PRAGMA user_version = 6")
     with pytest.raises(RuntimeError, match="newer than supported"):
         migrate(conn)
 
@@ -82,8 +82,8 @@ def test_v2_to_v3_keeps_data(tmp_path):
         "VALUES('2026-10-01T00:00:00Z','2026-10-01T00:00:00Z')"
     )
     conn.commit()
-    assert migrate(conn) == 4
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrate(conn) == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     assert conn.execute("SELECT name FROM place").fetchall()[0][0] == "Room A"
     assert conn.execute("SELECT count(*) FROM device").fetchone()[0] == 1
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -146,15 +146,15 @@ def test_v3_to_v4_keeps_data_and_creates_one_salt(tmp_path):
         "VALUES(1,'address','00:00:5e:00:53:01','2026-10-01T00:00:00Z')"
     )
     conn.commit()
-    assert migrate(conn) == 4
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert migrate(conn) == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     assert conn.execute("SELECT count(*) FROM device").fetchone()[0] == 1
     assert conn.execute("SELECT value FROM ble_identity").fetchone()[0] == "00:00:5e:00:53:01"
     salts = conn.execute("SELECT id, salt FROM ble_salt").fetchall()
     assert len(salts) == 1 and salts[0][0] == 1
     assert isinstance(salts[0][1], bytes) and len(salts[0][1]) == 32
     assert conn.execute("SELECT count(*) FROM ble_hidden").fetchone()[0] == 0
-    assert migrate(conn) == 4  # idempotent: still one salt
+    assert migrate(conn) == 5  # idempotent: still one salt
     assert conn.execute("SELECT count(*) FROM ble_salt").fetchone()[0] == 1
 
 
@@ -187,3 +187,89 @@ def test_fresh_equals_upgraded_v4(tmp_path):
     got = fresh.execute(q).fetchall()
     assert got == upgraded.execute(q).fetchall()
     assert {r[0] for r in got} >= set(HIDDEN_TABLES)
+
+
+# ------------------------------------------------------------ v5: plan scale
+
+
+def _v4_db(path):
+    conn = _v3_db(path)
+    conn.executescript(db._load_migration(4))
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    return conn
+
+
+def test_v4_plan_migrates_to_v5_with_values_intact(tmp_path):
+    conn = _v4_db(tmp_path / "n.db")
+    conn.execute(
+        "INSERT INTO floor_plan(id, width, height, sha256, file_name, updated_at)"
+        " VALUES (1, 1600, 1200, ?, ?, '2026-10-01T00:00:00Z')",
+        ("a" * 64, "a" * 64 + ".png"),
+    )
+    conn.execute(
+        "INSERT INTO field_source(entity, entity_id, field, actor, set_at)"
+        " VALUES ('floor_plan', 1, 'sha256', 'user', '2026-10-01T00:00:00Z')"
+    )
+    conn.commit()
+    assert migrate(conn) == 5
+    row = conn.execute("SELECT * FROM floor_plan").fetchone()
+    assert dict(row) == {
+        "id": 1,
+        "width": 1600,
+        "height": 1200,
+        "sha256": "a" * 64,
+        "file_name": "a" * 64 + ".png",
+        "updated_at": "2026-10-01T00:00:00Z",
+        "width_mm": None,
+        "units": "imperial",
+    }
+    assert conn.execute("SELECT count(*) FROM field_source").fetchone()[0] == 1
+    assert not conn.in_transaction
+
+
+def test_v4_without_plan_migrates_to_v5(tmp_path):
+    conn = _v4_db(tmp_path / "o.db")
+    assert migrate(conn) == 5
+    assert conn.execute("SELECT count(*) FROM floor_plan").fetchone()[0] == 0
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(floor_plan)")}
+    assert {"width_mm", "units"} <= cols
+
+
+def test_fresh_equals_upgraded_v5(tmp_path):
+    fresh = open_db(tmp_path / "p.db")
+    migrate(fresh)
+    upgraded = _v4_db(tmp_path / "q.db")
+    migrate(upgraded)
+    q = "SELECT name, sql FROM sqlite_master WHERE tbl_name = 'floor_plan' ORDER BY name"
+    assert fresh.execute(q).fetchall() == upgraded.execute(q).fetchall()
+
+
+def _plan_insert(conn, **cols):
+    row = {"id": 1, "width": 10, "height": 10, "updated_at": "t", **cols}
+    names = ", ".join(row)
+    marks = ", ".join("?" for _ in row)
+    conn.execute(f"INSERT INTO floor_plan({names}) VALUES ({marks})", tuple(row.values()))
+
+
+@pytest.mark.parametrize(
+    "cols",
+    [
+        {"sha256": "a" * 64},
+        {"file_name": "x.png"},
+        {"sha256": "a" * 64, "file_name": "x.png", "width_mm": 0},
+        {"sha256": "a" * 64, "file_name": "x.png", "width_mm": -5.0},
+        {"sha256": "a" * 64, "file_name": "x.png", "units": "furlongs"},
+        {"units": None},
+    ],
+)
+def test_v5_checks_refuse_bad_rows(db, cols):
+    with pytest.raises(sqlite3.IntegrityError):
+        _plan_insert(db, **cols)
+
+
+def test_v5_accepts_blank_and_image_rows(db):
+    _plan_insert(db, width_mm=10.0, units="metric")
+    db.execute("DELETE FROM floor_plan")
+    _plan_insert(db, sha256="a" * 64, file_name="x.png")
+    assert db.execute("SELECT units, width_mm FROM floor_plan").fetchone()[:] == ("imperial", None)

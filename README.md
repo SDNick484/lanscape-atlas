@@ -30,7 +30,8 @@ ranges, not a real network.
 - **HTTP API** under `/api/v1` (OpenAPI via FastAPI) and an **MCP server** at `/mcp`
   in the same process.
 - **Vendor lookup** from a local IEEE OUI file; no network call at lookup time.
-- **Floor plan** (Phase 2): upload a plan, draw rooms, place devices. See below.
+- **Floor plan** (Phase 2): upload a plan or start a blank one with real dimensions,
+  set its scale, draw rooms, place devices. See below.
 - **Bluetooth Find** (Phase 3): where was my remote or phone last heard, by room, from
   ESP32 Bluetooth proxies through Home Assistant. See below.
 
@@ -60,8 +61,29 @@ explains the controls (open the first time, then it remembers whether you closed
 
 The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
 
-- **Upload a plan.** Choose a PNG, JPG or SVG up to 10 MiB. Replacing the plan later
-  requires the same aspect ratio, so room outlines and device points stay valid.
+- **Start a plan.** With no plan yet, the page offers two choices:
+  - *Upload an image*: a PNG, JPG or SVG up to 10 MiB. Replacing the image later
+    requires the same aspect ratio, so room outlines and device points stay valid.
+  - *Start a blank plan*: type the floor's width and depth in feet or metres (each 1 m
+    to 300 m). The plan is drawn as a grid of 1 ft squares with a heavier line every
+    10 ft (or 0.5 m squares, heavier every 5 m); zoomed out so far that a square is
+    under 6 px on screen, only the heavier lines show. The page opens in *Draw room*
+    mode, ready for the first room.
+- **Add an image to a blank plan** with *Add an image*. The blank plan's real width
+  carries over as the image's scale. With no rooms drawn, an image of any aspect ratio
+  is accepted (the plan's depth then follows the image). **Once rooms exist, an image
+  whose aspect ratio differs from the plan is refused: crop it to the plan's
+  proportions first.** There is no way back from image to blank, other than undo.
+- **Set scale** (image plans). Press *Set scale*, click the two ends of something whose
+  length you know (a wall, a door), type that length and press *Save scale* or Enter.
+  Lengths can be written `14'6"`, `14' 6"`, `14 ft`, `174 in`, `4.4 m` or `440 cm`; a
+  bare number, zero, a negative length, `5'13"` or text is refused with a message and
+  nothing is saved. Setting the scale again replaces it; rooms and devices keep their
+  positions. Once a scale is set, the line you draw also shows its current length.
+- **Units.** When the plan has a scale (a blank plan always does), the toolbar shows
+  the plan's real size and an *ft* / *m* toggle. Imperial lengths show to the nearest
+  inch (`14' 6"`), metric to the nearest centimetre (`4.42 m`). Units are for display
+  only; sizes are stored in millimetres.
 - **Draw rooms.** Press *Draw room*, click the corners, close the shape (click the
   first corner or *Close room*), name it ("Room A") and save. Saving an existing name
   redraws that room. Rename rooms from the Rooms list. A device point must lie
@@ -74,8 +96,10 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
 - **Roaming devices** (phones, laptops) belong to a room's list but have no point on
   the plan. Tick *roaming* next to the device in the list, or press *Mark roaming* (and *Mark fixed* to undo it) on its device page.
   Turning roaming off leaves the device in that room's list, ready to be dropped.
-- **Undo.** Every plan, room and placement change is a batch in History and can be
-  undone like any other change.
+- **Undo.** Every plan, room and placement change (including creating a blank plan,
+  adding an image, the scale and the units) is a batch in History and can be undone
+  like any other change. Undoing the plan's creation is refused while rooms drawn
+  after it still exist: undo or redraw those first.
 - **Zoom and pan** work in every mode. Zoom from 1x (*Fit*, the whole plan) to 8x with
   the mouse wheel or a trackpad pinch (about the pointer), a two-finger pinch on a touch
   screen, the *+* / *−* buttons, or the `+`, `-` and `0` (fit) keys while the plan has
@@ -94,7 +118,10 @@ saves placements (with `based_on` batch ids for stale-write detection).
 
 MCP: `get_floor_plan` and `place_devices` are **text only**. They return room names,
 polygons and device positions; image bytes and file paths are never served, so the
-plan image reaches a browser only through the web UI. Writes use actor `claude`.
+plan image reaches a browser only through the web UI. Writes use actor `claude`. The
+plan carries `blank`, `width_mm` (its real width, or null for an image without a
+scale) and `units`; a blank plan's `width` and `height` are millimetres, an image's
+are pixels. Creating a blank plan, the scale and the units are set on the page only.
 
 The image is stored in `$DATA_DIR/floorplan` (mode 0750, created by
 `deploy/setup-alpine.sh`; create it yourself on a manual install) and is never in
@@ -106,6 +133,8 @@ Put real room names in a denylist file and point `LANSCAPE_LEAK_DENYLIST` (or
 scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
 before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
 directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
+Schema v5 (blank plans and scale) rebuilds the `floor_plan` table on start; an existing
+plan keeps its image, has no scale and shows imperial units until you change them.
 
 ## Bluetooth (Find)
 
