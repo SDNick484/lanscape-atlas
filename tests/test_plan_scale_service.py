@@ -204,12 +204,11 @@ def test_image_over_blank_same_aspect_accepted_with_a_room(svc, db):
 
 
 def test_image_over_blank_wrong_aspect_refused_with_a_shape(svc, db):
-    """The plan_shape check works once #10's table exists (here a stand-in table)."""
+    """A drawn shape (schema v6, #10) counts like a room polygon."""
     _blank(svc, 12_000, 9_000)
-    db.execute("CREATE TABLE plan_shape (id INTEGER PRIMARY KEY, kind TEXT)")
     svc.set_floor_plan("user", width=1000, height=2000, sha256=A, file_name="x.png")
     svc.undo("user", int(db.execute("SELECT max(id) FROM batch").fetchone()[0]))
-    db.execute("INSERT INTO plan_shape(kind) VALUES ('wall')")
+    db.execute("INSERT INTO plan_shape(kind, geometry, created_at) VALUES ('wall', '{}', 't')")
     db.commit()
     with pytest.raises(ValueError, match="aspect"):
         svc.set_floor_plan("user", width=1000, height=2000, sha256=A, file_name="x.png")
@@ -311,7 +310,8 @@ def test_undo_first_image_refused_while_later_room_polygon(svc, db):
 
 
 def test_undo_creation_refused_while_later_plan_shape_change(svc, db):
-    """#10's plan_shape rows are matched in the change log, with or without the table."""
+    """plan_shape rows are matched in the change log (a hand-made row here; see
+    test_plan_shapes.py for the real save_shapes path)."""
     bid = _blank(svc)
     shape_batch = svc.begin_batch("user")
     svc._log_change(shape_batch, "plan_shape", 1, "*", None, {"id": 1, "kind": "wall"})

@@ -765,3 +765,24 @@ async def test_hide_ble_errors(app: FastAPI, clock: FixedClock) -> None:
         app.state.bluetooth = None
         gone = await _call(c, "hide_ble", candidate=BLE_KEY)
         assert gone.is_error and _text(gone) == "no such candidate"
+
+
+async def test_get_floor_plan_leaves_out_drawn_shapes(mcp_client: Any, svc: Any) -> None:
+    """Drawing is page-only; #11 adds a summary (spec §6.6). No geometry over MCP."""
+    from lanscape_atlas.service import NewShape
+
+    svc.create_blank_plan("user", width_mm=12_000, height_mm=9_000, units="metric")
+    wall = {"points": [[0.1, 0.1], [0.4, 0.1]], "closed": False}
+    svc.save_shapes("user", creates=[NewShape("wall", wall)], updates=[], deletes=[], based_on=0)
+    async with mcp_client() as c:
+        out = _data(await _call(c, "get_floor_plan"))
+    assert "shapes" not in out and "shapes_batch" not in out
+    assert "points" not in json.dumps(out)
+
+
+def test_error_message_for_stale_shapes() -> None:
+    from lanscape_atlas.mcp_server import error_message
+    from lanscape_atlas.service import StaleShapes
+
+    msg = error_message(StaleShapes([7]))
+    assert msg is not None and "drawing changed" in msg and "device" not in msg

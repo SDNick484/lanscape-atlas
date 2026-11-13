@@ -29,6 +29,13 @@
  * (LanscapeFP.units.parse), and the page posts the plan's real width to
  * /floorplan/scale. A length that does not parse shows a message and saves nothing.
  *
+ * Draw mode (spec §6.3, floorplan-draw.js): walls and doors drawn over the plan. This
+ * file owns the mode switch and the Save / Discard buttons; LanscapeFP.drawing owns the
+ * shapes, their tools and their SVG groups, which drawPlan stacks as: shapes under the
+ * rooms, wall lengths over the room labels, drafts and handles on top. Placement edits
+ * and shape edits are never pending together: while either is unsaved the other mode's
+ * button is disabled, so "Save changes" posts one or the other.
+ *
  * LanscapeFP.page.revealDevice / revealRoom / clearFound are what the search box
  * (floorplan-search.js) calls when a result is picked: they move the view, select or
  * pulse a marker, and highlight the room and the tray entry.
@@ -58,6 +65,7 @@
   var discardBtn = document.getElementById("discard-changes");
   var layoutBtn = document.getElementById("mode-layout");
   var scaleBtn = document.getElementById("mode-scale");
+  var drawBtn = document.getElementById("mode-draw");
   var gridEl = document.getElementById("plan-grid");
   var sizeEl = document.getElementById("fp-size");
   var UNITS = FP.units;
@@ -76,6 +84,7 @@
   var draftClosed = false;
   var foundRoom = null; // place id highlighted by a search pick
   var foundTray = null; // device id whose tray entry a search pick highlighted
+  var draw = null; // the Draw mode instance (floorplan-draw.js) once there is a plan
 
   // ----------------------------------------------------------- geometry
   // Port of floorplan/geometry.py: points on an edge or vertex count as inside.
@@ -173,16 +182,30 @@
 
   function markDirty(d) {
     dirty[d.id] = true;
-    var n = Object.keys(dirty).length;
-    saveBtn.disabled = false;
-    discardBtn.disabled = false;
-    [layoutBtn, scaleBtn].forEach(function (b) {
+    refreshDirty();
+  }
+
+  function unsaved() {
+    return Object.keys(dirty).length + (draw ? draw.dirtyCount() : 0);
+  }
+
+  // Save / Discard follow the pending edits (placements or shapes, never both); the
+  // mode buttons are disabled while any are pending.
+  function refreshDirty() {
+    var n = unsaved();
+    saveBtn.disabled = !n;
+    discardBtn.disabled = !n;
+    [layoutBtn, scaleBtn, drawBtn].forEach(function (b) {
       if (b) {
-        b.disabled = true;
-        b.title = "Save or discard your changes first";
+        b.disabled = !!n;
+        if (n) {
+          b.title = "Save or discard your changes first";
+        } else {
+          b.removeAttribute("title");
+        }
       }
     });
-    setStatus(n + " unsaved change" + (n === 1 ? "" : "s") + ".");
+    setStatus(n ? n + " unsaved change" + (n === 1 ? "" : "s") + "." : "");
   }
 
   function setPoint(d, placeId, x, y) {
@@ -276,6 +299,9 @@
     if (!svg || !plan) {
       return;
     }
+    if (draw) {
+      draw.redraw();
+    }
     var i, els = svg.querySelectorAll("circle.fp-dev");
     for (i = 0; i < els.length; i += 1) { els[i].setAttribute("r", size(0.9)); }
     els = svg.querySelectorAll(".fp-draft circle");
@@ -306,6 +332,9 @@
     }
     var W = plan.width, H = plan.height;
     clear(svg);
+    if (draw) {
+      svg.appendChild(draw.layers.shapes);
+    }
     var gRooms = svgEl("g", { "class": "fp-rooms" });
     var gLabels = svgEl("g", { "class": "fp-labels" });
     rooms.forEach(function (r) {
@@ -352,8 +381,14 @@
     });
     svg.appendChild(gRooms);
     svg.appendChild(gLabels);
+    if (draw) {
+      svg.appendChild(draw.layers.lengths);
+    }
     svg.appendChild(gDevs);
     svg.appendChild(drawDraft());
+    if (draw) {
+      svg.appendChild(draw.layers.overlay);
+    }
   }
 
   function drawDraft() {
@@ -686,12 +721,20 @@
 
   // -------------------------------------------------------------- layout
 
-  // mode: "place", "layout" (draw a room) or "scale" (set the plan's scale).
+  // mode: "place", "layout" (draw a room), "scale" (set the plan's scale) or "draw"
+  // (walls and doors, floorplan-draw.js).
   function setMode(next) {
     mode = next;
-    // Both drawing modes share the "layout" look: crosshair, devices dimmed and inert.
+    // The drawing modes share the "layout" look: crosshair, devices dimmed and inert.
     app.classList.toggle("layout", mode !== "place");
+    app.classList.toggle("drawing", mode === "draw");
     layoutBtn.setAttribute("aria-pressed", mode === "layout" ? "true" : "false");
+    if (drawBtn) {
+      drawBtn.setAttribute("aria-pressed", mode === "draw" ? "true" : "false");
+    }
+    if (draw) {
+      draw.setActive(mode === "draw");
+    }
     document.getElementById("room-draw").hidden = mode !== "layout";
     if (scaleBtn) {
       scaleBtn.setAttribute("aria-pressed", mode === "scale" ? "true" : "false");
@@ -742,7 +785,9 @@
       return;
     }
     var p = planPoint(evt);
-    draft.push([round4(clamp01(p[0])), round4(clamp01(p[1]))]);
+    // A corner near a drawn wall's corner takes it exactly, so rooms line up with walls.
+    var onWall = draw ? draw.snapToWalls([clamp01(p[0]), clamp01(p[1])]) : null;
+    draft.push(onWall || [round4(clamp01(p[0])), round4(clamp01(p[1]))]);
     document.getElementById("room-close").disabled = draft.length < 3;
     drawPlan();
   }
@@ -925,9 +970,43 @@
 
   // ---------------------------------------------------------------- save
 
+  function post(path, body) {
+    return fetch(ROOT + path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Accept: "application/json", "X-CSRF-Token": CSRF },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      return r.json().then(function (data) { return { r: r, data: data }; }, function () { return { r: r, data: null }; });
+    });
+  }
+
+  // One POST /floorplan/shapes. A 409 means another tab (or an undo) changed the
+  // drawing: the server wrote nothing, and the page reloads with the message.
+  function saveShapes() {
+    saveBtn.disabled = true;
+    setStatus("Saving…");
+    post("/floorplan/shapes", draw.payload()).then(function (res) {
+      if (res.r.ok || res.r.status === 409) {
+        draw.discard();
+        window.location.assign(ROOT + "/floorplan?" + (res.r.ok ? "saved=shapes&draw=1" : "stale=shapes"));
+        return;
+      }
+      var detail = res.data && res.data.detail;
+      setStatus(typeof detail === "string" ? detail : "Could not save the drawing (HTTP " + res.r.status + ").", true);
+      saveBtn.disabled = false;
+    }, function () {
+      setStatus("Network error: your drawing is still here.", true);
+      saveBtn.disabled = false;
+    });
+  }
+
   function save() {
     var ids = Object.keys(dirty);
     if (!ids.length) {
+      if (draw && draw.dirtyCount()) {
+        saveShapes();
+      }
       return;
     }
     var placements = [], basedOn = {};
@@ -968,12 +1047,17 @@
     }
     view.configure({
       // Devices and the draft's first corner are handles: a press on them never pans.
-      noPan: function (target) {
-        return !!(target && target.closest && target.closest("[data-device-id], .fp-draft-start"));
+      // In Draw mode's Select tool, so are shapes and their handles.
+      noPan: function (target, evt) {
+        return !!(target && target.closest && target.closest("[data-device-id], .fp-draft-start")) ||
+          !!(draw && draw.noPan(evt));
       },
       interrupt: function () {
         if (stopTracking) {
           stopTracking();
+        }
+        if (draw) {
+          draw.interrupt();
         }
       },
       change: applySizes,
@@ -983,7 +1067,7 @@
   function wire() {
     // Unsaved placements live only in this page: warn before it is left.
     window.addEventListener("beforeunload", function (evt) {
-      if (Object.keys(dirty).length) {
+      if (unsaved()) {
         evt.preventDefault();
         evt.returnValue = "";
       }
@@ -1028,8 +1112,14 @@
       saveBtn.addEventListener("click", save);
       discardBtn.addEventListener("click", function () {
         dirty = {};
+        if (draw) {
+          draw.discard();
+        }
         window.location.reload();
       });
+      if (drawBtn) {
+        drawBtn.addEventListener("click", function () { setMode(mode === "draw" ? "place" : "draw"); });
+      }
       document.getElementById("fp-sel-tray").addEventListener("click", function () {
         var d = selected !== null ? devices[selected] : null;
         if (d) {
@@ -1068,7 +1158,34 @@
     }
   }
 
+  // Draw mode needs the plan, the overlay and the view (zoom and pan).
+  function makeDraw() {
+    if (!FP.drawing || !svg || !plan || !view || !drawBtn) {
+      return null;
+    }
+    return FP.drawing.create({
+      app: app,
+      plan: plan,
+      svg: svg,
+      view: view,
+      units: UNITS,
+      shapes: DATA.shapes || [],
+      batch: DATA.shapes_batch || 0,
+      size: size,
+      status: setStatus,
+      changed: refreshDirty,
+      roomCorners: function () {
+        var out = [];
+        rooms.forEach(function (r) {
+          (polygonOf(r.id) || []).forEach(function (p) { out.push(p); });
+        });
+        return out;
+      },
+    });
+  }
+
   load();
+  draw = makeDraw();
   wire();
   render();
   drawGrid();
@@ -1077,5 +1194,7 @@
   window.addEventListener("resize", updateGrid);
   if (layoutBtn && /(?:^|[?&])layout=1(?:&|$)/.test(window.location.search)) {
     setMode("layout"); // a new blank plan opens ready to draw its first room
+  } else if (draw && /(?:^|[?&])draw=1(?:&|$)/.test(window.location.search)) {
+    setMode("draw"); // back in Draw mode after saving a drawing
   }
 })();

@@ -358,3 +358,37 @@ fieldset.card legend { font-weight: 600; padding: 0 4px; }
 .fp-start form > * + * { margin-top: 8px; }
 .fp-start input[inputmode="decimal"] { width: 6em; }
 #scale-error:empty { display: none; }
+
+/* Floor plan: Draw mode, walls and doors (spec §6.3). Shapes never take pointer events
+   (the Select tool hit-tests geometry), so outside Draw mode they are display only.
+   Strokes and handle outlines are divided by --fp-zoom to stay constant on screen. */
+.fp-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+.fp-shapes, .fp-lengths, .fp-draw-overlay { pointer-events: none; }
+.fp-wall { fill: none; stroke: var(--text); stroke-linejoin: round; stroke-linecap: butt; vector-effect: non-scaling-stroke; }
+.fp-view .fp-wall { stroke-width: calc(4px / var(--fp-zoom, 1)); }
+.fp-wall.unsaved { stroke: var(--edge-wifi); }
+.fp-wall.selected { stroke: var(--accent); }
+.fp-door-swing { fill: none; stroke: var(--text); vector-effect: non-scaling-stroke; }
+.fp-view .fp-door-swing { stroke-width: calc(1.5px / var(--fp-zoom, 1)); }
+.fp-door.unsaved .fp-door-swing { stroke: var(--edge-wifi); }
+.fp-door.selected .fp-door-swing { stroke: var(--accent); }
+.fp-view .fp-door.selected .fp-door-swing { stroke-width: calc(2.5px / var(--fp-zoom, 1)); }
+.fp-door-preview .fp-door-swing { stroke: var(--accent); stroke-dasharray: 4 3; opacity: 0.8; }
+.fp-length, .fp-live-length {
+  fill: var(--text); text-anchor: middle; dominant-baseline: middle; paint-order: stroke;
+  stroke: var(--surface); stroke-linejoin: round; vector-effect: non-scaling-stroke;
+}
+.fp-view .fp-length, .fp-view .fp-live-length { stroke-width: calc(3px / var(--fp-zoom, 1)); }
+.fp-live-length { font-weight: 600; text-anchor: start; }
+.fp-wall-draft { fill: none; stroke: var(--accent); vector-effect: non-scaling-stroke; }
+.fp-view .fp-wall-draft { stroke-width: calc(2px / var(--fp-zoom, 1)); stroke-dasharray: calc(6px / var(--fp-zoom, 1)) calc(4px / var(--fp-zoom, 1)); }
+.fp-draw-overlay .fp-draft-pt { fill: var(--accent); }
+.fp-draw-overlay .fp-draft-start { stroke: var(--accent); }
+.fp-snap { fill: none; stroke: var(--online); vector-effect: non-scaling-stroke; }
+.fp-view .fp-snap { stroke-width: calc(2px / var(--fp-zoom, 1)); }
+.fp-handle { fill: var(--surface); stroke: var(--accent); vector-effect: non-scaling-stroke; }
+.fp-view .fp-handle { stroke-width: calc(2px / var(--fp-zoom, 1)); }
+.fp.drawing[data-tool="select"] .fp-svg { cursor: default; }
+.fp-tools button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.fp-length-input { position: absolute; z-index: 2; width: 100px; font-size: 12.5px; padding: 2px 6px; }
+.fp-length-input.error { border-color: var(--danger); }

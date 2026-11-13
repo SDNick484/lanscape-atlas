@@ -43,7 +43,7 @@
   var tx = 0; // translation, as a fraction of the wrapper's width
   var ty = 0; // ... and of its height
   var hooks = {
-    noPan: function () { return false; }, // true when a press on this target must not pan
+    noPan: function () { return false; }, // (target, event): true when this press must not pan
     interrupt: function () {}, // a gesture took over: cancel any drag in progress
     change: function () {}, // called with the zoom after every change
   };
@@ -286,7 +286,7 @@
       startPan(evt, true);
       return;
     }
-    if (!hooks.noPan(evt.target)) {
+    if (!hooks.noPan(evt.target, evt)) {
       startPan(evt, false);
     }
   }, true);
