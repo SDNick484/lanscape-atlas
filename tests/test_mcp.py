@@ -767,17 +767,59 @@ async def test_hide_ble_errors(app: FastAPI, clock: FixedClock) -> None:
         assert gone.is_error and _text(gone) == "no such candidate"
 
 
-async def test_get_floor_plan_leaves_out_drawn_shapes(mcp_client: Any, svc: Any) -> None:
-    """Drawing is page-only; #11 adds a summary (spec §6.6). No geometry over MCP."""
+async def test_get_floor_plan_drawing_summary_has_no_geometry(mcp_client: Any, svc: Any) -> None:
+    """Drawing is page-only: MCP sees counts and names (spec §6.6), never coordinates."""
     from lanscape_atlas.service import NewShape
 
     svc.create_blank_plan("user", width_mm=12_000, height_mm=9_000, units="metric")
-    wall = {"points": [[0.1, 0.1], [0.4, 0.1]], "closed": False}
-    svc.save_shapes("user", creates=[NewShape("wall", wall)], updates=[], deletes=[], based_on=0)
+    async with mcp_client() as c:
+        empty = _data(await _call(c, "get_floor_plan"))
+    assert empty["drawing"] == {
+        "counts": {"wall": 0, "door": 0, "furniture": 0, "label": 0},
+        "furniture": [],
+        "labels": [],
+    }
+    wall = {"points": [[0.1234, 0.1], [0.4, 0.1]], "closed": False}
+    door = {"x": 0.25, "y": 0.1, "angle": 0, "width": 0.05, "flip": 0}
+    rect = {"rect": {"cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.1, "angle": 12.5}}
+    outline = {"points": [[0.1, 0.6], [0.3, 0.6], [0.3, 0.8]]}
+    svc.save_shapes(
+        "user",
+        creates=[
+            NewShape("wall", wall),
+            NewShape("door", door),
+            NewShape("furniture", rect, "Couch"),
+            NewShape("furniture", outline),
+            NewShape("furniture", outline, "Island"),
+            NewShape("label", {"x": 0.7654, "y": 0.2, "size": 0.02}, "Patio"),
+        ],
+        updates=[],
+        deletes=[],
+        based_on=0,
+    )
     async with mcp_client() as c:
         out = _data(await _call(c, "get_floor_plan"))
+    assert out["drawing"] == {
+        "counts": {"wall": 1, "door": 1, "furniture": 3, "label": 1},
+        "furniture": ["Couch", "Island"],
+        "labels": ["Patio"],
+    }
     assert "shapes" not in out and "shapes_batch" not in out
-    assert "points" not in json.dumps(out)
+    text = json.dumps(out)
+    for leak in ("points", "rect", "0.1234", "0.7654", "12.5", "angle", "cx", "size", "closed"):
+        assert leak not in text, leak
+
+
+async def test_get_floor_plan_without_plan_has_an_empty_drawing(mcp_client: Any) -> None:
+    async with mcp_client() as c:
+        out = _data(await _call(c, "get_floor_plan"))
+    assert out["drawing"]["counts"] == {"wall": 0, "door": 0, "furniture": 0, "label": 0}
+
+
+def test_instructions_say_the_drawing_is_page_only() -> None:
+    from lanscape_atlas.mcp_server import INSTRUCTIONS
+
+    assert "page-only" in INSTRUCTIONS and "rooms remain the polygons" in INSTRUCTIONS
 
 
 def test_error_message_for_stale_shapes() -> None:

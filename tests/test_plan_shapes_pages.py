@@ -15,6 +15,7 @@ from lanscape_atlas.service import queries as q
 
 DATA_RE = re.compile(r'<script type="application/json" id="fp-data">(.*?)</script>', re.S)
 WALL = {"points": [[0.1, 0.1], [0.4, 0.1]], "closed": False}
+LABEL = {"x": 0.5, "y": 0.5, "size": 0.02}
 DOOR = {"x": 0.25, "y": 0.1, "angle": 0.0, "width": 0.0667, "flip": 1}
 
 
@@ -52,6 +53,27 @@ def test_save_creates_shapes(client_csrf: TestClient, db: sqlite3.Connection, bl
     bid = r.json()["batch_id"]
     assert bid > 0 and _count(db) == 2
     assert db.execute("SELECT actor FROM batch WHERE id = ?", (bid,)).fetchone()[0] == "user"
+
+
+def test_save_furniture_and_label_and_the_page_carries_them(
+    client_csrf: TestClient, db: sqlite3.Connection, blank: None
+) -> None:
+    rect = {"rect": {"cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.1, "angle": 20}}
+    body = _body(
+        creates=[
+            {"kind": "furniture", "geometry": rect, "label": "Couch"},
+            {"kind": "furniture", "geometry": {"points": [[0.1, 0.1], [0.3, 0.1], [0.3, 0.3]]}},
+            {"kind": "label", "geometry": LABEL, "label": "Patio"},
+        ]
+    )
+    r = client_csrf.post("/floorplan/shapes", json=body)
+    assert r.status_code == 200 and _count(db) == 3
+    shapes = _data(client_csrf.get("/floorplan").text)["shapes"]
+    assert [(s["kind"], s["label"]) for s in shapes] == [
+        ("furniture", "Couch"),
+        ("furniture", None),
+        ("label", "Patio"),
+    ]
 
 
 def test_save_updates_and_deletes(
@@ -147,7 +169,12 @@ def test_too_many_items_refused(
 @pytest.mark.parametrize(
     ("body", "message"),
     [
-        (_body(creates=[{"kind": "furniture", "geometry": {"x": 0.5}}]), "not supported yet"),
+        (_body(creates=[{"kind": "window", "geometry": {"x": 0.5}}]), "kind"),
+        (_body(creates=[{"kind": "furniture", "geometry": {"x": 0.5}}]), "exactly one"),
+        (
+            _body(creates=[{"kind": "label", "geometry": {"x": 0.5, "y": 0.5, "size": 0.02}}]),
+            "label",
+        ),
         (_body(creates=[{"kind": "wall", "geometry": {**WALL, "closed": 1}}]), "closed"),
         (
             _body(
@@ -158,6 +185,21 @@ def test_too_many_items_refused(
             r"[0, 1]",
         ),
         (_body(creates=[{"kind": "wall", "geometry": WALL, "label": "Wall"}]), "no label"),
+        (
+            _body(
+                creates=[
+                    {
+                        "kind": "furniture",
+                        "geometry": {
+                            "rect": {"cx": 0.99, "cy": 0.5, "w": 0.1, "h": 0.1, "angle": 0}
+                        },
+                    }
+                ]
+            ),
+            "corner is outside",
+        ),
+        (_body(creates=[{"kind": "label", "geometry": LABEL, "label": " "}]), "needs a label"),
+        (_body(creates=[{"kind": "label", "geometry": LABEL, "label": "x" * 81}]), "80 characters"),
     ],
 )
 def test_service_refusals_are_json_422(

@@ -80,6 +80,7 @@
           <g class="fp-draft"></g>
         </svg>
         </div>
+        <input id="draw-text" class="fp-length-input fp-text-input" maxlength="80" autocomplete="off" placeholder="label text" aria-label="Label text; press Enter to place it" hidden>
         <input id="draw-length" class="fp-length-input" maxlength="40" autocomplete="off" placeholder="length" aria-label="Length of the next segment, for example 10' or 3 m" hidden>
       </div>
       <div id="room-draw" class="card fp-draw" hidden>
@@ -115,11 +116,18 @@
           <button type="button" id="tool-wall" class="secondary" data-tool="wall" aria-pressed="false">Wall</button>
           <button type="button" id="tool-polyline" class="secondary" data-tool="polyline" aria-pressed="false">Polyline</button>
           <button type="button" id="tool-door" class="secondary" data-tool="door" aria-pressed="false">Door</button>
+          <button type="button" id="tool-furniture-rect" class="secondary" data-tool="furniture-rect" aria-pressed="false">Furniture rectangle</button>
+          <button type="button" id="tool-furniture-outline" class="secondary" data-tool="furniture-outline" aria-pressed="false">Furniture outline</button>
+          <button type="button" id="tool-label" class="secondary" data-tool="label" aria-pressed="false">Label</button>
           <button type="button" id="door-flip" class="secondary" disabled>Flip door</button>
           <button type="button" id="shape-delete" class="secondary" disabled>Delete</button>
         </div>
         <p id="draw-hint" class="muted"></p>
-        <p class="muted">Walls and doors are a picture: rooms stay the outlines drawn with <em>Draw room</em>.
+        <div class="inline">
+          <label for="shape-text">Name or text</label>
+          <input id="shape-text" maxlength="80" autocomplete="off" disabled>
+        </div>
+        <p class="muted">Walls, doors, furniture and labels are a picture: rooms stay the outlines drawn with <em>Draw room</em>.
         Shift locks a wall to 0°, 45° or 90°; Alt stops snapping while held. Changes are kept until you
         press <em>Save changes</em>.</p>
       </div>

@@ -69,7 +69,9 @@ INSTRUCTIONS = (
     "list_devices to locate a device, get_device for its full record, and update_device / "
     "set_place / claim_interface to name, place or merge devices. Every change you make is "
     "recorded as actor 'claude' and can be reverted with undo(batch_id). get_floor_plan lists "
-    "rooms and where devices sit; place_devices puts devices in rooms or at points on the plan. "
+    "rooms and where devices sit (plus a summary of what was drawn: counts, furniture names "
+    "and labels; the drawing itself is page-only and visual, and rooms remain the polygons); "
+    "place_devices puts devices in rooms or at points on the plan. "
     "where_is finds where a Bluetooth tag or device was last heard; ble_candidates lists unclaimed "
     "Bluetooth devices, claim_ble attaches one to a device and hide_ble hides a neighbour's "
     "device that keeps showing up. Devices that rotate their Bluetooth address (most phones "
@@ -323,14 +325,17 @@ def build_mcp(
         only; no image or file name), rooms (id, name, polygon: a list of
         [x, y] points), placed (fixed devices with a point), roaming (devices assigned to
         a room only, no point) and unplaced (no room, or a room but no point; each has
-        place_id, null if none). Coordinates are normalized 0..1 across the plan image
+        place_id, null if none), and drawing: what was drawn on the plan by hand, as counts
+        (per kind: wall, door, furniture, label), the names of named furniture and the
+        texts of labels, never any geometry. The drawing is page-only and visual; rooms
+        remain the polygons. Coordinates are normalized 0..1 across the plan image
         (x left to right, y top to bottom). Every device carries last_batch: pass it back
         in place_devices' based_on."""
         with service.lock:
             view = queries.floor_plan_view(service.conn, now=service.clock())
-        # Drawn shapes are page-only pictures; no geometry here (spec §6.6, issue #11
-        # adds a summary).
-        view.pop("shapes", None)
+        # Drawn shapes are page-only pictures: a summary (counts and names), no geometry
+        # (spec §6.6).
+        view["drawing"] = queries.drawing_summary(view.pop("shapes"))
         view.pop("shapes_batch", None)
         plan = view["plan"]
         if plan is not None:

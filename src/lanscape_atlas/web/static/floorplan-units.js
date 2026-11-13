@@ -12,6 +12,8 @@
  * format(mm, units): imperial to the nearest inch (14' 6"), metric to the nearest
  * centimetre (4.42 m).
  *
+ * formatArea(mm2, units): "≈ 180 sq ft" (whole square feet) or "≈ 16.7 m²" (0.1 m²).
+ *
  * grid(units): the blank plan's grid in mm: {minor, major} = 1 ft / 10 ft or
  * 0.5 m / 5 m.
  */
@@ -80,9 +82,19 @@
     return ft + "' " + (total - ft * 12) + "\"";
   }
 
+  function formatArea(mm2, units) {
+    if (typeof mm2 !== "number" || !isFinite(mm2) || mm2 < 0) {
+      return "";
+    }
+    if (units === "metric") {
+      return "\u2248 " + (Math.round(mm2 / 1e5) / 10).toFixed(1) + " m\u00b2";
+    }
+    return "\u2248 " + Math.round(mm2 / (MM_PER_FT * MM_PER_FT)) + " sq ft";
+  }
+
   function grid(units) {
     return units === "metric" ? { minor: 500, major: 5000 } : { minor: MM_PER_FT, major: 10 * MM_PER_FT };
   }
 
-  FP.units = { parse: parse, format: format, grid: grid, MM_PER_FT: MM_PER_FT };
+  FP.units = { parse: parse, format: format, formatArea: formatArea, grid: grid, MM_PER_FT: MM_PER_FT };
 })();

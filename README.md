@@ -8,6 +8,7 @@ hostnames.
 
 ![Devices list](docs/screenshots/devices.png)
 ![Topology view](docs/screenshots/topology.png)
+![Floor plan with walls, furniture and areas](docs/screenshots/floorplan.png)
 
 The screenshots show a generated "fake house" dataset in documentation address
 ranges, not a real network.
@@ -125,8 +126,30 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
     mixes the two. If another tab (or an undo) changed the drawing since the page
     loaded, the save is refused (409), nothing is written and the page reloads with a
     message. Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
-  - Drawing is page-only: there is no API or MCP write for it, and `get_floor_plan`
-    leaves the shapes out. `GET /api/v1/floorplan` lists them (`shapes`).
+  - Drawing is page-only: there is no API or MCP write for it. `GET /api/v1/floorplan`
+    lists the shapes (`shapes`); `get_floor_plan` gives only a summary (see MCP below).
+- **Draw furniture, fixtures and labels.** Also under *Draw*, and also a picture only.
+  Furniture sits at the bottom of the drawing, under the walls, with a light fill; labels
+  sit above the rooms and under the device markers.
+  - *Furniture rectangle*: drag from one corner to the opposite corner. In *Select* a
+    rectangle has four corner handles (the opposite corner stays put) and a round handle
+    above its top edge that turns it (hold Shift for 15° steps). Rotation is measured on
+    the real plan, so a square stays square on a plan that is not.
+  - A rectangle never leaves the plan. Moving, resizing or turning it stops where a
+    corner would cross the edge, and the server refuses (422) a rectangle whose rotated
+    corner is outside the plan rather than clamping it.
+  - *Furniture outline*: click the corners like a polyline (3 to 500); double-click or
+    Enter finishes it, a click on the first corner closes it, Escape cancels. Drag a
+    corner in *Select* to reshape it.
+  - *Label*: click where the text goes, type it and press Enter (Escape cancels). Text
+    stays the same size on screen at any zoom.
+  - **Name or text** (the box in the Draw panel) names the selected furniture, which is
+    optional, or edits the selected label's text, which cannot be empty. Text is trimmed
+    and at most 80 characters, and is always shown as plain text.
+  - With a scale, each rectangle shows its width × depth (*Show lengths*), and each
+    room shows its approximate area under its name: `≈ 180 sq ft` (whole square feet) or
+    `≈ 16.7 m²` (0.1 m²). It is the room outline's area, not what the walls enclose. A
+    room outline that crosses itself shows no area.
 - **Undo.** Every plan, room, placement and drawing change (including creating a blank
   plan, adding an image, the scale and the units) is a batch in History and can be
   undone like any other change. Undoing the plan's creation is refused while rooms or
@@ -153,6 +176,10 @@ plan image reaches a browser only through the web UI. Writes use actor `claude`.
 plan carries `blank`, `width_mm` (its real width, or null for an image without a
 scale) and `units`; a blank plan's `width` and `height` are millimetres, an image's
 are pixels. Creating a blank plan, the scale and the units are set on the page only.
+`drawing` summarizes what was drawn, with no geometry:
+`{"counts": {"wall": 3, "door": 1, "furniture": 2, "label": 1}, "furniture": ["Couch"],
+"labels": ["Patio"]}` (the names of named furniture, and every label's text). The drawing is
+visual and page-only; rooms remain the polygons.
 
 The image is stored in `$DATA_DIR/floorplan` (mode 0750, created by
 `deploy/setup-alpine.sh`; create it yourself on a manual install) and is never in
@@ -166,7 +193,7 @@ before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
 directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
 Schema v5 (blank plans and scale) rebuilds the `floor_plan` table on start; an existing
 plan keeps its image, has no scale and shows imperial units until you change them. Schema v6 adds the
-`plan_shape` table for drawn walls and doors; nothing existing changes.
+`plan_shape` table for drawn walls, doors, furniture and labels; nothing existing changes.
 
 ## Bluetooth (Find)
 

@@ -4,9 +4,13 @@ import pytest
 
 from lanscape_atlas.floorplan.geometry import (
     check_aspect,
+    check_furniture_fits,
     parse_polygon,
     plan_length_mm,
     point_in_polygon,
+    polygon_area_mm2,
+    polygon_is_simple,
+    rect_corners,
 )
 
 SQUARE = [(0.1, 0.1), (0.5, 0.1), (0.5, 0.5), (0.1, 0.5)]
@@ -163,3 +167,86 @@ def test_plan_length_mm_sign_does_not_matter():
 def test_plan_length_mm_rejects_bad_plan(kwargs):
     with pytest.raises(ValueError):
         plan_length_mm(0.1, 0.1, **kwargs)
+
+
+# ---------------------------------------------- areas and rectangles (issue #11)
+
+
+def test_area_of_a_known_rectangle_on_a_non_square_plan() -> None:
+    # A 4:3 plan 12 m wide is 9 m deep. A rectangle spanning x 0.25..0.75 and y 0.2..0.8
+    # is 6 m x 5.4 m = 32.4 m².
+    rect = [(0.25, 0.2), (0.75, 0.2), (0.75, 0.8), (0.25, 0.8)]
+    got = polygon_area_mm2(rect, width=4000, height=3000, width_mm=12_000)
+    assert got == pytest.approx(32.4e6)
+    # Same plan as a blank plan (width/height are mm): the same area.
+    assert polygon_area_mm2(rect, width=12_000, height=9_000, width_mm=12_000) == pytest.approx(
+        32.4e6
+    )
+    # A square plan would give 6 m x 7.2 m: the aspect matters.
+    assert polygon_area_mm2(rect, width=1000, height=1000, width_mm=12_000) == pytest.approx(43.2e6)
+
+
+def test_area_does_not_depend_on_winding_or_start() -> None:
+    tri = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.5)]
+    a = polygon_area_mm2(tri, width=100, height=50, width_mm=10_000)
+    assert a == pytest.approx(0.5 * 0.8 * 10_000 * 0.4 * 5_000)
+    assert polygon_area_mm2(tri[::-1], width=100, height=50, width_mm=10_000) == pytest.approx(a)
+    assert polygon_area_mm2(tri[1:] + tri[:1], width=100, height=50, width_mm=10_000) == (
+        pytest.approx(a)
+    )
+
+
+def test_area_of_an_l_shape() -> None:
+    got = polygon_area_mm2(L_SHAPE, width=1, height=1, width_mm=10)
+    assert got == pytest.approx((1 - 0.6 * 0.6) * 100)
+
+
+def test_self_intersecting_polygon_has_no_area() -> None:
+    bowtie = [(0.1, 0.1), (0.5, 0.5), (0.5, 0.1), (0.1, 0.5)]
+    assert not polygon_is_simple(bowtie)
+    assert polygon_area_mm2(bowtie, width=1, height=1, width_mm=10) is None
+    assert polygon_is_simple(SQUARE) and polygon_is_simple(L_SHAPE)
+
+
+def test_polygon_is_simple_touching_edges_count_as_crossing() -> None:
+    # A corner touching a non-adjacent edge is not a simple polygon.
+    pinched = [(0, 0), (1, 0), (1, 1), (0.5, 0), (0, 1)]
+    assert not polygon_is_simple(pinched)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"width": 0, "height": 1, "width_mm": 1.0}, "positive"),
+        ({"width": 1, "height": 1, "width_mm": 0.0}, "positive"),
+        ({"width": 1, "height": 1, "width_mm": math.nan}, "positive"),
+    ],
+)
+def test_area_needs_a_real_plan(kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        polygon_area_mm2(SQUARE, **kwargs)
+
+
+def test_rect_corners_rotate_in_aspect_corrected_space() -> None:
+    rect = {"cx": 0.5, "cy": 0.5, "w": 0.4, "h": 0.2, "angle": 0.0}
+    flat = rect_corners(rect, aspect=0.5)
+    assert [v for c in flat for v in c] == pytest.approx([0.3, 0.3, 0.7, 0.3, 0.7, 0.7, 0.3, 0.7])
+    # Turned 90 degrees the 0.4 side runs down: 0.4 / 0.5 = 0.8 of the height.
+    turned = rect_corners({**rect, "angle": 90.0}, aspect=0.5)
+    assert sorted({round(y, 9) for _, y in turned}) == [0.1, 0.9]
+    assert sorted({round(x, 9) for x, _ in turned}) == [0.4, 0.6]
+    # Each side is its true length in aspect-corrected space whatever the angle.
+    a = rect_corners({**rect, "angle": 37.0}, aspect=0.5)
+    side = math.hypot(a[1][0] - a[0][0], (a[1][1] - a[0][1]) * 0.5)
+    assert side == pytest.approx(0.4)
+
+
+def test_check_furniture_fits() -> None:
+    inside = {"rect": {"cx": 0.5, "cy": 0.5, "w": 0.4, "h": 0.2, "angle": 45.0}}
+    check_furniture_fits(inside, width=100, height=50)
+    check_furniture_fits({"points": [[0, 0], [1, 0], [1, 1]]}, width=100, height=50)
+    out = {"rect": {"cx": 0.1, "cy": 0.5, "w": 0.4, "h": 0.2, "angle": 0.0}}
+    with pytest.raises(ValueError, match="outside"):
+        check_furniture_fits(out, width=100, height=50)
+    with pytest.raises(ValueError, match="positive"):
+        check_furniture_fits(inside, width=0, height=50)
