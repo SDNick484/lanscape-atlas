@@ -1,7 +1,10 @@
 # Installed as /etc/logrotate.d/lanscape-atlas by deploy/setup-alpine.sh.
-# copytruncate because supervise-daemon keeps the log file open.
+# copytruncate because supervise-daemon keeps the log file open. maxsize rotates
+# early (logrotate runs daily from /etc/periodic/daily) when a crash loop or a chatty
+# collector grows the log past 10 MB, so it cannot fill a small disk within the week.
 /var/log/lanscape-atlas.log {
     weekly
+    maxsize 10M
     rotate 4
     missingok
     notifempty
