@@ -68,10 +68,10 @@ ALLOWED_UUID_RE = re.compile(
 # sample value for JSON Schema "uuid" and "string_uuid" formats; it is not a device UUID.
 # Path-scoped and exact-value: nothing else in the tree may use it, and the file may not
 # carry any other UUID.
+# Split so this file does not itself match UUID_RE; the joined value is the UUID.
+_SWAGGER_UI_SAMPLE_UUID = "3fa85f64" + "-5717-4562-b3fc-2c963f66afa6"
 VENDORED_UUID_ALLOW: dict[str, frozenset[str]] = {
-    "src/lanscape_atlas/web/static/swagger-ui-bundle.js": frozenset(
-        {"3fa85f64-5717-4562-b3fc-2c963f66afa6"}
-    ),
+    "src/lanscape_atlas/web/static/swagger-ui-bundle.js": frozenset({_SWAGGER_UI_SAMPLE_UUID}),
 }
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
 
