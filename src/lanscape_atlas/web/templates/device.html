@@ -107,7 +107,7 @@
 </table>
 </div>
 
-<h2>IP history</h2>
+<h2>IP history{% if d.lease_count > d.leases|length %} <span class="muted">(newest {{ d.leases|length }} of {{ d.lease_count }})</span>{% endif %}</h2>
 <div class="table-wrap">
 <table>
   <thead><tr><th>IPv4</th><th>Interface</th><th>First seen</th><th>Last seen</th><th>State</th></tr></thead>
