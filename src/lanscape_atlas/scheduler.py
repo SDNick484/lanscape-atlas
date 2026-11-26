@@ -26,7 +26,7 @@ from tzlocal import get_localzone
 from lanscape_atlas.backoff import capped_backoff
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.collectors.base import Collector
-from lanscape_atlas.config import Settings, _default_collectors
+from lanscape_atlas.config import Settings, default_collectors
 from lanscape_atlas.ingest import Ingestor, IngestResult
 from lanscape_atlas.service import Service
 
@@ -82,7 +82,7 @@ class CollectorRunner:
         self._secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
         # Per-collector interval_s (None = cron-scheduled); used as the backoff base.
         if intervals is None:
-            intervals = {n: cs.interval_s for n, cs in _default_collectors().items()}
+            intervals = {n: cs.interval_s for n, cs in default_collectors().items()}
         self._intervals = intervals
         # Names of long-lived collectors whose start() has succeeded.
         self._started: set[str] = set()
