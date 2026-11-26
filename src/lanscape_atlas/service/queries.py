@@ -12,9 +12,10 @@ import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT
 from lanscape_atlas.clock import iso
 from lanscape_atlas.netutil import normalize_mac, valid_ipv4
 
@@ -25,6 +26,10 @@ _MAC_KINDS_SQL = ", ".join(f"'{k}'" for k in MAC_KINDS)
 
 # Settings.ip_match_window_min's default; callers pass the configured value.
 DEFAULT_WINDOW_MIN = 10
+
+
+# How many leases ``get_device`` lists (newest first).
+LEASE_LIMIT = 50
 
 
 def current_lease_sql(lease: str = "l", iface: str = "i") -> str:
@@ -111,6 +116,8 @@ class DeviceView(DeviceSummary):
     leases: list[LeaseView]
     services: list[ServiceView]
     field_sources: dict[str, tuple[str, str]]
+    # ``leases`` holds only the newest LEASE_LIMIT; this is how many exist.
+    lease_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -264,10 +271,15 @@ def get_device(
         )
         for r in conn.execute(
             "SELECT l.* FROM ip_lease l JOIN interface i ON i.id = l.interface_id"
-            " WHERE i.device_id = ? ORDER BY l.last_seen DESC, l.id DESC",
-            (device_id,),
+            " WHERE i.device_id = ? ORDER BY l.last_seen DESC, l.id DESC LIMIT ?",
+            (device_id, LEASE_LIMIT),
         )
     ]
+    lease_count = conn.execute(
+        "SELECT count(*) FROM ip_lease l JOIN interface i ON i.id = l.interface_id"
+        " WHERE i.device_id = ?",
+        (device_id,),
+    ).fetchone()[0]
     sources = {
         str(r["field"]): (str(r["actor"]), str(r["set_at"]))
         for r in conn.execute(
@@ -285,6 +297,7 @@ def get_device(
         leases=leases,
         services=list_services(conn, device_id),
         field_sources=sources,
+        lease_count=lease_count,
     )
 
 
@@ -540,13 +553,24 @@ def drawing_summary(shapes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:
-    """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
+    """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``.
+
+    The 24 h cutoff sits inside the window's subquery, so only recent rows are ranked. It
+    is exact either way: a device whose newest sighting is within 24 h keeps the same row,
+    and one whose newest is older is dropped by the outer test as before. ``minute`` is the
+    floor of ``last_at``, so ``minute >= cutoff's minute`` holds for every row with
+    ``last_at >= cutoff``; it is the range that ``ble_sighting_minute`` can seek on. The
+    index hint is needed because, without ``ANALYZE`` statistics, the planner full-scans
+    ``ble_sighting`` instead.
+    """
+    cutoff = now - timedelta(hours=24)
     rows = conn.execute(
         "SELECT device_id, place_id, last_at FROM ("
         " SELECT device_id, place_id, last_at, ROW_NUMBER() OVER ("
         "  PARTITION BY device_id ORDER BY last_at DESC, max_rssi DESC, scanner_id ASC) AS rn"
-        " FROM ble_sighting) WHERE rn = 1 AND last_at >= ?",
-        (iso(now - timedelta(hours=24)),),
+        " FROM ble_sighting INDEXED BY ble_sighting_minute"
+        " WHERE minute >= ? AND last_at >= ?) WHERE rn = 1",
+        (cutoff.astimezone(UTC).strftime(BLE_MINUTE_FMT), iso(cutoff)),
     )
     return {r["device_id"]: {"place_id": r["place_id"], "at": r["last_at"]} for r in rows}
 

@@ -37,6 +37,7 @@ EXPECTED = {
     "update_device",
     "claim_interface",
     "set_place",
+    "forget_device",
     "run_deep_scan",
     "recent_changes",
     "undo",
@@ -133,7 +134,7 @@ async def test_tool_names_exact(app: FastAPI) -> None:
     async with _session(app) as client:
         tools = (await client.list_tools()).tools
         assert {t.name for t in tools} == EXPECTED
-        assert len(tools) == 16
+        assert len(tools) == 17
         assert set(TOOL_NAMES) == EXPECTED
         for t in tools:
             assert t.description and len(t.description) > 20, t.name
@@ -162,6 +163,38 @@ async def test_update_device_records_claude_actor(app: FastAPI) -> None:
         changes = _data(await _call(client, "recent_changes", actor="claude"))
         assert changes and all(c["actor"] == "claude" for c in changes)
         assert changes[0]["batch_id"] == r["batch_id"] and changes[0]["new_value"] == "Hall NAS"
+
+
+async def test_update_device_text_bounds(app: FastAPI) -> None:
+    async with _session(app) as client:
+        d = await _device_with_ip(client)
+        for field, limit in (("name", 200), ("owner", 200), ("notes", 4000)):
+            ok = await _call(
+                client, "update_device", device_id=d["id"], fields={field: "x" * limit}
+            )
+            assert not ok.is_error, _text(ok)
+            r = await _call(
+                client, "update_device", device_id=d["id"], fields={field: "x" * (limit + 1)}
+            )
+            assert r.is_error and f"{field} must be at most {limit} characters" in _text(r)
+        padded = await _call(client, "update_device", device_id=d["id"], fields={"owner": " Sam "})
+        assert not padded.is_error
+        assert _data(await _call(client, "get_device", device_id=d["id"]))["owner"] == "Sam"
+
+
+async def test_set_place_bounds_and_trim(app: FastAPI) -> None:
+    async with _session(app) as client:
+        devices = _data(await _call(client, "list_devices", online=True, limit=200))
+        a, b = devices[0]["id"], devices[1]["id"]
+        _data(await _call(client, "set_place", device_id=a, place_name=" Office "))
+        _data(await _call(client, "set_place", device_id=b, place_name="Office"))
+        places = {_data(await _call(client, "get_device", device_id=i))["place"] for i in (a, b)}
+        assert places == {"Office"}
+        assert app.state.conn.execute("select count(*) from place").fetchone()[0] == 1
+        ok = await _call(client, "set_place", device_id=a, place_name="p" * 200)
+        assert not ok.is_error, _text(ok)
+        r = await _call(client, "set_place", device_id=a, place_name="p" * 201)
+        assert r.is_error and "at most 200 characters" in _text(r)
 
 
 async def test_run_deep_scan_never_errors(app: FastAPI) -> None:
@@ -434,6 +467,12 @@ def _round_trip(c: TestClient, path: str, **headers: str) -> None:
 
 def test_http_round_trip(http: TestClient) -> None:
     _round_trip(http, "/mcp")
+
+
+def test_http_body_over_64_kib_is_413(http: TestClient) -> None:
+    for path in ("/mcp", "/mcp/"):
+        r = http.post(path, content=b" " * (64 * 1024 + 1), headers=MCP_HEADERS)
+        assert r.status_code == 413, path
 
 
 def test_http_trailing_slash(http: TestClient) -> None:
@@ -831,3 +870,18 @@ def test_error_message_for_stale_shapes() -> None:
 
     msg = error_message(StaleShapes([7]))
     assert msg is not None and "drawing changed" in msg and "device" not in msg
+
+
+async def test_forget_device_tool_is_claude_and_undoable(app: FastAPI) -> None:
+    async with _session(app) as client:
+        d = await _device_with_ip(client)
+        r = _data(await _call(client, "forget_device", device_id=d["id"]))
+        gone = await _call(client, "get_device", device_id=d["id"])
+        assert gone.is_error and _text(gone) == f"device {d['id']} not found"
+        again = await _call(client, "forget_device", device_id=d["id"])
+        assert again.is_error and _text(again) == f"device {d['id']} not found"
+        changes = _data(await _call(client, "recent_changes", limit=1))
+        assert changes[0]["batch_id"] == r["batch_id"] and changes[0]["actor"] == "claude"
+        _data(await _call(client, "undo", batch_id=r["batch_id"]))
+        view = _data(await _call(client, "get_device", device_id=d["id"]))
+        assert view["name"] == d["name"]

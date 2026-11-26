@@ -340,3 +340,78 @@ def test_concurrent_writer_waits_not_fails(tmp_path, events, clock):
     assert elapsed >= 0.4
     assert conn.execute("select name from device where id=?", (did,)).fetchone()[0] == "b"
     conn.close()
+
+
+# ------------------------------------------------------------ text bounds
+
+_DEVICE_TEXT_LIMITS = {"name": 200, "type": 200, "icon": 200, "owner": 200, "notes": 4000}
+
+
+@pytest.mark.parametrize(("field", "limit"), _DEVICE_TEXT_LIMITS.items())
+def test_update_device_text_at_limit_and_one_over(svc, make_device, field, limit):
+    d = make_device()
+    svc.update_device("user", d, {field: "x" * limit})
+    stored = svc.conn.execute(f"select {field} from device where id=?", (d,)).fetchone()[0]
+    assert stored == "x" * limit
+    with pytest.raises(ValueError, match=rf"{field} must be at most {limit} characters"):
+        svc.update_device("user", d, {field: "y" * (limit + 1)})
+    # Refused, not truncated: the stored value is untouched.
+    assert svc.conn.execute(f"select {field} from device where id=?", (d,)).fetchone()[0] == stored
+
+
+def test_update_device_trims_and_clears_empty(svc, make_device):
+    d = make_device()
+    svc.update_device("user", d, {"name": "  Hall NAS  ", "owner": "   ", "notes": ""})
+    row = svc.conn.execute("select name, owner, notes from device where id=?", (d,)).fetchone()
+    assert tuple(row) == ("Hall NAS", None, None)
+    # Trimmed, an unchanged value is not a change.
+    assert svc.update_device("user", d, {"name": " Hall NAS"}) == 0
+
+
+def test_limit_counts_trimmed_text(svc, make_device):
+    d = make_device()
+    svc.update_device("user", d, {"name": " " + "x" * 200 + " "})
+    assert svc.conn.execute("select name from device where id=?", (d,)).fetchone()[0] == "x" * 200
+
+
+def test_set_place_trims_so_one_place(svc, make_device):
+    d1, d2 = make_device(), make_device()
+    svc.set_place("user", d1, " Office ")
+    svc.set_place("user", d2, "Office")
+    names = [r[0] for r in svc.conn.execute("select name from place")]
+    assert names == ["Office"]
+
+
+def test_place_names_at_limit_and_one_over(svc, make_device):
+    d = make_device()
+    svc.set_place("user", d, "p" * 200)
+    with pytest.raises(ValueError, match="place_name must be at most 200 characters"):
+        svc.set_place("user", d, "p" * 201)
+    with pytest.raises(ValueError, match="name must be at most 200 characters"):
+        svc.save_room("user", "r" * 201, [[0, 0], [10, 0], [10, 10]])
+    pid = svc.conn.execute("select id from place").fetchone()[0]
+    with pytest.raises(ValueError, match="new_name must be at most 200 characters"):
+        svc.rename_room("user", pid, "r" * 201)
+    svc.rename_room("user", pid, "  " + "r" * 200)
+    assert svc.conn.execute("select name from place").fetchone()[0] == "r" * 200
+
+
+def test_placeholder_device_bounds(svc):
+    d, _ = svc.create_placeholder_device("user", "  Switch  ", " switch ")
+    row = svc.conn.execute("select name, type from device where id=?", (d,)).fetchone()
+    assert tuple(row) == ("Switch", "switch")
+    svc.create_placeholder_device("user", "n" * 200, "t" * 200)
+    with pytest.raises(ValueError, match="name must be at most 200 characters"):
+        svc.create_placeholder_device("user", "n" * 201, "switch")
+    with pytest.raises(ValueError, match="type must be at most 200 characters"):
+        svc.create_placeholder_device("user", "x", "t" * 201)
+
+
+def test_link_detail_bounds(svc, make_device):
+    a, b = make_device(), make_device()
+    svc.add_link("user", a, b, "wired", "d" * 200)
+    with pytest.raises(ValueError, match="detail must be at most 200 characters"):
+        svc.add_link("user", a, b, "wired", "d" * 201)
+    svc.add_link("user", a, b, "wifi", "  ")
+    row = svc.conn.execute("select detail from link where kind='wifi'").fetchone()
+    assert row[0] is None

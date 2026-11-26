@@ -1,14 +1,17 @@
 """Bluetooth runtime: identity index, per-minute flush and health, around ``HaBluetoothClient``.
 
-Everything here runs on the event loop except the database work, which ``flush`` pushes to a
-worker thread so a slow write cannot stall the WebSocket reader. Adverts never go through the
-Ingestor/Observation path: they feed the aggregator directly.
+Everything here runs on the event loop except the database work, which ``flush`` and the
+index reload push to a worker thread so a slow query or a held lock cannot stall the WebSocket
+reader. Adverts never go through the Ingestor/Observation path: they feed the aggregator
+directly.
 
-``change.applied`` can be published from FastAPI threadpool threads, so the subscriber only
-schedules the index reload onto the loop (``call_soon_threadsafe``); the reload itself runs
-there. The reload also refreshes the hidden ("Not mine") digests and their salt, which
-``is_hidden`` checks candidates against; hidden candidates are still tracked by the
-aggregator (nothing is recorded about them either way), only never listed.
+``change.applied`` can be published from any thread (FastAPI threadpool, scheduler worker
+threads), so the subscriber only hops onto the loop (``call_soon_threadsafe``) to request a
+reload. Reloads run one at a time: the database read happens in a worker thread and the result
+is applied on the loop, and requests arriving meanwhile are folded into one more reload, so an
+older snapshot never replaces a newer one. The reload also refreshes the hidden ("Not mine")
+digests and their salt, which ``is_hidden`` checks candidates against; hidden candidates are
+still tracked by the aggregator (nothing is recorded about them either way), only never listed.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import contextlib
 import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lanscape_atlas.bluetooth.aggregator import BleAggregator, MinuteRow
 from lanscape_atlas.bluetooth.match import Advert, Identity, hidden_digest
@@ -27,6 +30,7 @@ from lanscape_atlas.collectors.bluetooth_ha import ClientStatus, HaBluetoothClie
 from lanscape_atlas.config import Settings
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event
 from lanscape_atlas.oui import OuiDB
+from lanscape_atlas.scheduler import run_blocking
 from lanscape_atlas.service import Service
 from lanscape_atlas.service import ble_queries as bq
 
@@ -71,6 +75,9 @@ class BluetoothRuntime:
             snapshot_s=settings.bluetooth.snapshot_s,
         )
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Index reloads: the one running (loop-confined) and whether another was requested.
+        self._reload_task: asyncio.Task[None] | None = None
+        self._reload_wanted = False
         self._subscribed = False
         self._running = False
 
@@ -79,7 +86,7 @@ class BluetoothRuntime:
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
         self._running = True
-        self._reload_index()
+        await self._reload_index()
         if not self._subscribed:
             self._subscribed = True
             self._service.events.subscribe(EVENT_CHANGE_APPLIED, self._on_change)
@@ -87,6 +94,10 @@ class BluetoothRuntime:
 
     async def stop(self) -> None:
         self._running = False
+        reload = self._reload_task
+        if reload is not None and not reload.done():
+            # Its read may be running in a worker thread: let it end before the DB closes.
+            await asyncio.wait({reload})
         await self._client.stop()
         # Best effort: a failed write requeues the rows, which die with the process.
         await self._write(self.aggregator.drain_all, record_status=False)
@@ -122,22 +133,42 @@ class BluetoothRuntime:
         if loop is None or not self._running:
             return
         with contextlib.suppress(RuntimeError):  # loop already closed during shutdown
-            loop.call_soon_threadsafe(self._reload_index)
+            loop.call_soon_threadsafe(self._request_reload)
 
-    def _reload_index(self) -> None:
+    def _request_reload(self) -> None:
+        """Loop only: reload the index soon, after any reload already running."""
+        if not self._running:
+            return
+        self._reload_wanted = True
+        if self._reload_task is None or self._reload_task.done():
+            self._reload_task = asyncio.create_task(self._reload_until_current())
+
+    async def _reload_until_current(self) -> None:
+        while self._reload_wanted and self._running:
+            self._reload_wanted = False
+            await self._reload_index()
+
+    def _read_index(self) -> tuple[list[Any], bytes | None, frozenset[str]]:
+        """Worker thread: the identity rows, the salt and the hidden digests, under the lock."""
+        with self._service.lock:
+            conn = self._service.conn
+            rows = conn.execute("SELECT device_id, kind, value FROM ble_identity").fetchall()
+            salt = bq.ble_salt(conn)
+            hidden = frozenset(bq.hidden_digests(conn))
+        return rows, salt, hidden
+
+    async def _reload_index(self) -> None:
         if not self._running:
             return
         try:
-            with self._service.lock:
-                conn = self._service.conn
-                rows = conn.execute("SELECT device_id, kind, value FROM ble_identity").fetchall()
-                salt = bq.ble_salt(conn)
-                hidden = frozenset(bq.hidden_digests(conn))
+            rows, salt, hidden = await run_blocking(self._read_index)
+            if not self._running:
+                return
             self.aggregator.set_index(
                 {Identity(r["kind"], r["value"]): int(r["device_id"]) for r in rows}
             )
             self._hidden_salt, self._hidden = salt, hidden
-        except Exception:  # noqa: BLE001 - keep the old index rather than kill the loop callback
+        except Exception:  # noqa: BLE001 - keep the old index rather than kill the reload
             log.exception("could not reload the Bluetooth identity index")
 
     def _persist(self, rows: Sequence[MinuteRow], scanners: dict[str, str | None]) -> int:

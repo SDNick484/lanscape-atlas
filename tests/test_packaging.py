@@ -54,6 +54,7 @@ def test_migration_files_are_packaged() -> None:
     assert (ROOT / "src/lanscape_atlas/store/migrations/0004_ble_hidden.sql").is_file()
     assert (ROOT / "src/lanscape_atlas/store/migrations/0005_plan_scale.sql").is_file()
     assert (ROOT / "src/lanscape_atlas/store/migrations/0006_plan_shape.sql").is_file()
+    assert (ROOT / "src/lanscape_atlas/store/migrations/0007_hot_indexes.sql").is_file()
 
 
 @pytest.fixture(scope="module")

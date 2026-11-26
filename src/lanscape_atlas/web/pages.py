@@ -199,7 +199,10 @@ def _or(value: str | None, fallback: str) -> str:
 
 
 def _clean(value: str | None) -> str | None:
-    """Form text -> stored value: trimmed; empty clears the field."""
+    """Form text -> ``None`` when blank, else trimmed; for routing decisions only.
+
+    Stored text is normalised and bounded by the Service, not here.
+    """
     if value is None:
         return None
     value = value.strip()
@@ -411,10 +414,8 @@ def device_save(request: Request, device_id: PathId, form: Form) -> Response:
         new = submitted[key]
         if new is None:
             continue
-        if key in TEXT_FIELDS:
-            if _clean(new) != _clean(base[key]):
-                changes[key] = _clean(new)
-        elif new != base[key]:
+        # Text goes to the Service as typed: it trims, clears empties and bounds the length.
+        if new != base[key]:
             changes[key] = new
     place = submitted["place"]
     new_place = _clean(place) if place is not None else _clean(base["place"])
@@ -477,6 +478,45 @@ def device_roaming(request: Request, device_id: PathId, form: Form) -> Response:
     return _redirect(request, f"/devices/{device_id}")
 
 
+def _forget_page(
+    request: Request,
+    device_id: int,
+    nxt: str,
+    flash: tuple[str, str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    page = _load_view(_service(request), device_id)
+    return render(
+        request,
+        "forget.html",
+        {"nav": "devices", "d": page.view, "next": nxt, "flash": flash},
+        status_code,
+    )
+
+
+def _forget_next(raw: str | None) -> str:
+    """Where to go after forgetting: the Inbox if asked, else the device list."""
+    return "inbox" if raw == "inbox" else "devices"
+
+
+@router.get("/devices/{device_id}/forget", response_class=HTMLResponse)
+def device_forget_confirm(
+    request: Request, device_id: PathId, next: str | None = None
+) -> HTMLResponse:
+    """The confirmation step: a plain page with a POST form, no JavaScript dialog."""
+    return _forget_page(request, device_id, _forget_next(next))
+
+
+@router.post("/devices/{device_id}/forget", response_model=None)
+def device_forget(request: Request, device_id: PathId, form: Form) -> Response:
+    nxt = _forget_next(_text(form, "next"))
+    try:
+        _service(request).forget_device(ACTOR, device_id)
+    except ValueError as e:
+        return _forget_page(request, device_id, nxt, ("error", _message(e)), 422)
+    return _redirect(request, "/inbox" if nxt == "inbox" else "/")
+
+
 # -------------------------------------------------------------------- inbox
 
 
@@ -513,12 +553,13 @@ def inbox_page(request: Request) -> HTMLResponse:
 
 @router.post("/inbox/{device_id}/name", response_model=None)
 def inbox_name(request: Request, device_id: PathId, form: Form) -> Response:
-    fields: dict[str, Any] = {"name": _clean(_text(form, "name"))}
-    kind = _clean(_text(form, "type"))
-    if kind is not None:
+    name = _text(form, "name") or ""
+    fields: dict[str, Any] = {"name": name}
+    kind = _text(form, "type")
+    if kind is not None and kind.strip():
         fields["type"] = kind
     try:
-        if fields["name"] is None:
+        if not name.strip():
             raise ValueError("name must not be empty")
         _service(request).update_device(ACTOR, device_id, fields)
     except ValueError as e:

@@ -585,3 +585,51 @@ def test_arp_only_router_shows_mac(client: TestClient, service: Service) -> None
     assert router.macs == ["00:00:5e:00:53:01"]
     row = client.get("/").text.split(f'id="device-{router.id}"', 1)[1].split("</tr>", 1)[0]
     assert "00:00:5e:00:53:01" in row
+
+
+# ------------------------------------------------------------ forget device
+
+
+def test_forget_confirmation_needs_no_javascript_and_forgets(
+    client: TestClient, service: Service
+) -> None:
+    dev = _device(service, "Thermostat")
+    page = client.get(f"/devices/{dev.id}")
+    assert f'href="/devices/{dev.id}/forget"' in page.text
+    confirm = client.get(f"/devices/{dev.id}/forget")
+    assert confirm.status_code == 200
+    assert "comes back as a new device" in confirm.text
+    assert "confirm(" not in confirm.text and "onclick" not in confirm.text
+    assert f'action="/devices/{dev.id}/forget"' in confirm.text
+    # The GET changed nothing.
+    assert _view(service, dev.id).name == "Thermostat"
+    r = _post(client, f"/devices/{dev.id}/forget", {"next": "devices"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert client.get(f"/devices/{dev.id}").status_code == 404
+    batch = service.conn.execute("select max(id) from batch").fetchone()[0]
+    service.undo("user", batch)
+    assert _view(service, dev.id).name == "Thermostat"
+
+
+def test_forget_requires_csrf(client: TestClient, service: Service) -> None:
+    dev = _device(service, "Thermostat")
+    r = client.post(f"/devices/{dev.id}/forget", data={}, follow_redirects=False)
+    assert r.status_code == 403
+    assert _view(service, dev.id).name == "Thermostat"
+
+
+def test_forget_from_inbox_returns_to_inbox_and_refusal_shows_error(
+    client: TestClient, service: Service
+) -> None:
+    inbox = client.get("/inbox")
+    ids = re.findall(r'href="/devices/(\d+)/forget\?next=inbox"', inbox.text)
+    assert ids
+    dev = int(ids[0])
+    assert 'name="next" value="inbox"' in client.get(f"/devices/{dev}/forget?next=inbox").text
+    other = _device(service, "Thermostat").id
+    service.add_link("user", dev, other if other != dev else dev + 1, "wired")
+    r = _post(client, f"/devices/{dev}/forget", {"next": "inbox"})
+    assert r.status_code == 422 and "has links" in r.text
+    service.remove_link("user", service.conn.execute("select id from link").fetchone()[0])
+    r = _post(client, f"/devices/{dev}/forget", {"next": "inbox"})
+    assert r.status_code == 303 and r.headers["location"] == "/inbox"

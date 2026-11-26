@@ -15,10 +15,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lanscape_atlas.service import Service
 from lanscape_atlas.service import queries as q
+from lanscape_atlas.service.service import SHORT_TEXT_MAX
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.topology import (
     MAX_ID,
@@ -59,7 +60,7 @@ class ClaimBody(BaseModel):
 
 
 class PlaceBody(BaseModel):
-    name: str
+    name: str = Field(max_length=SHORT_TEXT_MAX)
 
 
 # ----------------------------------------------------------------- devices
@@ -110,6 +111,15 @@ def get_device(request: Request, device_id: PathId) -> dict[str, Any]:
 @router.patch("/devices/{device_id}")
 def patch_device(request: Request, device_id: PathId, body: PatchDeviceBody) -> dict[str, int]:
     return {"batch_id": _service(request).update_device(ACTOR, device_id, body.fields)}
+
+
+@router.delete("/devices/{device_id}")
+def forget_device(request: Request, device_id: PathId) -> dict[str, int]:
+    """Forget a device with its interfaces, leases and services; undoable by batch id.
+
+    404 unknown device; 422 while it has links, Bluetooth identities or a linked scanner.
+    """
+    return {"batch_id": _service(request).forget_device(ACTOR, device_id)}
 
 
 @router.put("/devices/{device_id}/place")

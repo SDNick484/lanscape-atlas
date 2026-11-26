@@ -18,6 +18,7 @@ from lanscape_atlas.config import BluetoothSettings, HomeAssistantSettings, Sett
 from lanscape_atlas.events import EVENT_CHANGE_APPLIED, Event
 from lanscape_atlas.scheduler import CollectorRunner
 from lanscape_atlas.web.app import create_app
+from test_scheduler import HeldLock
 
 TOKEN = "ha-secret-token"
 ADDR = "00:00:5e:00:53:01"
@@ -127,6 +128,14 @@ async def test_adverts_bucketed_by_effective_time(make_runtime, svc, make_device
         await rt.stop()
 
 
+async def reloaded(rt: BluetoothRuntime) -> None:
+    """Wait for the index reload requested by a ``change.applied`` already published."""
+    await asyncio.sleep(0)  # run the call_soon_threadsafe hop onto the loop
+    task = rt._reload_task
+    if task is not None:
+        await asyncio.wait({task})
+
+
 async def test_index_reloaded_after_claim(make_runtime, svc, make_device) -> None:
     dev = make_device()
     rt, client = make_runtime()
@@ -135,7 +144,7 @@ async def test_index_reloaded_after_claim(make_runtime, svc, make_device) -> Non
         client.hear(advert())
         assert rt.aggregator.drain_all() == []
         svc.claim_ble("user", IDENT, device_id=dev)
-        await asyncio.sleep(0)  # the reload is scheduled onto the loop
+        await reloaded(rt)  # the reload is scheduled onto the loop, its read in a thread
         client.hear(advert())
         assert [r.device_id for r in rt.aggregator.drain_all()] == [dev]
     finally:
@@ -150,24 +159,70 @@ async def test_reload_from_other_thread_runs_on_loop(make_runtime, svc, make_dev
     reloaded_on: list[int] = []
     real = rt._reload_index
 
-    def spy() -> None:
+    async def spy() -> None:
         reloaded_on.append(threading.get_ident())
-        real()
+        await real()
 
     rt._reload_index = spy  # type: ignore[method-assign]
     try:
         t = threading.Thread(target=svc.claim_ble, args=("user", IDENT), kwargs={"device_id": dev})
         t.start()
         await asyncio.to_thread(t.join)
-        for _ in range(100):
-            if reloaded_on:
-                break
-            await asyncio.sleep(0.01)
+        await reloaded(rt)
         assert reloaded_on == [loop_thread]
         client.hear(advert())
         assert [r.device_id for r in rt.aggregator.drain_all()] == [dev]
     finally:
         await rt.stop()
+
+
+async def test_loop_stays_responsive_while_reload_waits_for_the_lock(
+    make_runtime, svc, make_device, monkeypatch
+) -> None:
+    dev = make_device()
+    rt, client = make_runtime()
+    await rt.start()
+    try:
+        svc.claim_ble("user", IDENT, device_id=dev)  # requests a reload; the lock is free
+        held = HeldLock(svc, monkeypatch)
+        try:
+            assert await asyncio.to_thread(held.wait_waiters, 1)
+            # The reload waits for the lock in a worker thread; adverts are still handled.
+            assert rt._reload_task is not None and not rt._reload_task.done()
+            client.hear(advert())
+            assert rt.aggregator.drain_all() == []  # the old index, until the reload lands
+        finally:
+            held.release()
+        await reloaded(rt)
+        client.hear(advert())
+        assert [r.device_id for r in rt.aggregator.drain_all()] == [dev]
+    finally:
+        await rt.stop()
+
+
+async def test_stop_during_a_blocked_reload_ends_cleanly(
+    make_runtime, svc, make_device, db, monkeypatch
+) -> None:
+    dev = make_device()
+    rt, client = make_runtime()
+    await rt.start()
+    svc.claim_ble("user", IDENT, device_id=dev)
+    held = HeldLock(svc, monkeypatch)
+    try:
+        assert await asyncio.to_thread(held.wait_waiters, 1)
+        applied: list[Any] = []
+        monkeypatch.setattr(rt.aggregator, "set_index", applied.append)
+        stopping = asyncio.create_task(rt.stop())
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not stopping.done()  # waits for the read already running in its thread
+    finally:
+        held.release()
+    await stopping
+    assert client.stopped
+    assert rt._reload_task is not None and rt._reload_task.done()
+    assert applied == []  # a read that finishes after stop() is not applied
+    assert not db.in_transaction
 
 
 def _shown(rt: BluetoothRuntime, include_weak: bool = True) -> list[str]:
@@ -200,14 +255,11 @@ async def test_hide_reloads_without_restart(make_runtime, svc) -> None:
         assert sorted(_shown(rt)) == [IDENT.key(), other.key()]
         assert not rt.is_hidden(IDENT)
         hid, _ = await asyncio.to_thread(svc.hide_ble, "user", IDENT, "Tag")
-        for _ in range(100):  # the reload hops onto the loop
-            if rt.is_hidden(IDENT):
-                break
-            await asyncio.sleep(0.01)
+        await reloaded(rt)  # the reload hops onto the loop
         assert _shown(rt) == [other.key()]
         assert not rt.is_hidden(other)
         svc.unhide_ble("user", hid)
-        await asyncio.sleep(0)
+        await reloaded(rt)
         assert sorted(_shown(rt)) == [IDENT.key(), other.key()]
     finally:
         await rt.stop()

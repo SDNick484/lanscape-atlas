@@ -4,6 +4,12 @@ Database access (ruling 26): one shared sqlite connection guarded by
 ``Service.lock``. Every ``collector_status`` read/write here takes that lock;
 ``collect()`` network I/O runs outside it; ``Ingestor.ingest`` takes it itself.
 
+None of that database work runs on the event loop: each call goes through
+:func:`run_blocking`, a worker thread, because the lock can be held for a while by a
+threadpool request handler and SQLite can wait up to ``busy_timeout`` for another
+process's write lock. Events are therefore published from that worker thread, after the
+commit, as request handlers already do.
+
 A collector that hangs, raises, or whose results fail to ingest is recorded in
 ``collector_status`` and backed off; it never stops the other jobs.
 """
@@ -11,8 +17,9 @@ A collector that hangs, raises, or whose results fail to ingest is recorded in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -26,7 +33,7 @@ from tzlocal import get_localzone
 from lanscape_atlas.backoff import capped_backoff
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.collectors.base import Collector
-from lanscape_atlas.config import Settings, _default_collectors
+from lanscape_atlas.config import Settings, default_collectors
 from lanscape_atlas.ingest import Ingestor, IngestResult
 from lanscape_atlas.service import Service
 
@@ -50,6 +57,42 @@ PRUNE_HOUR, PRUNE_MINUTE = 4, 41
 # scan should not start mid-morning after the host was suspended). Interval jobs have no
 # limit: with ``coalesce`` they run once, however many firings were missed.
 CRON_MISFIRE_GRACE_S = 3600
+
+# Worker-thread calls started by run_blocking and not yet finished (any event loop).
+_in_flight: set[asyncio.Future[Any]] = set()
+
+
+async def run_blocking[**P, T](fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run blocking (database) work in a worker thread and await its result.
+
+    Cancelling the caller does not abandon the work: the thread cannot be interrupted, so
+    the caller waits for it to finish (its transaction committed or rolled back) and only
+    then re-raises ``CancelledError``. A cancelled job therefore never ends while its write
+    is still running, which keeps ``max_instances=1`` true and lets shutdown wait for the
+    write (:func:`wait_blocking`) before the connection is closed.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    _in_flight.add(task)
+    task.add_done_callback(_in_flight.discard)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if task.done():
+            raise
+        while not task.done():
+            # Further cancellations while waiting are folded into the one re-raised below.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # retrieved: the caller is cancelled and will not see it
+        raise
+
+
+async def wait_blocking() -> None:
+    """Wait until no :func:`run_blocking` call started on this loop is still running."""
+    loop = asyncio.get_running_loop()
+    while pending := {t for t in _in_flight if t.get_loop() is loop}:
+        await asyncio.wait(pending)
 
 
 def next_delay(base_s: float, failures: int) -> float:
@@ -82,7 +125,7 @@ class CollectorRunner:
         self._secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
         # Per-collector interval_s (None = cron-scheduled); used as the backoff base.
         if intervals is None:
-            intervals = {n: cs.interval_s for n, cs in _default_collectors().items()}
+            intervals = {n: cs.interval_s for n, cs in default_collectors().items()}
         self._intervals = intervals
         # Names of long-lived collectors whose start() has succeeded.
         self._started: set[str] = set()
@@ -189,25 +232,25 @@ class CollectorRunner:
             observations = await asyncio.wait_for(
                 c.collect(), timeout=c.timeout_s + TIMEOUT_GRACE_S
             )
-            result = self.ingestor.ingest(observations)
+            result = await run_blocking(self.ingestor.ingest, observations)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - one collector must never stop the others
-            return self._fail(c, e, "failed")
+            return await self._fail(c, e, "failed")
         try:
-            self._record_ok(c.name)
+            await run_blocking(self._record_ok, c.name)
         except Exception as ex:  # noqa: BLE001
             log.error(
                 "could not record success of collector %s: %s", c.name, self._format_error(ex, c)
             )
         return RunOutcome(True, None, result)
 
-    def _fail(self, c: Collector, e: BaseException, what: str) -> RunOutcome:
+    async def _fail(self, c: Collector, e: BaseException, what: str) -> RunOutcome:
         """Log the redacted error and record it through the normal failure path."""
         error = self._format_error(e, c)
         log.warning("collector %s %s: %s", c.name, what, error)
         try:
-            self._record_failure(c, error)
+            await run_blocking(self._record_failure, c, error)
         except Exception as ex:  # noqa: BLE001
             # No exc_info: the chained traceback would carry the unredacted original.
             log.error(
@@ -230,7 +273,7 @@ class CollectorRunner:
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - a failed start must not block the rest
-            return self._fail(c, e, "failed to start")
+            return await self._fail(c, e, "failed to start")
         self._started.add(c.name)
         return None
 
@@ -247,13 +290,16 @@ class CollectorRunner:
         except Exception as e:  # noqa: BLE001
             log.warning("collector %s failed to stop: %s", c.name, self._format_error(e, c))
 
+    def _read_next_run(self, name: str) -> Any:
+        with self.service.lock:
+            return self.service.conn.execute(
+                "SELECT next_run_at FROM collector_status WHERE name = ?", (name,)
+            ).fetchone()
+
     async def run_if_due(self, c: Collector) -> RunOutcome | None:
         """Scheduler job body: skip (return None) while ``next_run_at`` is in the future."""
         try:
-            with self.service.lock:
-                row = self.service.conn.execute(
-                    "SELECT next_run_at FROM collector_status WHERE name = ?", (c.name,)
-                ).fetchone()
+            row = await run_blocking(self._read_next_run, c.name)
         except Exception as ex:  # noqa: BLE001
             log.error(
                 "could not read status of collector %s: %s", c.name, self._format_error(ex, c)
@@ -274,12 +320,12 @@ class CollectorRunner:
 async def _prune_job(service: Service, days: int, ble_days: int) -> None:
     """Nightly prune; each prune runs even if the other fails."""
     try:
-        n = service.prune_observations(days)
+        n = await run_blocking(service.prune_observations, days)
         log.info("pruned %d observations older than %d days", n, days)
     except Exception:  # noqa: BLE001
         log.exception("observation prune failed")
     try:
-        n = service.prune_ble(ble_days)
+        n = await run_blocking(service.prune_ble, ble_days)
         log.info("pruned %d BLE sightings older than %d days", n, ble_days)
     except Exception:  # noqa: BLE001
         log.exception("BLE sighting prune failed")
@@ -287,7 +333,7 @@ async def _prune_job(service: Service, days: int, ble_days: int) -> None:
 
 async def _presence_job(ingestor: Ingestor) -> None:
     try:
-        ingestor.refresh_presence()
+        await run_blocking(ingestor.refresh_presence)
     except Exception:  # noqa: BLE001
         log.exception("presence refresh failed")
 
@@ -375,7 +421,9 @@ async def stop_scheduler(
 ) -> None:
     """Shut the scheduler down, then await ``stop()`` on long-lived collectors.
 
-    The Bluetooth runtime (if any) is stopped last: it flushes its open minutes.
+    Jobs cancelled by the shutdown first finish any database write they had started
+    (:func:`run_blocking`); this waits for those before stopping anything else. The
+    Bluetooth runtime (if any) is stopped last: it flushes its open minutes.
 
     Pass the runner so stop errors are logged redacted and started-ness is reset;
     without it only the exception type is logged.
@@ -383,6 +431,7 @@ async def stop_scheduler(
     if scheduler.running:
         scheduler.shutdown(wait=False)
         await asyncio.sleep(0)  # AsyncIOScheduler defers _shutdown to the loop
+    await wait_blocking()
     for c in collectors:
         if runner is not None:
             await runner.stop(c)
