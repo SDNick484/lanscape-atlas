@@ -12,9 +12,10 @@ import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT
 from lanscape_atlas.clock import iso
 from lanscape_atlas.netutil import normalize_mac, valid_ipv4
 
@@ -540,13 +541,24 @@ def drawing_summary(shapes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _heard_by_device(conn: sqlite3.Connection, now: datetime) -> dict[int, dict[str, Any]]:
-    """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``."""
+    """Newest sighting per device if within 24 h of ``now``: ``{device_id: {place_id, at}}``.
+
+    The 24 h cutoff sits inside the window's subquery, so only recent rows are ranked. It
+    is exact either way: a device whose newest sighting is within 24 h keeps the same row,
+    and one whose newest is older is dropped by the outer test as before. ``minute`` is the
+    floor of ``last_at``, so ``minute >= cutoff's minute`` holds for every row with
+    ``last_at >= cutoff``; it is the range that ``ble_sighting_minute`` can seek on. The
+    index hint is needed because, without ``ANALYZE`` statistics, the planner full-scans
+    ``ble_sighting`` instead.
+    """
+    cutoff = now - timedelta(hours=24)
     rows = conn.execute(
         "SELECT device_id, place_id, last_at FROM ("
         " SELECT device_id, place_id, last_at, ROW_NUMBER() OVER ("
         "  PARTITION BY device_id ORDER BY last_at DESC, max_rssi DESC, scanner_id ASC) AS rn"
-        " FROM ble_sighting) WHERE rn = 1 AND last_at >= ?",
-        (iso(now - timedelta(hours=24)),),
+        " FROM ble_sighting INDEXED BY ble_sighting_minute"
+        " WHERE minute >= ? AND last_at >= ?) WHERE rn = 1",
+        (cutoff.astimezone(UTC).strftime(BLE_MINUTE_FMT), iso(cutoff)),
     )
     return {r["device_id"]: {"place_id": r["place_id"], "at": r["last_at"]} for r in rows}
 
