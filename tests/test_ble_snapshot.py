@@ -105,7 +105,13 @@ class House:
                 on_advert(adv, at)
 
             return HaBluetoothClient(
-                ha, counted, *a, **kw, backoff_s=(0.01,), snapshot_sleep=self.ticker.wait
+                ha,
+                counted,
+                *a,
+                **kw,
+                backoff_base_s=0.01,
+                backoff_cap_s=0.01,
+                snapshot_sleep=self.ticker.wait,
             )
 
         runner = CollectorRunner(svc, ing, self.clock, secrets=[TOKEN])
