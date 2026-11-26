@@ -190,10 +190,36 @@ Put real room names in a denylist file and point `LANSCAPE_LEAK_DENYLIST` (or
 **Upgrading from Phase 1.** The database migrates from schema v1 to v2 on start. The
 scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
 before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
-directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
+directory up together with `atlas.db` (`lanscape-atlas backup`, below, does both; the
+installer's own pre-upgrade copy covers `atlas.db` only).
 Schema v5 (blank plans and scale) rebuilds the `floor_plan` table on start; an existing
 plan keeps its image, has no scale and shows imperial units until you change them. Schema v6 adds the
 `plan_shape` table for drawn walls, doors, furniture and labels; nothing existing changes.
+
+## Backup and restore
+
+```sh
+lanscape-atlas backup [--out PATH] [--keep N]
+lanscape-atlas restore PATH
+```
+
+`backup` writes one `.tar.gz` holding a consistent copy of the database (made with SQLite's
+online-backup API, so it is safe while the server runs), the floor plan images, and a small
+manifest. The file is mode 0600 because the database is your network inventory. Without
+`--out` it goes to `$DATA_DIR/backups/atlas-backup-YYYYmmdd-HHMMSS.tar.gz`; `--out FILE` names
+the archive, and `--out DIR` (an existing directory) puts a timestamped file there. After
+writing, only the newest `--keep` (default 7; 0 keeps all) `atlas-backup-*.tar.gz` files in
+that directory are kept. Run it as the service user (`doas -u lanscape lanscape-atlas backup`
+on the Alpine install) so the data directory stays readable by the service. Copy the archive
+off the host: a backup on the same disk does not survive the disk.
+
+`restore` replaces the live data with an archive. It exits with status 1 and changes nothing
+if the service is still answering on its `bind_host`/`bind_port` (stop it first,
+`rc-service lanscape-atlas stop`), if the file is not a valid backup (member names and
+types are checked, nothing is extracted by path), if the database fails its integrity check, or
+if the backup's schema is newer than the installed code. The replaced `atlas.db` and
+`floorplan/` are moved, not deleted, into `$DATA_DIR/replaced-YYYYmmdd-HHMMSS/`; remove that
+directory when you are satisfied. An older schema is migrated when the service next starts.
 
 ## Bluetooth (Find)
 
