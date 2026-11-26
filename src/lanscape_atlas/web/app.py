@@ -53,6 +53,7 @@ from lanscape_atlas.store.db import migrate, open_db
 from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.ble_api import router as ble_router
+from lanscape_atlas.web.body_limit import JsonBodyLimitMiddleware
 from lanscape_atlas.web.deep_scan import start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE, STALE_SHAPES_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
@@ -502,6 +503,7 @@ def create_app(
     # device_id -> in-flight deep scan task (at most one per device).
     app.state.deep_scan_tasks = {}
 
+    app.add_middleware(JsonBodyLimitMiddleware)  # /api and /mcp bodies; see web/body_limit.py
     # Added last = outermost: Host check, then Origin check, then bearer auth.
     if settings.api_token:
         app.add_middleware(BearerAuthMiddleware, token=settings.api_token)

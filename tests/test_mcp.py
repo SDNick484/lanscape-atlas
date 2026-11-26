@@ -165,6 +165,38 @@ async def test_update_device_records_claude_actor(app: FastAPI) -> None:
         assert changes[0]["batch_id"] == r["batch_id"] and changes[0]["new_value"] == "Hall NAS"
 
 
+async def test_update_device_text_bounds(app: FastAPI) -> None:
+    async with _session(app) as client:
+        d = await _device_with_ip(client)
+        for field, limit in (("name", 200), ("owner", 200), ("notes", 4000)):
+            ok = await _call(
+                client, "update_device", device_id=d["id"], fields={field: "x" * limit}
+            )
+            assert not ok.is_error, _text(ok)
+            r = await _call(
+                client, "update_device", device_id=d["id"], fields={field: "x" * (limit + 1)}
+            )
+            assert r.is_error and f"{field} must be at most {limit} characters" in _text(r)
+        padded = await _call(client, "update_device", device_id=d["id"], fields={"owner": " Sam "})
+        assert not padded.is_error
+        assert _data(await _call(client, "get_device", device_id=d["id"]))["owner"] == "Sam"
+
+
+async def test_set_place_bounds_and_trim(app: FastAPI) -> None:
+    async with _session(app) as client:
+        devices = _data(await _call(client, "list_devices", online=True, limit=200))
+        a, b = devices[0]["id"], devices[1]["id"]
+        _data(await _call(client, "set_place", device_id=a, place_name=" Office "))
+        _data(await _call(client, "set_place", device_id=b, place_name="Office"))
+        places = {_data(await _call(client, "get_device", device_id=i))["place"] for i in (a, b)}
+        assert places == {"Office"}
+        assert app.state.conn.execute("select count(*) from place").fetchone()[0] == 1
+        ok = await _call(client, "set_place", device_id=a, place_name="p" * 200)
+        assert not ok.is_error, _text(ok)
+        r = await _call(client, "set_place", device_id=a, place_name="p" * 201)
+        assert r.is_error and "at most 200 characters" in _text(r)
+
+
 async def test_run_deep_scan_never_errors(app: FastAPI) -> None:
     async with _session(app) as client:
         calls: list[list[str]] = []
@@ -435,6 +467,12 @@ def _round_trip(c: TestClient, path: str, **headers: str) -> None:
 
 def test_http_round_trip(http: TestClient) -> None:
     _round_trip(http, "/mcp")
+
+
+def test_http_body_over_64_kib_is_413(http: TestClient) -> None:
+    for path in ("/mcp", "/mcp/"):
+        r = http.post(path, content=b" " * (64 * 1024 + 1), headers=MCP_HEADERS)
+        assert r.status_code == 413, path
 
 
 def test_http_trailing_slash(http: TestClient) -> None:
