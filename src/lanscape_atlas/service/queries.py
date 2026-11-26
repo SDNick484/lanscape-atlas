@@ -28,6 +28,10 @@ _MAC_KINDS_SQL = ", ".join(f"'{k}'" for k in MAC_KINDS)
 DEFAULT_WINDOW_MIN = 10
 
 
+# How many leases ``get_device`` lists (newest first).
+LEASE_LIMIT = 50
+
+
 def current_lease_sql(lease: str = "l", iface: str = "i") -> str:
     """SQL condition: ``lease`` (on interface ``iface``) is the interface's current lease.
 
@@ -112,6 +116,8 @@ class DeviceView(DeviceSummary):
     leases: list[LeaseView]
     services: list[ServiceView]
     field_sources: dict[str, tuple[str, str]]
+    # ``leases`` holds only the newest LEASE_LIMIT; this is how many exist.
+    lease_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -265,10 +271,15 @@ def get_device(
         )
         for r in conn.execute(
             "SELECT l.* FROM ip_lease l JOIN interface i ON i.id = l.interface_id"
-            " WHERE i.device_id = ? ORDER BY l.last_seen DESC, l.id DESC",
-            (device_id,),
+            " WHERE i.device_id = ? ORDER BY l.last_seen DESC, l.id DESC LIMIT ?",
+            (device_id, LEASE_LIMIT),
         )
     ]
+    lease_count = conn.execute(
+        "SELECT count(*) FROM ip_lease l JOIN interface i ON i.id = l.interface_id"
+        " WHERE i.device_id = ?",
+        (device_id,),
+    ).fetchone()[0]
     sources = {
         str(r["field"]): (str(r["actor"]), str(r["set_at"]))
         for r in conn.execute(
@@ -286,6 +297,7 @@ def get_device(
         leases=leases,
         services=list_services(conn, device_id),
         field_sources=sources,
+        lease_count=lease_count,
     )
 
 
