@@ -101,7 +101,7 @@ def test_render_basic(shell: list[str], tmp_path: Path) -> None:
     assert cfg["bind_host"] == "192.0.2.50"
     assert cfg["bind_port"] == 8720
     assert cfg["scan_interface"] == "eth0"
-    assert cfg["observation_retention_days"] == 14
+    assert cfg["observation_retention_days"] == 3
     assert cfg["allowed_hosts"] == ["192.0.2.50:*", "atlas.example.com"]
     assert cfg["router"]["host"] == "192.0.2.1"
     assert cfg["router"]["username"] == "admin"

@@ -44,6 +44,12 @@ MAX_ERROR_LEN = 500
 TIMEOUT_GRACE_S = 5.0
 PRESENCE_INTERVAL_S = 60
 PRUNE_HOUR, PRUNE_MINUTE = 4, 41
+# APScheduler skips a job that fires more than ``misfire_grace_time`` late, and its default
+# is 1 s: a short stall of the event loop at 03:17 would drop that night's scan with only a
+# warning. Cron jobs run when up to an hour late and are skipped beyond that (a nightly
+# scan should not start mid-morning after the host was suspended). Interval jobs have no
+# limit: with ``coalesce`` they run once, however many firings were missed.
+CRON_MISFIRE_GRACE_S = 3600
 
 
 def next_delay(base_s: float, failures: int) -> float:
@@ -306,18 +312,21 @@ async def start_scheduler(
 
     sched = AsyncIOScheduler(timezone=tz)
     common: dict[str, Any] = {"max_instances": 1, "coalesce": True, "replace_existing": True}
+    interval_job: dict[str, Any] = {**common, "misfire_grace_time": None}
+    cron_job: dict[str, Any] = {**common, "misfire_grace_time": CRON_MISFIRE_GRACE_S}
     # Interval jobs also fire once at startup instead of first waiting a whole interval;
     # cron jobs (nmap_light, prune) keep their wall-clock schedule.
     now = datetime.now(tz)
     for c in collectors:
         cs = settings.collectors.get(c.name)
         trigger: CronTrigger | IntervalTrigger
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any]
         if cs is not None and cs.cron:
             trigger = CronTrigger.from_crontab(cs.cron, timezone=tz)
+            extra = cron_job
         elif cs is not None and cs.interval_s:
             trigger = IntervalTrigger(seconds=cs.interval_s, timezone=tz)
-            extra["next_run_time"] = now
+            extra = {**interval_job, "next_run_time": now}
         else:
             log.warning("collector %s has no schedule; not scheduled", c.name)
             continue
@@ -327,7 +336,6 @@ async def start_scheduler(
             args=[c],
             id=f"collector:{c.name}",
             name=f"collector:{c.name}",
-            **common,
             **extra,
         )
     sched.add_job(
@@ -336,7 +344,7 @@ async def start_scheduler(
         args=[service, settings.observation_retention_days, settings.bluetooth.retention_days],
         id="prune",
         name="prune",
-        **common,
+        **cron_job,
     )
     sched.add_job(
         _presence_job,
@@ -345,7 +353,7 @@ async def start_scheduler(
         id="presence",
         name="presence",
         next_run_time=now,
-        **common,
+        **interval_job,
     )
     if bluetooth is not None:
         sched.add_job(
@@ -353,7 +361,7 @@ async def start_scheduler(
             IntervalTrigger(seconds=settings.bluetooth.flush_s, timezone=tz),
             id="ble_flush",
             name="ble_flush",
-            **common,
+            **interval_job,
         )
     sched.start()
     return sched

@@ -5,7 +5,10 @@ data_dir = "/var/lib/lanscape-atlas"
 bind_host = "127.0.0.1"
 bind_port = 8720
 scan_interface = "eth0"
-observation_retention_days = 30
+# Raw sightings are only read back for a few minutes (to attach an IP-only sighting to a
+# device); the rest is for debugging. Each device adds a row per collector run, so long
+# retention is mostly disk: about 40 MB a day per 100 devices at the default intervals.
+observation_retention_days = 3
 ip_match_window_min = 10
 # api_token = ""
 # Without api_token, the app (pages, /api, /mcp) only accepts these Host headers

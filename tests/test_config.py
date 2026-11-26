@@ -14,7 +14,7 @@ def test_defaults_without_file(tmp_path: Path) -> None:
     assert s.data_dir == Path("/var/lib/lanscape-atlas")
     assert (s.bind_host, s.bind_port, s.scan_interface) == ("127.0.0.1", 8720, "eth0")
     assert s.api_token is None and s.router is None
-    assert (s.observation_retention_days, s.ip_match_window_min) == (30, 10)
+    assert (s.observation_retention_days, s.ip_match_window_min) == (3, 10)
     assert s.collectors["asusrouter"].enabled is False
     assert s.collectors["arp"].interval_s == 300 and s.collectors["arp"].enabled
     assert s.collectors["nmap_light"].cron == "17 3 * * *"
