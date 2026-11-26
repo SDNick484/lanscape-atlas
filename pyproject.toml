@@ -30,8 +30,11 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "httpx",
-    "ruff",
-    "mypy",
+    # Linters are held to a minor range so a new release cannot fail unrelated commits.
+    "ruff>=0.17,<0.18",
+    "mypy>=2.4,<2.5",
+    # tests/test_packaging.py builds the wheel with --no-build-isolation.
+    "hatchling",
     "pre-commit",
 ]
 

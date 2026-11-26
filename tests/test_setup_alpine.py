@@ -325,8 +325,12 @@ def test_script_is_executable() -> None:
     assert SCRIPT.stat().st_mode & stat.S_IXUSR
 
 
-@pytest.mark.skipif(not shutil.which("shellcheck"), reason="shellcheck not installed")
 def test_shellcheck_clean() -> None:
+    if not shutil.which("shellcheck"):
+        # CI installs shellcheck; there a missing binary is a failure, not a skip.
+        if os.environ.get("CI"):
+            pytest.fail("shellcheck is not installed but CI is set")
+        pytest.skip("shellcheck not installed")
     proc = subprocess.run(
         ["shellcheck", "--shell=sh", str(SCRIPT)], capture_output=True, text=True, timeout=60
     )
