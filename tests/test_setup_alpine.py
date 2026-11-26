@@ -898,6 +898,64 @@ def test_main_flow_checks_config_before_stopping_the_service() -> None:
     )
 
 
+def test_main_flow_does_network_and_build_steps_before_stopping_the_service() -> None:
+    main = SCRIPT.read_text().split(MAIN_MARKER, 1)[1]
+    words = [line.strip() for line in main.splitlines() if re.fullmatch(r"[a-z_]+", line.strip())]
+    calls = [word for word in words if word not in ("fi", "else")]
+    assert calls == STEPS  # the stubbed main sequence below covers every step
+    order = [
+        "ensure_repo_access",
+        "checkout_code",  # git fetch
+        "reexec_if_updated",
+        "check_config_after_checkout",
+        "build_wheels",  # pip downloads and builds
+        "stop_service",
+        "install_app",
+        "backup_db",
+        "write_config",
+        "migrate_db",
+        "install_service_files",
+        "start_service",
+        "update_oui",  # IEEE download
+        "smoke_test",
+    ]
+    assert [name for name in calls if name in order] == order
+
+
+def function_body(name: str) -> str:
+    text = SCRIPT.read_text()
+    body = text[text.index(f"\n{name}() {{\n") :]
+    return body[: body.index("\n}\n")]
+
+
+def test_pip_touches_the_network_only_before_the_stop() -> None:
+    wheels = function_body("build_wheels")
+    assert '/bin/pip" wheel ' in wheels
+    assert "--upgrade" not in wheels
+    install = function_body("install_app")
+    commands = install.split('"$VENV/bin/pip" install')[1:]
+    assert len(commands) == 2
+    for command in commands:
+        assert "--no-index" in command
+        assert "--upgrade" not in command
+        assert '"$SRC"' not in command  # a source tree would need build tools from PyPI
+    assert "--find-links" in commands[0]
+    assert "--force-reinstall --no-deps" in commands[1]
+
+
+def test_update_oui_runs_after_start_and_is_never_fatal() -> None:
+    migrate = function_body("migrate_db")
+    assert "update-oui" not in migrate
+    # Before the start only when there is no vendor list at all (first install).
+    first_install = r'if \[ ! -f "\$DATA_DIR/oui\.csv" \]; then\n(\t\t#.*\n)*\t\tfetch_oui'
+    assert re.search(first_install, migrate)
+    assert migrate.count("fetch_oui") == 1
+    fetch = function_body("fetch_oui")
+    assert "if run_as_service_user update-oui >/dev/null 2>&1; then" in fetch
+    assert "die" not in fetch and "exit" not in fetch
+    assert "fetch_oui" in function_body("update_oui")
+
+
 @pytest.mark.parametrize("shell", SHELLS)
 def test_early_check_stops_on_hand_edited_checksummed_config(
     shell: list[str], tmp_path: Path
@@ -1073,16 +1131,18 @@ STEPS = [
     "install_packages",
     "ensure_user",
     "ensure_repo_access",
-    "stop_service",
     "checkout_code",
     "reexec_if_updated",
     "check_config_after_checkout",
+    "build_wheels",
+    "stop_service",
     "install_app",
     "backup_db",
     "write_config",
-    "migrate_and_oui",
+    "migrate_db",
     "install_service_files",
     "start_service",
+    "update_oui",
     "smoke_test",
 ]
 STUB_EXTRA = {
@@ -1092,24 +1152,33 @@ STUB_EXTRA = {
 
 
 def run_main(
-    tmp_path: Path, data: dict[str, str], conf: Path, real: set[str]
+    tmp_path: Path,
+    data: dict[str, str],
+    conf: Path,
+    real: set[str],
+    *args: str,
+    stub_extra: dict[str, str] | None = None,
+    env: dict[str, str] | None = None,
+    overrides: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     text = SCRIPT.read_text()
     head, main = text.split(MAIN_MARKER, 1)
+    extras = {**STUB_EXTRA, **(stub_extra or {})}
     stubs = []
     for name in STEPS:
         if name not in real:
-            extra = STUB_EXTRA.get(name, ":")
+            extra = extras.get(name, ":")
             stubs.append(f'{name}() {{ echo "STEP {name}"; {extra}; }}')
-    overrides = [f"CONF='{conf}'", "CONF_CHOWN=0", f"SRC='{tmp_path / 'no-src'}'"]
+    settings = [f"CONF='{conf}'", "CONF_CHOWN=0", f"SRC='{tmp_path / 'no-src'}'", *overrides]
     harness_dir = tmp_path / "harness" / "deploy"
     harness_dir.mkdir(parents=True)
     shutil.copy(ROOT / "config.example.toml", harness_dir.parent / "config.example.toml")
     harness = harness_dir / "setup-alpine.sh"
-    harness.write_text(head + "\n".join(stubs + overrides) + "\n" + MAIN_MARKER + main)
+    harness.write_text(head + "\n".join(stubs + settings) + "\n" + MAIN_MARKER + main)
     env_file = write_env(tmp_path, data)
-    env = fake_rc_service(tmp_path, stopped=False)
-    return run(["sh"], "--env", str(env_file), env=env, script=harness)
+    if env is None:
+        env = fake_rc_service(tmp_path, stopped=False)
+    return run(["sh"], "--env", str(env_file), *args, env=env, script=harness)
 
 
 def test_main_sequence_runs_every_step_on_a_clean_config(tmp_path: Path) -> None:
@@ -1122,21 +1191,40 @@ def test_main_sequence_runs_every_step_on_a_clean_config(tmp_path: Path) -> None
     assert rc_calls(tmp_path) == []
 
 
-def test_legacy_hand_edit_stops_before_install_and_restarts_the_old_install(
-    tmp_path: Path,
-) -> None:
+def test_legacy_hand_edit_stops_before_the_service_is_stopped(tmp_path: Path) -> None:
+    # The check against the new config.example.toml runs after the checkout, and the
+    # checkout runs before the stop: the old install is never stopped.
     conf = hand_edited_conf(["sh"], tmp_path, legacy=True)
     edited = conf.read_bytes()
     proc = run_main(tmp_path, BASE_ENV, conf, {"check_config_early", "check_config_after_checkout"})
     assert proc.returncode != 0
     ran = re.findall(r"^STEP (\w+)$", proc.stdout, re.M)
-    assert ran[-3:] == ["stop_service", "checkout_code", "reexec_if_updated"]
-    assert "install_app" not in ran and "backup_db" not in ran and "write_config" not in ran
-    assert rc_calls(tmp_path) == ["lanscape-atlas start"]
-    assert RESTARTED in proc.stderr
+    assert ran[-3:] == ["ensure_repo_access", "checkout_code", "reexec_if_updated"]
+    for name in ("build_wheels", "stop_service", "install_app", "backup_db", "write_config"):
+        assert name not in ran
+    assert rc_calls(tmp_path) == []
+    assert RESTARTED not in proc.stderr
     assert "config.toml was edited by hand" in proc.stderr
     assert conf.read_bytes() == edited
     assert_no_secrets(proc)
+
+
+def test_legacy_hand_edit_restarts_a_service_an_older_script_stopped(tmp_path: Path) -> None:
+    # Scripts before this one stopped the service, then re-executed the new script.
+    conf = hand_edited_conf(["sh"], tmp_path, legacy=True)
+    edited = conf.read_bytes()
+    proc = run_main(
+        tmp_path,
+        BASE_ENV,
+        conf,
+        {"check_config_early", "check_config_after_checkout"},
+        env=fake_rc_service(tmp_path, stopped=True),
+    )
+    assert proc.returncode != 0
+    assert rc_calls(tmp_path) == ["lanscape-atlas start"]  # once: the EXIT trap adds none
+    assert RESTARTED in proc.stderr
+    assert FAILED not in proc.stderr
+    assert conf.read_bytes() == edited
 
 
 def test_checksummed_hand_edit_stops_before_the_service_is_stopped(tmp_path: Path) -> None:
@@ -1159,4 +1247,383 @@ def test_defensive_late_stop_says_the_new_code_is_running(tmp_path: Path) -> Non
     assert RESTARTED not in proc.stderr
     assert "newly installed code" in proc.stderr
     assert "config.toml was not overwritten" in proc.stderr
+    assert FAILED not in proc.stderr  # reported by the hand-edit stop, not again by the trap
     assert conf.read_bytes() == edited
+
+
+# ------------------------------------------------ a run that fails after the stop
+#
+# The real stop_service and EXIT trap against an rc-service fake that keeps state: "status"
+# succeeds while the state file exists, "stop" removes it, "start" creates it.
+
+RC = "lanscape-atlas"
+FAILED = "the run failed during step"
+STARTED_AGAIN = "was started again and rc-service reports it running"
+NOT_STARTED = "could NOT be started again"
+FAIL_INSTALL = {"install_app": 'step "Virtualenv and package"; die "boom"'}
+
+
+def stateful_rc_service(
+    tmp_path: Path, running: bool = True, start_fails: bool = False
+) -> dict[str, str]:
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir(exist_ok=True)
+    fake = fakebin / "rc-service"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >>"$FAKE_RC_LOG"\n'
+        "case $2 in\n"
+        'status) [ -f "$FAKE_RC_STATE" ] ;;\n'
+        'stop) rm -f "$FAKE_RC_STATE" ;;\n'
+        "start)\n"
+        '\t[ -z "${FAKE_RC_START_FAILS:-}" ] || exit 1\n'
+        '\t: >"$FAKE_RC_STATE"\n'
+        "\t;;\n"
+        "esac\n"
+    )
+    fake.chmod(0o755)
+    state = tmp_path / "rc-service.running"
+    if running:
+        state.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_RC_LOG": str(tmp_path / "rc-service.log"),
+        "FAKE_RC_STATE": str(state),
+    }
+    if start_fails:
+        env["FAKE_RC_START_FAILS"] = "1"
+    return env
+
+
+def run_upgrade(
+    tmp_path: Path,
+    *args: str,
+    env: dict[str, str],
+    stub_extra: dict[str, str] | None = None,
+    real: tuple[str, ...] = (),
+    overrides: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    init = tmp_path / "init.d-lanscape-atlas"
+    init.write_text("#!/bin/sh\n")
+    init.chmod(0o755)
+    return run_main(
+        tmp_path,
+        BASE_ENV,
+        conf_path(tmp_path),
+        {"stop_service", *real},
+        *args,
+        stub_extra={"start_service": "STOPPED=0", **(stub_extra or {})},
+        env=env,
+        overrides=(f"INIT_FILE='{init}'", *overrides),
+    )
+
+
+def is_running(tmp_path: Path) -> bool:
+    return (tmp_path / "rc-service.running").exists()
+
+
+def test_successful_run_stops_once_and_the_trap_starts_nothing(tmp_path: Path) -> None:
+    proc = run_upgrade(tmp_path, env=stateful_rc_service(tmp_path))
+    assert proc.returncode == 0, proc.stderr
+    ran = re.findall(r"^STEP (\w+)$", proc.stdout, re.M)
+    assert ran == [s for s in STEPS if s != "stop_service"]
+    assert rc_calls(tmp_path) == [f"{RC} status", f"{RC} stop"]  # start_service is a stub
+    assert FAILED not in proc.stderr
+
+
+@pytest.mark.parametrize("failing", ["install_app", "backup_db", "write_config"])
+def test_failure_after_the_stop_starts_the_service_again(failing: str, tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path,
+        env=stateful_rc_service(tmp_path),
+        stub_extra={failing: 'step "Some step"; die "boom"'},
+    )
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == [f"{RC} status", f"{RC} stop", f"{RC} start", f"{RC} status"]
+    assert is_running(tmp_path)
+    assert f"{FAILED} 'Some step' (exit status 1)" in proc.stderr
+    assert STARTED_AGAIN in proc.stderr
+    assert NOT_STARTED not in proc.stderr
+    assert "STEP start_service" not in proc.stdout
+
+
+def test_failure_before_install_says_the_previous_version_was_restarted(tmp_path: Path) -> None:
+    proc = run_upgrade(tmp_path, env=stateful_rc_service(tmp_path), stub_extra=FAIL_INSTALL)
+    assert proc.returncode == 1
+    assert f"{FAILED} 'Virtualenv and package'" in proc.stderr
+    assert "the previously installed version (the virtualenv was not changed)" in proc.stderr
+    assert "database migration had started" not in proc.stderr
+
+
+def test_failure_during_install_says_the_virtualenv_may_be_incomplete(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path,
+        env=stateful_rc_service(tmp_path),
+        stub_extra={"install_app": 'CODE_INSTALLED=1; die "boom"'},
+    )
+    assert proc.returncode == 1
+    assert "may be incomplete" in proc.stderr
+    assert "previously installed version" not in proc.stderr
+    assert STARTED_AGAIN in proc.stderr
+
+
+def test_failure_after_migrate_warns_about_the_database(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path,
+        env=stateful_rc_service(tmp_path),
+        stub_extra={
+            "install_app": "CODE_INSTALLED=1; INSTALL_DONE=1; NEW_COMMIT=abc1234",
+            "migrate_db": 'step "Database migration"; MIGRATE_STARTED=1; die "boom"',
+        },
+    )
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path)[-2:] == [f"{RC} start", f"{RC} status"]
+    assert f"{FAILED} 'Database migration'" in proc.stderr
+    assert "the database migration had started" in proc.stderr
+    assert "the NEWLY installed code (abc1234)" in proc.stderr
+    assert "previously installed version" not in proc.stderr
+    assert STARTED_AGAIN in proc.stderr
+
+
+def test_real_steps_record_how_far_the_install_and_migration_got() -> None:
+    install = function_body("install_app")
+    assert install.index("CODE_INSTALLED=1") < install.index("python3 -m venv")
+    assert install.rstrip().endswith("INSTALL_DONE=1")
+    migrate = function_body("migrate_db")
+    assert migrate.index("MIGRATE_STARTED=1") < migrate.index("run_as_service_user migrate")
+
+
+def test_failed_restart_after_a_failure_is_reported_as_down(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path, env=stateful_rc_service(tmp_path, start_fails=True), stub_extra=FAIL_INSTALL
+    )
+    assert proc.returncode == 1
+    assert f"{RC} start" in rc_calls(tmp_path)
+    assert not is_running(tmp_path)
+    assert NOT_STARTED in proc.stderr and "is DOWN" in proc.stderr
+    assert STARTED_AGAIN not in proc.stderr
+    assert f"rc-service {RC} start" in proc.stderr
+
+
+def test_restart_is_not_claimed_when_status_disagrees(tmp_path: Path) -> None:
+    # "start" exits 0 but the service is not running afterwards: never reported as started.
+    env = stateful_rc_service(tmp_path)
+    fake = tmp_path / "fakebin" / "rc-service"
+    fake.write_text(fake.read_text().replace(': >"$FAKE_RC_STATE"', ":"))
+    proc = run_upgrade(tmp_path, env=env, stub_extra=FAIL_INSTALL)
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path)[-2:] == [f"{RC} start", f"{RC} status"]
+    assert NOT_STARTED in proc.stderr
+    assert STARTED_AGAIN not in proc.stderr
+
+
+@pytest.mark.parametrize("failing", ["checkout_code", "reexec_if_updated", "build_wheels"])
+def test_failure_before_the_stop_never_stops_the_service(failing: str, tmp_path: Path) -> None:
+    # A GitHub or PyPI outage: the installed version keeps running.
+    proc = run_upgrade(
+        tmp_path, env=stateful_rc_service(tmp_path), stub_extra={failing: 'die "no network"'}
+    )
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == []
+    assert is_running(tmp_path)
+    assert FAILED not in proc.stderr
+    assert "Stop service" not in proc.stdout
+
+
+def test_service_that_was_not_running_is_not_started_by_the_trap(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path, env=stateful_rc_service(tmp_path, running=False), stub_extra=FAIL_INSTALL
+    )
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == [f"{RC} status"]
+    assert not is_running(tmp_path)
+    assert FAILED not in proc.stderr
+
+
+def test_dry_run_failure_stops_and_starts_nothing(tmp_path: Path) -> None:
+    env = stateful_rc_service(tmp_path)
+    env["LANSCAPE_SETUP_STOPPED"] = "1"  # even if handed over as stopped
+    proc = run_upgrade(tmp_path, "--dry-run", env=env, stub_extra=FAIL_INSTALL)
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == [f"{RC} status"]
+    assert is_running(tmp_path)
+    assert "(dry-run) would: rc-service lanscape-atlas stop" in proc.stdout
+    assert FAILED not in proc.stderr
+
+
+def test_single_step_mode_never_restarts_from_the_trap(tmp_path: Path) -> None:
+    conf = conf_path(tmp_path)
+    bare = tmp_path / "bare" / "deploy"
+    bare.mkdir(parents=True)
+    script = bare / "setup-alpine.sh"
+    shutil.copy(SCRIPT, script)
+    (bare.parent / "config.example.toml").write_text("not = 'the example'\n")  # cannot render
+    env = stateful_rc_service(tmp_path, running=False)
+    env["LANSCAPE_SETUP_STOPPED"] = "1"
+    env_file = write_env(tmp_path, BASE_ENV)
+    proc = run(["sh"], "--env", str(env_file), "--write-config", str(conf), env=env, script=script)
+    assert proc.returncode == 1
+    assert "could not be rendered" in proc.stderr
+    assert rc_calls(tmp_path) == []
+    assert FAILED not in proc.stderr
+
+
+def test_service_stopped_before_a_reexec_is_started_again_on_a_later_failure(
+    tmp_path: Path,
+) -> None:
+    # Handed over by a script that stopped the service and then re-executed this one.
+    env = stateful_rc_service(tmp_path, running=False)
+    env["LANSCAPE_SETUP_STOPPED"] = "1"
+    proc = run_upgrade(tmp_path, env=env, stub_extra={"build_wheels": 'die "no network"'})
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == [f"{RC} start", f"{RC} status"]
+    assert is_running(tmp_path)
+    assert STARTED_AGAIN in proc.stderr
+
+
+@pytest.mark.parametrize("stopped", ["1", "0"])
+def test_reexec_hands_over_whether_the_service_was_stopped(stopped: str, tmp_path: Path) -> None:
+    new_script = tmp_path / "no-src" / "deploy" / "setup-alpine.sh"
+    new_script.parent.mkdir(parents=True)
+    new_script.write_text(
+        "#!/bin/sh\n"
+        'echo "NEW SCRIPT stopped=$LANSCAPE_SETUP_STOPPED reexec=$LANSCAPE_SETUP_REEXEC args=$*"\n'
+    )
+    env = stateful_rc_service(tmp_path, running=False)
+    if stopped == "1":
+        env["LANSCAPE_SETUP_STOPPED"] = "1"
+    proc = run_upgrade(tmp_path, env=env, real=("reexec_if_updated",))
+    assert proc.returncode == 0, proc.stderr
+    assert f"NEW SCRIPT stopped={stopped} reexec=1 args=--env " in proc.stdout
+    assert "STEP check_config_after_checkout" not in proc.stdout  # the old script is gone
+    assert rc_calls(tmp_path) == []  # exec runs no EXIT trap: the new script owns the restart
+
+
+def test_signal_after_the_stop_starts_the_service_again(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path,
+        env=stateful_rc_service(tmp_path),
+        stub_extra={"install_app": 'step "Virtualenv and package"; kill -TERM $$; sleep 5'},
+    )
+    assert proc.returncode == 143
+    assert rc_calls(tmp_path)[-2:] == [f"{RC} start", f"{RC} status"]
+    assert is_running(tmp_path)
+    assert STARTED_AGAIN in proc.stderr
+
+
+def test_script_traps_the_signals_that_would_skip_the_exit_trap() -> None:
+    text = SCRIPT.read_text()
+    for sig, status in (("HUP", 129), ("INT", 130), ("TERM", 143)):
+        assert re.search(rf"^trap 'exit {status}' {sig}$", text, re.M)
+
+
+# ------------------------------------------- wheels before the stop, install without network
+#
+# The real build_wheels, stop_service and install_app with "python3 -m venv" and pip faked.
+# The fakes log to the rc-service log, so one file gives the order of everything.
+
+
+def fake_python_and_pip(tmp_path: Path, env: dict[str, str], wheel_fails: bool = False) -> None:
+    pip = tmp_path / "fake-pip"
+    pip.write_text(
+        "#!/bin/sh\n"
+        'printf \'pip %s\\n\' "$*" >>"$FAKE_RC_LOG"\n'
+        '[ "$1" = wheel ] || exit 0\n'
+        'if [ -n "${FAKE_PIP_WHEEL_FAILS:-}" ]; then\n'
+        "\techo 'ERROR: No matching distribution found for example'\n"
+        "\texit 1\n"
+        "fi\n"
+        "while [ $# -gt 1 ]; do\n"
+        '\t[ "$1" != --wheel-dir ] || dir=$2\n'
+        "\tshift\n"
+        "done\n"
+        'mkdir -p "$dir"\n'
+        ': >"$dir/lanscape_atlas-0.1.0-py3-none-any.whl"\n'
+        ': >"$dir/example_dep-1.0-py3-none-any.whl"\n'
+    )
+    pip.chmod(0o755)
+    python = tmp_path / "fakebin" / "python3"
+    python.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = -m ] && [ "$2" = venv ]; then\n'
+        '\tprintf \'venv %s\\n\' "$3" >>"$FAKE_RC_LOG"\n'
+        '\tmkdir -p "$3/bin"\n'
+        '\tcp "$FAKE_PIP" "$3/bin/pip"\n'
+        "\tprintf '#!/bin/sh\\nexit 0\\n' >\"$3/bin/python\"\n"
+        '\tchmod 0755 "$3/bin/python"\n'
+        "\texit 0\n"
+        "fi\n"
+        f'exec "{sys.executable}" "$@"\n'
+    )
+    python.chmod(0o755)
+    env["FAKE_PIP"] = str(pip)
+    if wheel_fails:
+        env["FAKE_PIP_WHEEL_FAILS"] = "1"
+
+
+def run_install(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    prefix = tmp_path / "opt"
+    prefix.mkdir()
+    return run_upgrade(
+        tmp_path,
+        env=env,
+        real=("build_wheels", "install_app"),
+        stub_extra={"checkout_code": "NEW_FULL=abc1234abc1234; NEW_COMMIT=abc1234"},
+        overrides=(f"PREFIX='{prefix}'", f"VENV='{prefix}/venv'", f"STAMP='{prefix}/.stamp'"),
+    )
+
+
+def test_wheels_are_built_before_the_stop_and_installed_without_network(tmp_path: Path) -> None:
+    env = stateful_rc_service(tmp_path)
+    fake_python_and_pip(tmp_path, env)
+    stale = tmp_path / "opt" / ".build.stale" / "wheels"  # left by a killed run
+    stale.mkdir(parents=True)
+    prefix = stale.parents[1]
+    proc = run_upgrade(
+        tmp_path,
+        env=env,
+        real=("build_wheels", "install_app"),
+        stub_extra={"checkout_code": "NEW_FULL=abc1234abc1234; NEW_COMMIT=abc1234"},
+        overrides=(f"PREFIX='{prefix}'", f"VENV='{prefix}/venv'", f"STAMP='{prefix}/.stamp'"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    log = rc_calls(tmp_path)
+    kinds = [" ".join(c.split()[:2]) for c in log if not c.startswith("venv ")]
+    assert kinds == ["pip wheel", f"{RC} status", f"{RC} stop", "pip install", "pip install"]
+    wheel = next(c for c in log if c.startswith("pip wheel"))
+    assert wheel.endswith(f" {tmp_path / 'no-src'}") and "--upgrade" not in wheel
+    installs = [c for c in log if c.startswith("pip install")]
+    for command in installs:
+        assert "--no-index" in command and "--upgrade" not in command
+        assert re.search(r"/\.build\.\w+/wheels/lanscape_atlas-0\.1\.0-py3-none-any\.whl$", command)
+    assert re.search(r"--find-links \S+/\.build\.\w+/wheels ", installs[0])
+    assert "--force-reinstall --no-deps" in installs[1]
+    # The wheels are made by a throwaway virtualenv, before the real one is touched.
+    venvs = [c.split(" ", 1)[1] for c in log if c.startswith("venv ")]
+    assert len(venvs) == 2 and re.fullmatch(rf"{prefix}/\.build\.\w+/venv", venvs[0])
+    assert venvs[1] == f"{prefix}/venv"
+    assert log.index(f"venv {venvs[1]}") > log.index(f"{RC} stop")
+    assert sorted(p.name for p in prefix.iterdir()) == ["venv"]  # build dirs are removed
+
+
+def test_pip_wheel_failure_leaves_the_service_running_and_the_venv_alone(tmp_path: Path) -> None:
+    env = stateful_rc_service(tmp_path)
+    fake_python_and_pip(tmp_path, env, wheel_fails=True)
+    proc = run_install(tmp_path, env)
+    assert proc.returncode == 1
+    assert "pip wheel failed" in proc.stderr
+    assert "No matching distribution found" in proc.stderr  # pip's own output is shown
+    log = rc_calls(tmp_path)
+    assert not [c for c in log if c.startswith((RC, "pip install"))]
+    assert is_running(tmp_path)
+    assert list((tmp_path / "opt").iterdir()) == []  # no venv, and the build dir is removed
+    assert FAILED not in proc.stderr
+
+
+def test_readme_documents_the_upgrade_order_and_the_restart_after_a_failure() -> None:
+    text = " ".join((ROOT / "README.md").read_text().split())
+    section = text[text.index("### Scripted install and upgrade") :]
+    assert section.index("pip wheel") < section.index("Only then does it stop the service")
+    assert "starts the service again" in section
+    assert "rc-service lanscape-atlas status" in section
