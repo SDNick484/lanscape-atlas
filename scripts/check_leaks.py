@@ -78,6 +78,16 @@ UUID_RE = re.compile(
 ALLOWED_UUID_RE = re.compile(
     r"00000000-0000-4000-8000-0000000000[0-9a-f]{2}|[0-9a-f]{8}-0000-1000-8000-00805f9b34fb"
 )
+# Exact UUID values a vendored file carries as library constants, keyed by the repo-relative
+# path they may appear in. Swagger UI 5.34.1 (swagger-ui-bundle.js) uses this one as the
+# sample value for JSON Schema "uuid" and "string_uuid" formats; it is not a device UUID.
+# Path-scoped and exact-value: nothing else in the tree may use it, and the file may not
+# carry any other UUID.
+# Split so this file does not itself match UUID_RE; the joined value is the UUID.
+_SWAGGER_UI_SAMPLE_UUID = "3fa85f64" + "-5717-4562-b3fc-2c963f66afa6"
+VENDORED_UUID_ALLOW: dict[str, frozenset[str]] = {
+    "src/lanscape_atlas/web/static/swagger-ui-bundle.js": frozenset({_SWAGGER_UI_SAMPLE_UUID}),
+}
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
 
 
@@ -183,6 +193,7 @@ def _mask_ipv6(line: str) -> str:
 def find_leaks(text: str, path: str, denylist: set[str]) -> list[str]:
     """Return ``path:line: reason`` strings for each leak found in ``text``."""
     check_ips = not is_ip_exempt(path)
+    vendored_uuids = VENDORED_UUID_ALLOW.get(path, frozenset())
     found: list[str] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         for m in MAC_RE.finditer(_mask_ipv6(line)):
@@ -190,7 +201,8 @@ def find_leaks(text: str, path: str, denylist: set[str]) -> list[str]:
             if digits not in PLACEHOLDER_MACS and not digits.startswith(ALLOWED_MAC_PREFIXES):
                 found.append(f"{path}:{lineno}: MAC address outside documentation range")
         for m in UUID_RE.finditer(line):
-            if not ALLOWED_UUID_RE.fullmatch(m.group().lower()):
+            value = m.group().lower()
+            if not ALLOWED_UUID_RE.fullmatch(value) and value not in vendored_uuids:
                 found.append(f"{path}:{lineno}: UUID outside the documentation range")
         if check_ips:
             for m in IPV4_RE.finditer(line):

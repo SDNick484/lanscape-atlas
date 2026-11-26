@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lanscape-atlas API</title>
+<link rel="stylesheet" href="/static/swagger-ui.css">
+<link rel="stylesheet" href="/static/api-docs.css">
+</head>
+<body>
+<div id="api-docs-gate" hidden>
+  <form id="api-docs-form">
+    <p>This instance requires its API token to read the API description.
+      The token is kept only in this page and is not stored.</p>
+    <label for="api-docs-token">API token</label>
+    <input id="api-docs-token" type="password" autocomplete="off" required>
+    <button type="submit">Load API docs</button>
+    <p id="api-docs-error" role="alert"></p>
+  </form>
+</div>
+<p id="api-docs-status">Loading the API description...</p>
+<div id="swagger-ui"></div>
+<script src="/static/swagger-ui-bundle.js"></script>
+<script src="/static/api-docs.js"></script>
+</body>
+</html>

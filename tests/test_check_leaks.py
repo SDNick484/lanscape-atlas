@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import check_leaks
-from check_leaks import find_leaks, load_denylist, main
+from check_leaks import VENDORED_UUID_ALLOW, find_leaks, load_denylist, main
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_leaks.py"
 
@@ -138,6 +138,23 @@ def test_denylist_file_parsed(tmp_path, monkeypatch):
 
 def test_aa_bb_placeholder_mac_allowed():
     assert find_leaks("aa:bb:cc:dd:ee:ff", "x.py", set()) == []
+
+
+# The Swagger UI sample UUID is taken from the allow-list, so no literal lands in this file.
+BUNDLE = "src/lanscape_atlas/web/static/swagger-ui-bundle.js"
+SWAGGER_SAMPLE_UUID = next(iter(VENDORED_UUID_ALLOW[BUNDLE]))
+
+
+def test_vendored_uuid_allowed_only_in_its_file():
+    assert find_leaks(f"x {SWAGGER_SAMPLE_UUID} y", BUNDLE, set()) == []
+    assert find_leaks(f"x {SWAGGER_SAMPLE_UUID} y", "web/other.js", set())
+    assert find_leaks(f"x {SWAGGER_SAMPLE_UUID} y", "scripts/check_leaks.py", set())
+
+
+def test_vendored_uuid_allowance_is_exact_value():
+    other = str(uuid.UUID(int=uuid.UUID(SWAGGER_SAMPLE_UUID).int ^ 1))
+    assert find_leaks(f"x {other} y", BUNDLE, set())
+    assert find_leaks(f"x {SWAGGER_SAMPLE_UUID} {other}", BUNDLE, set())
 
 
 # ---- Task 11: LANSCAPE_LEAK_DENYLIST and the tracked-image check ----------------------

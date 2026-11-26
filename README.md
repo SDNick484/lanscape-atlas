@@ -30,7 +30,9 @@ ranges, not a real network.
 - **History** of every change, grouped by batch, with per-batch **Undo**.
 - **Status** page with collector health and counts.
 - **HTTP API** under `/api/v1` (OpenAPI via FastAPI) and an **MCP server** at `/mcp`
-  in the same process.
+  in the same process. The API description is at `/docs` (Swagger UI, served from the
+  app, no CDN). The spec itself is `/api/openapi.json`, which needs the bearer token
+  when `api_token` is set; `/docs` then asks for the token and keeps it in the page only.
 - **Vendor lookup** from a local IEEE OUI file; no network call at lookup time.
 - **Floor plan** (Phase 2): upload a plan or start a blank one with real dimensions,
   set its scale, draw rooms, place devices. See below.
