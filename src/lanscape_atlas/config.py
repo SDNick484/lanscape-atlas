@@ -61,7 +61,7 @@ class Settings:
     bind_port: int = 8720
     scan_interface: str = "eth0"
     api_token: str | None = field(default=None, repr=False)
-    observation_retention_days: int = 30
+    observation_retention_days: int = 3
     ip_match_window_min: int = 10
     router: RouterSettings | None = None
     home_assistant: HomeAssistantSettings | None = None
@@ -184,7 +184,7 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
         bind_port=_get(raw, "bind_port", int, 8720),
         scan_interface=_get(raw, "scan_interface", str, "eth0"),
         api_token=token or None,
-        observation_retention_days=_get(raw, "observation_retention_days", int, 30),
+        observation_retention_days=_get(raw, "observation_retention_days", int, 3),
         ip_match_window_min=_get(raw, "ip_match_window_min", int, 10),
         router=router,
         home_assistant=home_assistant,

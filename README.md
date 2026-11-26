@@ -545,7 +545,7 @@ point.
 | `bind_host` | `127.0.0.1` | Address `serve` listens on |
 | `bind_port` | `8720` | Port `serve` listens on |
 | `scan_interface` | `eth0` | Interface `arp-scan` uses |
-| `observation_retention_days` | `30` | How long raw observations are kept |
+| `observation_retention_days` | `3` | Days of raw observations kept, pruned nightly. Device history does not depend on them; about 40 MB a day per 100 devices |
 | `ip_match_window_min` | `10` | Window for correlating an IP-only sighting to a known device |
 | `api_token` | unset | Static bearer token required for `/api` and `/mcp` |
 | `allowed_hosts` | `[]` | Extra `Host` headers the app accepts when no `api_token` is set |

@@ -389,6 +389,24 @@ async def test_scheduler_registers_jobs(settings, runner, svc) -> None:
         await stop_scheduler(sched, cs)
 
 
+async def test_jobs_are_not_dropped_for_a_short_stall(settings, runner, svc) -> None:
+    """APScheduler's default grace is 1 s: a job fired 2 s late is skipped until its next
+    time, which for a nightly cron job is a whole day."""
+    cs = [FakeCollector("arp"), FakeCollector("nmap_light")]
+    sched = await start_scheduler(settings, runner, cs, svc)
+    try:
+        jobs = {j.id: j for j in sched.get_jobs()}
+        # Cron jobs still run when up to an hour late, and are skipped beyond that
+        # (a nightly scan should not start mid-morning after a long suspend).
+        for jid in ("collector:nmap_light", "prune"):
+            assert jobs[jid].misfire_grace_time == scheduler_mod.CRON_MISFIRE_GRACE_S == 3600
+        # Interval jobs run once (coalesce) however late they are.
+        for jid in ("collector:arp", "presence"):
+            assert jobs[jid].misfire_grace_time is None
+    finally:
+        await stop_scheduler(sched, cs)
+
+
 async def test_collector_job_function_honors_backoff(settings, runner, svc, db, clock) -> None:
     c = FakeCollector("arp", [obs("arp", MAC, IP)])
     sched = await start_scheduler(settings, runner, [c], svc)
@@ -574,7 +592,7 @@ async def test_prune_and_presence_jobs_call_through(settings, runner, svc, monke
         for jid in ("prune", "presence"):
             j = sched.get_job(jid)
             await j.func(*j.args)
-        assert calls == [("prune", 30), ("presence", None)]
+        assert calls == [("prune", 3), ("presence", None)]
     finally:
         await stop_scheduler(sched, [])
 
@@ -588,7 +606,7 @@ async def test_prune_job_prunes_ble(tmp_path, runner, svc, monkeypatch) -> None:
     try:
         j = sched.get_job("prune")
         await j.func(*j.args)
-        assert calls == [("obs", 30), ("ble", 9)]
+        assert calls == [("obs", 3), ("ble", 9)]
     finally:
         await stop_scheduler(sched, [])
 
