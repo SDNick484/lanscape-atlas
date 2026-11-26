@@ -122,6 +122,10 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
     nudge it.
   - With a scale, each wall segment shows its length (*Show lengths* in the toolbar)
     and a wall being drawn shows its length as you go.
+  - *Undo* and *Redo* (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y; Cmd on a Mac) step through the
+    pending edits: a finished drag, click, key press or typed name is one step, up to 100
+    steps. They are off while you type in a field, and the history clears on *Save changes*,
+    *Discard*, and after a refused save (409) is re-based onto the current drawing.
   - Nothing is written until *Save changes*; *Discard* drops the pending drawing, and
     leaving the page asks first. While a drawing edit is pending the page stays in
     Draw mode, and while a placement is pending *Draw* is disabled, so one save never

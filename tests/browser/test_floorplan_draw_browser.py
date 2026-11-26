@@ -1160,3 +1160,91 @@ def test_area_formatter_and_js_geometry_match_the_server(page: Any, live_server:
     assert got["bow"] is None
     ys = sorted({round(c[1], 9) for c in got["corners"]})
     assert ys == [0.1, 0.9] and got["fits"] is False
+
+
+def _wall_points(page: Any) -> list[Any]:
+    return page.evaluate(
+        "Array.from(document.querySelectorAll('.fp-wall')).map(e => e.getAttribute('d'))"
+    )
+
+
+def test_undo_redo_walls_with_keys_and_buttons(page: Any, live_server: str) -> None:
+    _blank(live_server)
+    _open_draw(page, live_server, "wall")
+    assert page.locator("#draw-undo").is_disabled() and page.locator("#draw-redo").is_disabled()
+    _click(page, 0.2, 0.2)
+    _click(page, 0.5, 0.2)
+    _click(page, 0.2, 0.5)
+    _click(page, 0.5, 0.5)
+    assert page.locator(".fp-wall").count() == 2
+    assert page.locator("#draw-undo").is_enabled()
+    page.keyboard.press("Control+z")
+    assert page.locator(".fp-wall").count() == 1
+    assert page.locator("#draw-redo").is_enabled()
+    page.keyboard.press("Control+Shift+Z")
+    assert page.locator(".fp-wall").count() == 2
+    page.click("#draw-undo")
+    page.click("#draw-undo")
+    assert page.locator(".fp-wall").count() == 0
+    assert _dirty(page) == 0 and page.locator("#draw-undo").is_disabled()
+    page.keyboard.press("Control+y")  # Ctrl+Y also redoes, even with a button focused
+    assert page.locator(".fp-wall").count() == 1 and _dirty(page) == 1
+    _click(page, 0.2, 0.7)
+    _click(page, 0.4, 0.7)  # a new edit clears the redo stack
+    assert page.locator("#draw-redo").is_disabled()
+
+
+def test_drag_is_one_undo_step_and_delete_undoes(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    _seed(live_server, db, ("wall", {"points": [[0.2, 0.5], [0.6, 0.5]], "closed": False}))
+    _open_draw(page, live_server, "select")
+    before = _wall_points(page)
+    page.mouse.move(*_client(page, 0.4, 0.5))
+    page.mouse.down()
+    page.mouse.move(*_client(page, 0.4, 0.6), steps=8)
+    page.mouse.move(*_client(page, 0.4, 0.7), steps=8)
+    page.mouse.up()
+    assert _wall_points(page) != before
+    page.keyboard.press("Control+z")  # one press undoes the whole drag
+    assert _wall_points(page) == before and _dirty(page) == 0
+    _click(page, 0.4, 0.5)
+    page.click("#shape-delete")
+    assert page.locator(".fp-wall").count() == 0
+    page.keyboard.press("Control+z")
+    assert page.locator(".fp-wall").count() == 1 and _dirty(page) == 0
+
+
+def test_undo_key_is_left_to_a_text_field(page: Any, live_server: str) -> None:
+    _blank(live_server)
+    _open_draw(page, live_server, "furniture-rect")
+    _click(page, 0.2, 0.2)
+    page.mouse.move(*_client(page, 0.2, 0.2))
+    page.mouse.down()
+    page.mouse.move(*_client(page, 0.4, 0.4), steps=5)
+    page.mouse.up()
+    page.click("#tool-select")
+    _click(page, 0.3, 0.3)
+    page.fill("#shape-text", "")
+    page.locator("#shape-text").press_sequentially("Sofa")
+    page.keyboard.press("Control+z")  # typing in a field: the page does not undo
+    assert page.locator("#draw-undo").is_enabled()
+    assert page.locator("#shape-text").input_value() != ""
+    page.locator("#shape-text").evaluate("e => e.blur()")
+    page.click("#draw-undo")  # all four letters were one step
+    assert page.locator("#shape-text").input_value() == ""
+
+
+def test_history_is_rebased_after_a_stale_save(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _stale_setup(page, live_server, db)
+    assert page.locator("#draw-undo").is_enabled()
+    page.click("#save-changes")
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    assert page.locator("#draw-undo").is_disabled()  # cleared: snapshots predate the re-base
+    page.click("#fp-conflict button:has-text('Keep editing')")
+    assert page.locator(".fp-wall").count() == 2
+    _save(page)
+    assert sorted(s["kind"] for s in _shapes(db)) == ["door", "wall", "wall"]
