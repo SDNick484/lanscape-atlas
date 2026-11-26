@@ -121,9 +121,13 @@ def test_stale_save_shows_conflict(page: Any, synthetic_plan_and_room: str, tmp_
     # Another tab changes the same device after this page loaded.
     assert _place(base, dev, room, 0.2, 0.2) == 200
     page.click("#save-changes")
-    page.wait_for_selector(".flash.error")
-    assert page.url.endswith("stale=1")
-    assert "reload" in page.locator(".flash").inner_text().lower()
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    assert page.url.endswith("/floorplan")
+    assert "reload" in page.locator("#fp-conflict").inner_text().lower()
+    assert page.locator("#save-changes").is_disabled()  # until the user chooses
+    page.click("#fp-conflict button:has-text('Keep editing')")
+    page.wait_for_selector("#fp-conflict", state="hidden")
+    assert page.locator("#save-changes").is_enabled()  # the placement is kept
 
 
 def test_roaming_tray_stamp_and_checkbox_gating(
