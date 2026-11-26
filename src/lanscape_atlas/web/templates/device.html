@@ -52,6 +52,12 @@
   {% if d.scan_policy == "never" %}<p class="muted">Disabled: scan policy is <em>never</em>.</p>{% endif %}
 </div>
 
+<div class="card" id="device-forget">
+  <h2>Forget device</h2>
+  <p class="muted">Removes this device with its interfaces, IP history and services. Undo it from History.</p>
+  <p><a class="button secondary" href="{{ root }}/devices/{{ d.id }}/forget">Forget device&hellip;</a></p>
+</div>
+
 <div class="card" id="device-floorplan">
   <h2>Floor plan</h2>
   <p>{% if roaming %}<span class="tag">Roaming</span> in {{ d.place }}{% elif d.place %}Fixed in {{ d.place }}{% else %}<span class="muted">No room assigned.</span>{% endif %}</p>
@@ -107,7 +113,7 @@
 </table>
 </div>
 
-<h2>IP history</h2>
+<h2>IP history{% if d.lease_count > d.leases|length %} <span class="muted">(newest {{ d.leases|length }} of {{ d.lease_count }})</span>{% endif %}</h2>
 <div class="table-wrap">
 <table>
   <thead><tr><th>IPv4</th><th>Interface</th><th>First seen</th><th>Last seen</th><th>State</th></tr></thead>

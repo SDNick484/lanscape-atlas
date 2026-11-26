@@ -195,3 +195,106 @@ def test_settings_repr_hides_ha_token(tmp_path: Path) -> None:
     s = load_settings(p, env={})
     assert s.home_assistant is not None and s.home_assistant.token == "s3cret-ha"
     assert "s3cret-ha" not in repr(s) and "s3cret-ha" not in repr(s.home_assistant)
+
+
+@pytest.mark.parametrize(
+    "text,key",
+    [
+        ("bind_port = 0\n", "bind_port"),
+        ("bind_port = 65536\n", "bind_port"),
+        ("observation_retention_days = 0\n", "observation_retention_days"),
+        ("observation_retention_days = -3\n", "observation_retention_days"),
+        ("ip_match_window_min = 0\n", "ip_match_window_min"),
+        ("[collectors.arp]\ninterval_s = 0\n", "collectors.arp.interval_s"),
+        ("[collectors.arp]\ntimeout_s = 0\n", "collectors.arp.timeout_s"),
+        ("[collectors.arp]\ntimeout_s = -1.5\n", "collectors.arp.timeout_s"),
+    ],
+)
+def test_range_checks_name_key_and_bounds(tmp_path: Path, text: str, key: str) -> None:
+    with pytest.raises(ValueError, match=rf"config key '{key}' must be"):
+        load_settings(_ha(tmp_path, text), env={})
+
+
+def test_range_checks_accept_bounds(tmp_path: Path) -> None:
+    body = (
+        "bind_port = 65535\nobservation_retention_days = 1\nip_match_window_min = 1\n"
+        "[collectors.arp]\ninterval_s = 1\ntimeout_s = 0.5\n"
+    )
+    s = load_settings(_ha(tmp_path, body), env={})
+    assert s.bind_port == 65535
+    assert (s.observation_retention_days, s.ip_match_window_min) == (1, 1)
+    assert s.collectors["arp"].interval_s == 1 and s.collectors["arp"].timeout_s == 0.5
+    assert load_settings(_ha(tmp_path, "bind_port = 1\n"), env={}).bind_port == 1
+
+
+def test_interval_on_cron_collector_clears_cron(tmp_path: Path) -> None:
+    s = load_settings(_ha(tmp_path, "[collectors.nmap_light]\ninterval_s = 3600\n"), env={})
+    assert s.collectors["nmap_light"].interval_s == 3600
+    assert s.collectors["nmap_light"].cron is None
+
+
+def test_cron_on_interval_collector_clears_interval(tmp_path: Path) -> None:
+    s = load_settings(_ha(tmp_path, '[collectors.arp]\ncron = "0 4 * * *"\n'), env={})
+    assert s.collectors["arp"].cron == "0 4 * * *"
+    assert s.collectors["arp"].interval_s is None
+
+
+def test_interval_and_cron_together_is_error(tmp_path: Path) -> None:
+    body = '[collectors.arp]\ninterval_s = 60\ncron = "0 4 * * *"\n'
+    with pytest.raises(ValueError, match="collectors.arp.interval_s.*collectors.arp.cron"):
+        load_settings(_ha(tmp_path, body), env={})
+
+
+@pytest.mark.parametrize("cron", ['""', '"60 * * * *"', '"1 2 3"', '"a b c d e"', '"*/0 * * * *"'])
+def test_invalid_cron_fails_at_load(tmp_path: Path, cron: str) -> None:
+    body = f"[collectors.nmap_light]\ncron = {cron}\n"
+    with pytest.raises(ValueError, match="collectors.nmap_light.cron"):
+        load_settings(_ha(tmp_path, body), env={})
+
+
+def test_valid_cron_is_kept(tmp_path: Path) -> None:
+    s = load_settings(_ha(tmp_path, '[collectors.nmap_light]\ncron = "*/15 1-5 * * 1-5"\n'), env={})
+    assert s.collectors["nmap_light"].cron == "*/15 1-5 * * 1-5"
+    assert s.collectors["nmap_light"].interval_s is None
+
+
+def test_unknown_keys_warn_once_each_and_still_load(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    body = (
+        "bind_prot = 9000\n"
+        '[router]\nhost = "192.0.2.1"\nusrname = "u"\n'
+        "[bluetooth]\nflush = 30\n"
+        "[collectors.arp]\ninterval = 60\n"
+        "[extra]\nfoo = 1\n"
+    )
+    with caplog.at_level("WARNING", logger="lanscape_atlas.config"):
+        s = load_settings(_ha(tmp_path, body), env={})
+    assert s.bind_port == 8720 and s.router is not None and s.router.host == "192.0.2.1"
+    messages = [r.getMessage() for r in caplog.records if r.name == "lanscape_atlas.config"]
+    assert len(messages) == 5
+    assert any("'bind_prot'" in m and "top-level" in m for m in messages)
+    assert any("'usrname'" in m and "[router]" in m for m in messages)
+    assert any("'flush'" in m and "[bluetooth]" in m for m in messages)
+    assert any("'interval'" in m and "[collectors.arp]" in m for m in messages)
+    assert any("'extra'" in m for m in messages)
+
+
+def test_known_keys_do_not_warn(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    body = (
+        'api_token = "t"\nallowed_hosts = ["atlas.example.com"]\n'
+        '[router]\nhost = "192.0.2.1"\npassword = "x"\nuse_ssl = false\n'
+        '[home_assistant]\nurl = "http://192.0.2.10:8123"\ntoken = "t"\nverify_tls = false\n'
+        "[bluetooth]\nretention_days = 7\nflush_s = 30\nsnapshot_s = 30\n"
+        "candidate_min_rssi = -70\n"
+        '[collectors.nmap_light]\nenabled = true\ncron = "17 3 * * *"\ntimeout_s = 60\n'
+    )
+    with caplog.at_level("WARNING", logger="lanscape_atlas.config"):
+        load_settings(_ha(tmp_path, body), env={})
+    assert [r for r in caplog.records if r.name == "lanscape_atlas.config"] == []
+
+
+def test_example_config_loads_without_warnings(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING", logger="lanscape_atlas.config"):
+        load_settings(ROOT / "config.example.toml", env={})
+    assert [r for r in caplog.records if r.name == "lanscape_atlas.config"] == []

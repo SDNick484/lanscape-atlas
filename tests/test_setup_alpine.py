@@ -7,15 +7,22 @@ config.example.toml) and ``--dry-run`` (inspect and report, change nothing).
 
 from __future__ import annotations
 
+import grp
 import hashlib
+import json
 import os
+import pwd
 import re
 import shutil
+import socket
+import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import tomllib
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -252,6 +259,7 @@ def test_setup_env_example_documents_home_assistant() -> None:
         ({"REPO_URL": "file:///tmp/x"}, "REPO_URL"),
         ({"ROUTER_USE_SSL": "maybe"}, "ROUTER_USE_SSL"),
         ({"ROUTER_PASSWORD": ""}, "ROUTER_PASSWORD"),
+        ({"UPDATE_OUI_WEEKLY": "no"}, "UPDATE_OUI_WEEKLY"),
     ],
 )
 def test_env_validation_rejects(change: dict[str, str], needle: str, tmp_path: Path) -> None:
@@ -335,7 +343,7 @@ def test_shellcheck_clean() -> None:
 
 def test_deploy_script_creates_floorplan_dir() -> None:
     text = SCRIPT.read_text()
-    pattern = r'install -d -m 0750 -o "\$SVC_USER" -g "\$SVC_USER" "\$DATA_DIR/floorplan"'
+    pattern = r'service_dir "\$DATA_DIR/floorplan" 0750'
     assert re.search(pattern, text)
 
 
@@ -904,6 +912,8 @@ def test_main_flow_does_network_and_build_steps_before_stopping_the_service() ->
     calls = [word for word in words if word not in ("fi", "else")]
     assert calls == STEPS  # the stubbed main sequence below covers every step
     order = [
+        "acquire_lock",  # before anything is installed or changed
+        "install_packages",
         "ensure_repo_access",
         "checkout_code",  # git fetch
         "reexec_if_updated",
@@ -1128,6 +1138,7 @@ MAIN_MARKER = "# ---------------------------------------------------------------
 STEPS = [
     "preflight",
     "check_config_early",
+    "acquire_lock",
     "install_packages",
     "ensure_user",
     "ensure_repo_access",
@@ -1160,6 +1171,7 @@ def run_main(
     stub_extra: dict[str, str] | None = None,
     env: dict[str, str] | None = None,
     overrides: tuple[str, ...] = (),
+    shell: tuple[str, ...] = ("sh",),
 ) -> subprocess.CompletedProcess[str]:
     text = SCRIPT.read_text()
     head, main = text.split(MAIN_MARKER, 1)
@@ -1178,7 +1190,7 @@ def run_main(
     env_file = write_env(tmp_path, data)
     if env is None:
         env = fake_rc_service(tmp_path, stopped=False)
-    return run(["sh"], "--env", str(env_file), *args, env=env, script=harness)
+    return run(list(shell), "--env", str(env_file), *args, env=env, script=harness)
 
 
 def test_main_sequence_runs_every_step_on_a_clean_config(tmp_path: Path) -> None:
@@ -1264,7 +1276,7 @@ FAIL_INSTALL = {"install_app": 'step "Virtualenv and package"; die "boom"'}
 
 
 def stateful_rc_service(
-    tmp_path: Path, running: bool = True, start_fails: bool = False
+    tmp_path: Path, running: bool = True, start_fails: bool = False, crashed: bool = False
 ) -> dict[str, str]:
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir(exist_ok=True)
@@ -1273,17 +1285,27 @@ def stateful_rc_service(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >>"$FAKE_RC_LOG"\n'
         "case $2 in\n"
-        'status) [ -f "$FAKE_RC_STATE" ] ;;\n'
-        'stop) rm -f "$FAKE_RC_STATE" ;;\n'
+        "status)\n"
+        '\t[ -f "$FAKE_RC_STATE" ] || exit 3\n'
+        '\tif grep -q crashed "$FAKE_RC_STATE"; then\n'
+        "\t\techo ' * status: crashed'\n"
+        "\t\texit 32\n"
+        "\tfi\n"
+        "\t;;\n"
+        'stop | zap) rm -f "$FAKE_RC_STATE" ;;\n'
         "start)\n"
         '\t[ -z "${FAKE_RC_START_FAILS:-}" ] || exit 1\n'
+        "\t# OpenRC: a crashed service counts as started, so start does nothing.\n"
+        '\t! grep -qs crashed "$FAKE_RC_STATE" || exit 0\n'
         '\t: >"$FAKE_RC_STATE"\n'
         "\t;;\n"
         "esac\n"
     )
     fake.chmod(0o755)
     state = tmp_path / "rc-service.running"
-    if running:
+    if crashed:
+        state.write_text("crashed\n")
+    elif running:
         state.touch()
     env = {
         **os.environ,
@@ -1320,7 +1342,8 @@ def run_upgrade(
 
 
 def is_running(tmp_path: Path) -> bool:
-    return (tmp_path / "rc-service.running").exists()
+    state = tmp_path / "rc-service.running"
+    return state.exists() and "crashed" not in state.read_text()
 
 
 def test_successful_run_stops_once_and_the_trap_starts_nothing(tmp_path: Path) -> None:
@@ -1627,3 +1650,893 @@ def test_readme_documents_the_upgrade_order_and_the_restart_after_a_failure() ->
     assert section.index("pip wheel") < section.index("Only then does it stop the service")
     assert "starts the service again" in section
     assert "rc-service lanscape-atlas status" in section
+
+
+# ------------------------------------------- a virtualenv made by another Python version
+#
+# The real install_app against a virtualenv left by an earlier Python minor version: its
+# python still runs, but its pip and packages belong to the old version.
+
+PY_MINOR = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def old_venv(tmp_path: Path, version: str, pip_works: bool = True) -> Path:
+    venv = tmp_path / "opt" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\ninclude-system-site-packages = false\nversion = {version}\n"
+    )
+    python = venv / "bin" / "python"
+    pip_check = "" if pip_works else '[ "$1 $2" != "-m pip" ] || exit 1\n'
+    python.write_text(f"#!/bin/sh\n{pip_check}exit 0\n")
+    python.chmod(0o755)
+    (venv / "OLD").touch()
+    return venv
+
+
+@pytest.mark.parametrize(
+    ("version", "pip_works", "rebuilt"),
+    [
+        ("3.1.0", True, True),  # another minor version: site-packages orphaned
+        (f"{PY_MINOR}.0", False, True),  # same version, but pip is gone
+        (f"{PY_MINOR}.99", True, False),  # a patch release: kept
+    ],
+    ids=["other-minor", "no-pip", "same-minor"],
+)
+def test_install_rebuilds_a_virtualenv_from_another_python(
+    version: str, pip_works: bool, rebuilt: bool, tmp_path: Path
+) -> None:
+    env = stateful_rc_service(tmp_path)
+    fake_python_and_pip(tmp_path, env)
+    venv = old_venv(tmp_path, version, pip_works)
+    shutil.copy(env["FAKE_PIP"], venv / "bin" / "pip")
+    proc = install_into_existing_venv(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    made = [c for c in rc_calls(tmp_path) if c == f"venv {venv}"]
+    assert bool(made) == rebuilt
+    assert (venv / "OLD").exists() != rebuilt
+    assert ("rebuilding virtualenv" in proc.stdout) == rebuilt
+    assert [c for c in rc_calls(tmp_path) if c.startswith("pip install")]
+
+
+def install_into_existing_venv(
+    tmp_path: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    prefix = tmp_path / "opt"
+    return run_upgrade(
+        tmp_path,
+        env=env,
+        real=("build_wheels", "install_app"),
+        stub_extra={"checkout_code": "NEW_FULL=abc1234abc1234; NEW_COMMIT=abc1234"},
+        overrides=(f"PREFIX='{prefix}'", f"VENV='{prefix}/venv'", f"STAMP='{prefix}/.stamp'"),
+    )
+
+
+def test_venv_check_compares_pyvenv_cfg_and_runs_pip() -> None:
+    check = function_body("venv_matches_python")
+    assert "pyvenv.cfg" in check
+    assert '"$VENV/bin/python" -m pip --version' in check
+    assert "venv_matches_python" in function_body("install_app")
+    assert "venv_matches_python" in function_body("venv_ok")  # build_wheels' skip, too
+
+
+# ------------------------------------------------------------------- a crashed service
+
+
+def test_crashed_service_is_zapped_and_then_really_started(tmp_path: Path) -> None:
+    env = stateful_rc_service(tmp_path, crashed=True)
+    port = free_port()
+    proc = run_upgrade(
+        tmp_path,
+        env=env,
+        real=("start_service",),
+        overrides=("BIND_HOST=127.0.0.1", f"BIND_PORT={port}"),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rc_calls(tmp_path) == [f"{RC} status", f"{RC} zap", f"{RC} status", f"{RC} start"]
+    assert is_running(tmp_path)
+    assert "has crashed" in proc.stderr
+
+
+def test_start_without_the_zap_would_do_nothing(tmp_path: Path) -> None:
+    # The fake models OpenRC: start on a crashed service is a no-op.
+    env = stateful_rc_service(tmp_path, crashed=True)
+    subprocess.run(["rc-service", RC, "start"], env=env, check=True)
+    assert not is_running(tmp_path)
+
+
+def test_crashed_service_is_started_again_after_a_failure(tmp_path: Path) -> None:
+    proc = run_upgrade(
+        tmp_path, env=stateful_rc_service(tmp_path, crashed=True), stub_extra=FAIL_INSTALL
+    )
+    assert proc.returncode == 1
+    assert rc_calls(tmp_path) == [f"{RC} status", f"{RC} zap", f"{RC} start", f"{RC} status"]
+    assert is_running(tmp_path)
+    assert STARTED_AGAIN in proc.stderr
+
+
+def test_dry_run_reports_a_crashed_service_without_zapping_it(tmp_path: Path) -> None:
+    proc = run_upgrade(tmp_path, "--dry-run", env=stateful_rc_service(tmp_path, crashed=True))
+    assert "(dry-run) would: rc-service lanscape-atlas zap" in proc.stdout
+    assert rc_calls(tmp_path) == [f"{RC} status"]
+
+
+# ------------------------------------------------------------------- REPO_URL changes
+
+OLD_URL = "https://old.example/lanscape-atlas.git"
+
+
+def git_checkout(tmp_path: Path, origin: str | None) -> Path:
+    src = tmp_path / "src"
+    src.mkdir()
+    git = ["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q", "-b", "main"], check=True)
+    (src / "README").write_text("x\n")
+    subprocess.run([*git, "add", "README"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)
+    if origin is not None:
+        subprocess.run([*git, "remote", "add", "origin", origin], check=True)
+    return src
+
+
+def origin_of(src: Path) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(src), "config", "--get", "remote.origin.url"],
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "origin", [OLD_URL, BASE_ENV["REPO_URL"], None], ids=["old", "same", "none"]
+)
+def test_checkout_points_origin_at_repo_url(origin: str | None, tmp_path: Path) -> None:
+    src = git_checkout(tmp_path, origin)
+    proc = run_upgrade(
+        tmp_path,
+        env=stateful_rc_service(tmp_path),
+        real=("checkout_code",),
+        overrides=(f"SRC='{src}'", 'git_run() { echo "git_run $*"; }'),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert origin_of(src) == BASE_ENV["REPO_URL"]
+    assert "git_run -C" in proc.stdout and "fetch" in proc.stdout
+    changed = "pointing origin at REPO_URL" in proc.stdout
+    assert changed == (origin != BASE_ENV["REPO_URL"])
+    assert OLD_URL not in proc.stdout + proc.stderr  # URLs can carry tokens
+
+
+def test_dry_run_reports_a_changed_repo_url_without_changing_it(tmp_path: Path) -> None:
+    src = git_checkout(tmp_path, OLD_URL)
+    proc = run_upgrade(
+        tmp_path,
+        "--dry-run",
+        env=stateful_rc_service(tmp_path),
+        real=("checkout_code",),
+        overrides=(f"SRC='{src}'",),
+    )
+    assert "(dry-run) would: point the checkout's origin at REPO_URL" in proc.stdout
+    assert origin_of(src) == OLD_URL
+
+
+# ------------------------------------------------------------------------- the lock
+
+
+def run_locked(
+    tmp_path: Path, *args: str, stub_extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    held = '[ ! -d "$LOCK_DIR" ] || echo "LOCK HELD $(cat "$LOCK_DIR/pid") self=$$"'
+    return run_upgrade(
+        tmp_path,
+        *args,
+        env=stateful_rc_service(tmp_path),
+        real=("acquire_lock",),
+        stub_extra={"install_packages": held, **(stub_extra or {})},
+        overrides=(f"LOCK_DIR='{tmp_path / 'setup.lock'}'",),
+    )
+
+
+def dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_lock_is_held_during_the_run_and_removed_after(tmp_path: Path) -> None:
+    proc = run_locked(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    held = re.search(r"^LOCK HELD (\d+) self=(\d+)$", proc.stdout, re.M)
+    assert held and held.group(1) == held.group(2)
+    assert not (tmp_path / "setup.lock").exists()
+
+
+def test_a_second_run_stops_while_the_first_holds_the_lock(tmp_path: Path) -> None:
+    lock = tmp_path / "setup.lock"
+    lock.mkdir()
+    (lock / "pid").write_text(f"{os.getpid()}\n")  # a live process
+    proc = run_locked(tmp_path)
+    assert proc.returncode == 1
+    assert f"another setup run (PID {os.getpid()}) is in progress" in proc.stderr
+    assert "STEP install_packages" not in proc.stdout
+    assert rc_calls(tmp_path) == []
+    assert (lock / "pid").read_text() == f"{os.getpid()}\n"  # never removed by the loser
+
+
+def test_a_stale_lock_is_taken_over(tmp_path: Path) -> None:
+    lock = tmp_path / "setup.lock"
+    lock.mkdir()
+    pid = dead_pid()
+    (lock / "pid").write_text(f"{pid}\n")
+    proc = run_locked(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert f"removing the stale lock {lock} (PID {pid} is not running)" in proc.stderr
+    assert "LOCK HELD" in proc.stdout
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("age_s", [0, 300])
+def test_a_lock_without_a_pid_is_stale_only_when_old(age_s: int, tmp_path: Path) -> None:
+    lock = tmp_path / "setup.lock"
+    lock.mkdir()
+    then = datetime.now().timestamp() - age_s
+    os.utime(lock, (then, then))
+    proc = run_locked(tmp_path)
+    if age_s:
+        assert proc.returncode == 0, proc.stderr
+        assert "removing the stale lock" in proc.stderr
+    else:
+        assert proc.returncode == 1
+        assert "another setup run is starting" in proc.stderr
+        assert lock.exists()
+
+
+def test_the_reexecuted_script_keeps_its_own_lock(tmp_path: Path) -> None:
+    # exec keeps the PID: the lock the old script took is this run's own.
+    take = 'mkdir "$LOCK_DIR"; echo $$ >"$LOCK_DIR/pid"'
+    proc = run_locked(tmp_path, stub_extra={"check_config_early": take})
+    assert proc.returncode == 0, proc.stderr
+    assert "stale" not in proc.stderr and "LOCK HELD" in proc.stdout
+    assert not (tmp_path / "setup.lock").exists()
+
+
+def test_a_failed_run_restarts_the_service_and_releases_the_lock(tmp_path: Path) -> None:
+    proc = run_locked(tmp_path, stub_extra=FAIL_INSTALL)
+    assert proc.returncode == 1
+    assert STARTED_AGAIN in proc.stderr
+    assert not (tmp_path / "setup.lock").exists()
+
+
+def test_dry_run_takes_no_lock_and_names_a_holder(tmp_path: Path) -> None:
+    proc = run_locked(tmp_path, "--dry-run")
+    assert "LOCK HELD" not in proc.stdout
+    shutil.rmtree(tmp_path / "harness")
+    lock = tmp_path / "setup.lock"
+    lock.mkdir()
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    proc = run_locked(tmp_path, "--dry-run")
+    assert f"another setup run (PID {os.getpid()}) is in progress" in proc.stderr
+    assert (lock / "pid").exists()
+
+
+def test_the_lock_is_taken_before_anything_is_installed() -> None:
+    main = SCRIPT.read_text().split(MAIN_MARKER, 1)[1]
+    assert main.index("acquire_lock") < main.index("install_packages")
+    assert "LOCK_DIR=/run/$APP-setup.lock" in SCRIPT.read_text()
+    assert "release_lock" in function_body("on_exit")
+
+
+# ------------------------------------------------------------------- temporary files
+
+
+def logging_mktemp(tmp_path: Path, env: dict[str, str], stub: bool = True) -> Path:
+    """A mktemp first on PATH that logs its arguments; TMPDIR is a fresh directory."""
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    env["TMPDIR"] = str(tmpdir)
+    env["FAKE_MKTEMP_LOG"] = str(tmp_path / "mktemp.log")
+    if not stub:
+        return tmpdir
+    real = shutil.which("mktemp")
+    assert real
+    fake = tmp_path / "fakebin" / "mktemp"
+    fake.parent.mkdir(exist_ok=True)
+    fake.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >>"$FAKE_MKTEMP_LOG"\nexec "{real}" "$@"\n')
+    fake.chmod(0o755)
+    if not env["PATH"].startswith(str(fake.parent)):
+        env["PATH"] = f"{fake.parent}{os.pathsep}{env['PATH']}"
+    return tmpdir
+
+
+def mktemp_logging_script(tmp_path: Path) -> Path:
+    """The script with a logging mktemp *function* defined first.
+
+    A stub first on PATH is not enough: busybox ash (Alpine) runs its own mktemp applet
+    without a PATH lookup. A shell function comes before applets and PATH in every shell.
+    """
+    harness = tmp_path / "logging" / "deploy" / "setup-alpine.sh"
+    harness.parent.mkdir(parents=True)
+    shutil.copy(ROOT / "config.example.toml", harness.parent.parent / "config.example.toml")
+    shebang, rest = SCRIPT.read_text().split("\n", 1)
+    log = 'mktemp() {\n\tprintf \'%s\\n\' "$*" >>"$FAKE_MKTEMP_LOG"\n\tcommand mktemp "$@"\n}\n'
+    harness.write_text(f"{shebang}\n{log}{rest}")
+    return harness
+
+
+def mktemp_calls(tmp_path: Path) -> list[str]:
+    log = tmp_path / "mktemp.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_checks_never_write_the_rendered_config_to_a_temp_file(
+    shell: list[str], tmp_path: Path
+) -> None:
+    conf = hand_edited_conf(shell, tmp_path)
+    env = fake_rc_service(tmp_path, stopped=False)
+    tmpdir = logging_mktemp(tmp_path, env, stub=False)
+    script = mktemp_logging_script(tmp_path)
+    early = check_conf(shell, tmp_path, BASE_ENV, conf, env=env, script=script)
+    assert early.returncode != 0 and "config.toml was edited by hand" in early.stderr
+    env_file = str(write_env(tmp_path, BASE_ENV))
+    dry = run(shell, "--env", env_file, "--dry-run", env=env, script=script)
+    assert "dry-run" in dry.stdout
+    # Only this run's own directory; the renders stayed in python's memory.
+    assert mktemp_calls(tmp_path) == ["-d", "-d"]
+    assert list(tmpdir.iterdir()) == []
+
+
+def test_dry_run_still_says_whether_config_toml_would_change(tmp_path: Path) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(["sh"], tmp_path, BASE_ENV, conf).returncode == 0
+    same = write_conf(["sh"], tmp_path, BASE_ENV, conf, "--dry-run")
+    assert "is unchanged" in same.stdout, same.stderr
+    other = write_conf(["sh"], tmp_path, {**BASE_ENV, "BIND_PORT": "8721"}, conf, "--dry-run")
+    assert "would back up and replace" in other.stdout, other.stderr
+    assert os.listdir(conf.parent) == ["config.toml"]
+
+
+@pytest.mark.parametrize("failing", [None, "install_app", "smoke_test"])
+def test_every_temp_file_is_removed_on_exit(failing: str | None, tmp_path: Path) -> None:
+    env = stateful_rc_service(tmp_path)
+    tmpdir = logging_mktemp(tmp_path, env)
+    extra = {failing: 'step "x"; : >"$RUN_TMP/scratch"; die "boom"'} if failing else {}
+    proc = run_upgrade(tmp_path, env=env, stub_extra=extra)
+    assert proc.returncode == (1 if failing else 0), proc.stderr
+    assert list(tmpdir.iterdir()) == []
+
+
+def test_write_config_failure_leaves_no_temp_file_next_to_config(tmp_path: Path) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(["sh"], tmp_path, BASE_ENV, conf).returncode == 0
+    proc = run_main(
+        tmp_path,
+        {**BASE_ENV, "BIND_PORT": "8721"},
+        conf,
+        {"write_config"},
+        # Fail once the temp file is written, before it is renamed over config.toml.
+        overrides=('mv() { case " $* " in *" $CONF_TMP "*) exit 1 ;; esac; command mv "$@"; }',),
+    )
+    assert proc.returncode != 0
+    assert sorted(p.name for p in conf.parent.iterdir() if not BACKUP_RE.fullmatch(p.name)) == [
+        "config.toml"
+    ]
+
+
+def test_scripts_temp_files_all_live_in_the_run_directory() -> None:
+    text = SCRIPT.read_text()
+    assert text.count("$(mktemp") == 4
+    made = re.findall(r"^\s*(\w+)=\$\(mktemp\b", text, re.M)
+    assert sorted(made) == ["BACKUP_TMP", "CONF_TMP", "RUN_TMP", "WORK_DIR"]
+    exit_body = function_body("on_exit")
+    for var in ("WORK_DIR", "RUN_TMP", "CONF_TMP", "BACKUP_TMP"):
+        assert f'"${var}"' in exit_body
+
+
+def test_reexec_removes_its_temp_directory_before_exec() -> None:
+    body = function_body("reexec_if_updated")
+    assert body.index('rm -rf "$RUN_TMP"') < body.index("exec sh")
+
+
+# ----------------------------------------------------- smoke test: a run after this start
+
+STARTED_AT = "2026-11-26T10:00:00Z"
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def fake_api(last_ok: str | None, token: str) -> tuple[ThreadingHTTPServer, int]:
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            if self.headers.get("Authorization") != f"Bearer {token}":
+                self.send_response(401)
+                self.end_headers()
+                return
+            if self.path.startswith("/api/v1/collectors"):
+                body: object = [
+                    {
+                        "name": "arp_scan",
+                        "last_ok": last_ok,
+                        "last_error": None,
+                        "consecutive_failures": 0,
+                    }
+                ]
+            else:
+                body = []
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, int(server.server_address[1])
+
+
+@pytest.mark.parametrize(
+    ("last_ok", "running", "rc"),
+    [
+        ("2026-11-26T10:00:07Z", True, 0),  # a run after this start
+        ("2026-11-26T09:59:59Z", True, 2),  # persisted from before the start
+        (None, True, 2),
+        ("2026-11-26T09:00:00Z", False, 2),
+    ],
+    ids=["fresh", "stale", "never", "stale-and-down"],
+)
+def test_smoke_test_needs_a_run_newer_than_this_start(
+    last_ok: str | None, running: bool, rc: int, tmp_path: Path
+) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(["sh"], tmp_path, {**BASE_ENV, "API_TOKEN": TOKEN}, conf).returncode == 0
+    server, port = fake_api(last_ok, TOKEN)
+    try:
+        proc = run_upgrade(
+            tmp_path,
+            env=stateful_rc_service(tmp_path, running=running),
+            real=("smoke_test",),
+            # The real stop_service stops it; the stubbed start starts it again, or not.
+            stub_extra={
+                "start_service": 'STOPPED=0; rc-service "$APP" start' if running else "STOPPED=0"
+            },
+            overrides=(
+                "BIND_HOST=127.0.0.1",
+                f"BIND_PORT={port}",
+                f"SVC_STARTED_AT={STARTED_AT}",
+                "SMOKE_RUN_WAIT_S=0",
+                f"LOG_FILE='{tmp_path / 'service.log'}'",
+            ),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert proc.returncode == rc, proc.stdout + proc.stderr
+    assert "API is up" in proc.stdout
+    if rc:
+        assert f"no collector completed a run since the start ({STARTED_AT})" in proc.stdout
+        if running:
+            assert "rc-service reports lanscape-atlas running" in proc.stderr
+        else:
+            assert "lanscape-atlas is NOT running (rc-service status: stopped)" in proc.stderr
+    assert TOKEN not in proc.stdout + proc.stderr
+
+
+def test_start_records_the_time_before_starting() -> None:
+    start = function_body("start_service")
+    assert start.index("SVC_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)") < start.index(
+        'rc-service "$APP" start'
+    )
+
+
+# ----------------------------------------------------------- weekly update-oui job
+
+
+def service_files_env(tmp_path: Path, crond: bool = True, crontab: str | None = None) -> dict:
+    env = stateful_rc_service(tmp_path)
+    rc_update = tmp_path / "fakebin" / "rc-update"
+    listed_services = "lanscape-atlas" + (" crond" if crond else "")
+    rc_update.write_text(
+        "#!/bin/sh\n"
+        f'[ "$1" != show ] || for s in {listed_services}; do echo " $s | default"; done\n'
+    )
+    rc_update.chmod(0o755)
+    tab = tmp_path / "crontab"
+    tab.write_text(
+        crontab
+        if crontab is not None
+        else "0 3 * * 6 run-parts /etc/periodic/weekly\n0 2 * * * run-parts /etc/periodic/daily\n"
+    )
+    return env
+
+
+def run_service_files(
+    tmp_path: Path, env: dict, data: dict[str, str] = BASE_ENV, *args: str
+) -> subprocess.CompletedProcess[str]:
+    src = tmp_path / "src"
+    for rel in ("deploy/openrc/lanscape-atlas", "deploy/logrotate/lanscape-atlas"):
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / rel, src / rel)
+    etc = tmp_path / "etc"
+    return run_main(
+        tmp_path,
+        data,
+        conf_path(tmp_path),
+        {"install_service_files"},
+        *args,
+        env=env,
+        overrides=(
+            f"SRC='{src}'",
+            f"INIT_FILE='{etc}/init.d/lanscape-atlas'",
+            f"LOGROTATE_FILE='{etc}/logrotate.d/lanscape-atlas'",
+            f"PERIODIC_FILE='{etc}/periodic/weekly/lanscape-atlas-update-oui'",
+            f"CRONTAB='{tmp_path / 'crontab'}'",
+        ),
+    )
+
+
+def periodic(tmp_path: Path) -> Path:
+    return tmp_path / "etc" / "periodic" / "weekly" / "lanscape-atlas-update-oui"
+
+
+def test_weekly_update_oui_job_is_installed(tmp_path: Path) -> None:
+    (tmp_path / "etc" / "init.d").mkdir(parents=True)
+    env = service_files_env(tmp_path)
+    proc = run_service_files(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    job = periodic(tmp_path)
+    assert stat.S_IMODE(job.stat().st_mode) == 0o755
+    text = job.read_text()
+    cmd = "su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-oui'"
+    assert f"{cmd} >>/var/log/lanscape-atlas.log 2>&1" in text
+    assert "UPDATE_OUI_WEEKLY=false" in text  # says how to opt out
+    assert subprocess.run(["sh", "-n", str(job)]).returncode == 0
+    assert "weekly update-oui will not run" not in proc.stderr
+
+
+def test_weekly_job_rerun_is_up_to_date(tmp_path: Path) -> None:
+    (tmp_path / "etc" / "init.d").mkdir(parents=True)
+    env = service_files_env(tmp_path)
+    assert run_service_files(tmp_path, env).returncode == 0
+    shutil.rmtree(tmp_path / "harness")
+    proc = run_service_files(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    assert f"{periodic(tmp_path)} up to date" in proc.stdout
+
+
+def test_update_oui_weekly_false_removes_the_job(tmp_path: Path) -> None:
+    (tmp_path / "etc" / "init.d").mkdir(parents=True)
+    env = service_files_env(tmp_path)
+    assert run_service_files(tmp_path, env).returncode == 0
+    assert periodic(tmp_path).exists()
+    shutil.rmtree(tmp_path / "harness")
+    proc = run_service_files(tmp_path, env, {**BASE_ENV, "UPDATE_OUI_WEEKLY": "false"})
+    assert proc.returncode == 0, proc.stderr
+    assert not periodic(tmp_path).exists()
+    assert "UPDATE_OUI_WEEKLY=false" in proc.stdout
+
+
+def test_existing_crontab_line_is_not_doubled(tmp_path: Path) -> None:
+    (tmp_path / "etc" / "init.d").mkdir(parents=True)
+    cmd = "/opt/lanscape-atlas/venv/bin/lanscape-atlas update-oui"
+    line = f"17 4 * * 0 su -s /bin/sh lanscape -c '{cmd}'\n"
+    env = service_files_env(tmp_path, crontab=line)
+    proc = run_service_files(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    assert not periodic(tmp_path).exists()
+    assert "already in" in proc.stdout
+
+
+def test_weekly_job_warns_when_crond_would_not_run_it(tmp_path: Path) -> None:
+    (tmp_path / "etc" / "init.d").mkdir(parents=True)
+    env = service_files_env(tmp_path, crond=False, crontab="")
+    proc = run_service_files(tmp_path, env)
+    assert proc.returncode == 0, proc.stderr
+    assert "crond is not in the default runlevel" in proc.stderr
+    assert "does not run /etc/periodic/weekly" in proc.stderr
+
+
+def test_dry_run_reports_the_weekly_job_without_writing(tmp_path: Path) -> None:
+    env = service_files_env(tmp_path)
+    proc = run_service_files(tmp_path, env, BASE_ENV, "--dry-run")
+    assert "(dry-run) would: install " in proc.stdout
+    assert "lanscape-atlas-update-oui" in proc.stdout
+    assert not (tmp_path / "etc").exists()
+
+
+def test_setup_env_example_documents_update_oui_weekly() -> None:
+    text = (ROOT / "deploy" / "setup.env.example").read_text()
+    assert re.search(r"^# UPDATE_OUI_WEEKLY=true$", text, re.M)
+
+
+def test_readme_documents_the_installer_robustness() -> None:
+    text = " ".join((ROOT / "README.md").read_text().split())
+    section = text[text.index("### Scripted install and upgrade") :]
+    for needle in (
+        "UPDATE_OUI_WEEKLY=false",
+        "/etc/periodic/weekly/lanscape-atlas-update-oui",
+        "/run/lanscape-atlas-setup.lock",
+        "rc-service lanscape-atlas zap",
+        "git remote set-url",
+        "pyvenv.cfg",
+    ):
+        assert needle in section, needle
+
+
+# ------------------------------------------- symbolic links in the service user's directory
+#
+# The service user owns the data directory and can put a link (or a hard link) anywhere
+# in it. The script runs as root, so it must refuse to create, chown, chmod or write
+# through one. The tests run as an ordinary user: SVC_USER and SVC_GROUP are the current
+# user and group, so the chown the script does is one to the owner the file already has.
+
+ME = pwd.getpwuid(os.getuid()).pw_name
+MY_GROUP = grp.getgrgid(os.getgid()).gr_name
+LINK_REFUSED = "it is a symbolic link. The "
+
+
+def data_dirs_run(
+    shell: list[str], tmp_path: Path, data_dir: Path, *args: str, overrides: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """The real make_data_dirs (called by the stubbed ensure_user) against DATA_DIR."""
+    return run_main(
+        tmp_path,
+        BASE_ENV,
+        conf_path(tmp_path),
+        set(),
+        *args,
+        stub_extra={"ensure_user": "make_data_dirs"},
+        overrides=(
+            f"DATA_DIR='{data_dir}'",
+            f"SVC_USER='{ME}'",
+            f"SVC_GROUP='{MY_GROUP}'",
+            *overrides,
+        ),
+        shell=tuple(shell),
+    )
+
+
+def outside_dir(tmp_path: Path) -> Path:
+    """A directory the script must not change (mode 0755, empty)."""
+    target = tmp_path / "outside"
+    target.mkdir()
+    target.chmod(0o755)
+    return target
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_data_dirs_are_created_with_their_modes(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    proc = data_dirs_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data / "floorplan").stat().st_mode) == 0o750
+    data.chmod(0o755)
+    (data / "floorplan").chmod(0o777)
+    shutil.rmtree(tmp_path / "harness")
+    assert data_dirs_run(shell, tmp_path, data).returncode == 0  # an existing one is fixed
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data / "floorplan").stat().st_mode) == 0o750
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("which", ["floorplan", "data_dir"])
+def test_a_linked_data_dir_is_refused(shell: list[str], which: str, tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    if which == "floorplan":
+        data.mkdir()
+        (data / "floorplan").symlink_to(target)
+        link = data / "floorplan"
+    else:
+        data.symlink_to(target)
+        link = data
+    proc = data_dirs_run(shell, tmp_path, data)
+    assert proc.returncode == 1
+    assert f"refusing to create or chown {link}: {LINK_REFUSED}" in proc.stderr
+    assert link.is_symlink()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_dry_run_reports_a_linked_floorplan_dir(shell: list[str], tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    data.mkdir()
+    (data / "floorplan").symlink_to(target)
+    proc = data_dirs_run(shell, tmp_path, data, "--dry-run")
+    assert proc.returncode == 1
+    assert f"PROBLEM: refusing to create or chown {data / 'floorplan'}" in proc.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("kind", ["symlink", "file"])
+def test_a_link_planted_after_the_check_is_not_followed(
+    shell: list[str], kind: str, tmp_path: Path
+) -> None:
+    # refuse_link is switched off, as if the link appeared just after it looked.
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    data.mkdir()
+    if kind == "symlink":
+        (data / "floorplan").symlink_to(target)
+    else:
+        (data / "floorplan").write_text("not a directory\n")
+    proc = data_dirs_run(shell, tmp_path, data, overrides=("refuse_link() { :; }",))
+    assert proc.returncode == 1
+    assert f"ERROR: refusing to chown {data / 'floorplan'}" in proc.stderr
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("hook", ["--write-config", "--check-config"])
+def test_a_linked_config_toml_is_refused(shell: list[str], hook: str, tmp_path: Path) -> None:
+    target = tmp_path / "outside.toml"
+    target.write_text("keep = true\n")
+    target.chmod(0o644)
+    conf = conf_path(tmp_path)
+    conf.symlink_to(target)
+    env_file = write_env(tmp_path, BASE_ENV)
+    proc = run(shell, "--env", str(env_file), hook, str(conf))
+    assert proc.returncode == 1
+    assert f"refusing to read or replace {conf}: {LINK_REFUSED}" in proc.stderr
+    assert conf.is_symlink()
+    assert target.read_text() == "keep = true\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    dry = run(shell, "--env", str(env_file), hook, str(conf), "--dry-run")
+    assert dry.returncode == 1
+    assert f"PROBLEM: refusing to read or replace {conf}" in dry.stderr
+
+
+def swapping_script(tmp_path: Path, pattern: str, how: str) -> Path:
+    """The script with a mktemp *function* that replaces the temp file whose name matches
+    PATTERN by a link to $SWAP_TARGET, as the service user could right after mktemp.
+
+    A function, not a stub on PATH: busybox ash runs its mktemp and ln applets without
+    a PATH lookup.
+    """
+    ln = "ln -s" if how == "symlink" else "ln"
+    harness = tmp_path / "swapping" / "deploy" / "setup-alpine.sh"
+    harness.parent.mkdir(parents=True)
+    shutil.copy(ROOT / "config.example.toml", harness.parent.parent / "config.example.toml")
+    shebang, rest = SCRIPT.read_text().split("\n", 1)
+    swap = (
+        "mktemp() {\n"
+        '\t_made=$(command mktemp "$@") || return 1\n'
+        f'\tcase $_made in */{pattern}*) rm -f "$_made"; {ln} "$SWAP_TARGET" "$_made" ;; esac\n'
+        "\tprintf '%s\\n' \"$_made\"\n"
+        "}\n"
+    )
+    harness.write_text(f"{shebang}\n{swap}{rest}")
+    return harness
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("how", ["symlink", "hardlink"])
+@pytest.mark.parametrize("which", [".config.", ".config-backup."])
+def test_a_swapped_temp_file_is_not_written_through(
+    shell: list[str], how: str, which: str, tmp_path: Path
+) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(shell, tmp_path, BASE_ENV, conf).returncode == 0
+    before = conf.read_bytes()
+    target = tmp_path / "victim"
+    target.write_text("victim\n")
+    target.chmod(0o644)
+    env = {**os.environ, "SWAP_TARGET": str(target)}
+    script = swapping_script(tmp_path, which, how)
+    env_file = write_env(tmp_path, {**BASE_ENV, "RETENTION_DAYS": "7"})  # a change: backup
+    proc = run(shell, "--env", str(env_file), "--write-config", str(conf), env=env, script=script)
+    assert proc.returncode == 1
+    assert "ERROR: refusing to write" in proc.stderr or "ERROR: refusing to back up" in proc.stderr
+    assert target.read_text() == "victim\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert conf.read_bytes() == before and not conf.is_symlink()
+    assert backups(conf) == []
+    left = [p.name for p in conf.parent.iterdir() if p.name.startswith(".config")]
+    assert left == []  # the EXIT trap removed the swapped name (not its target)
+
+
+BACKUP_STUBS = {"install_app": "CODE_INSTALLED=1; NEW_COMMIT=abc1234; OLD_COMMIT=0ld0000"}
+
+
+def backup_run(
+    shell: list[str], tmp_path: Path, data: Path, overrides: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """The real backup_db; as_service_user runs its command here, and says so."""
+    as_user = 'as_service_user() { echo "AS $SVC_USER" >&2; sh -c "$1"; }'
+    return run_main(
+        tmp_path,
+        BASE_ENV,
+        conf_path(tmp_path),
+        {"backup_db"},
+        stub_extra=BACKUP_STUBS,
+        overrides=(
+            f"DATA_DIR='{data}'",
+            f"BACKUP_DIR='{data}/backups'",
+            f"SVC_USER='{ME}'",
+            as_user,
+            *overrides,
+        ),
+        shell=tuple(shell),
+    )
+
+
+def make_db(data: Path) -> None:
+    data.mkdir(exist_ok=True)
+    con = sqlite3.connect(data / "atlas.db")
+    con.execute("CREATE TABLE t (x)")
+    con.execute("INSERT INTO t VALUES (42)")
+    con.commit()
+    con.close()
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_database_backup_is_made_by_the_service_user(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    make_db(data)
+    old = data / "backups"
+    old.mkdir()
+    for i in range(4):  # older backups: two of them go (3 kept with the new one)
+        f = old / f"atlas-2020010{i}-000000-aaaaaaa.db"
+        f.write_text("")
+        os.utime(f, (1_600_000_000 + i, 1_600_000_000 + i))
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert f"AS {ME}" in proc.stderr
+    made = [p for p in old.iterdir() if p.name.endswith("-0ld0000.db")]
+    assert len(made) == 1 and f"backed up to {made[0]}" in proc.stdout
+    assert stat.S_IMODE(made[0].stat().st_mode) == 0o600
+    assert sqlite3.connect(made[0]).execute("SELECT x FROM t").fetchone() == (42,)
+    assert sorted(p.name for p in old.iterdir()) == sorted(
+        [made[0].name, "atlas-20200102-000000-aaaaaaa.db", "atlas-20200103-000000-aaaaaaa.db"]
+    )
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_database_backup_creates_its_directory_0700(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    make_db(data)
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE((data / "backups").stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_linked_backup_dir_is_refused(shell: list[str], tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    make_db(data)
+    (data / "backups").symlink_to(target)
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 1
+    link = data / "backups"
+    assert f"refusing to write database backups into {link}: {LINK_REFUSED}" in proc.stderr
+    assert "AS " not in proc.stderr
+    assert list(target.iterdir()) == []
+    assert STARTED_AGAIN in proc.stderr or NOT_STARTED in proc.stderr  # the trap restarts it
+
+
+def test_root_never_changes_ownership_by_name_in_the_data_dir() -> None:
+    text = SCRIPT.read_text()
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert not re.search(r"\bchown\s+[\"'$-]", code)  # only os.fchown, on an O_NOFOLLOW descriptor
+    assert not re.search(r"install -d[^\n]*-o ", code)
+    assert "cp -p" not in code
+    backup = function_body("backup_db")
+    assert "as_service_user" in backup and "chmod 0600" not in backup
+
+
+def test_readme_documents_the_symlink_rules_and_the_capabilities() -> None:
+    text = " ".join((ROOT / "README.md").read_text().split())
+    section = text[text.index("## Remote access and security") :]
+    for needle in ("symbolic link", "file capabilities", "not tested on Alpine"):
+        assert needle in section, needle

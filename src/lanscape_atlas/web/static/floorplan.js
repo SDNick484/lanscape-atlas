@@ -1010,15 +1010,84 @@
     });
   }
 
+  // The page's own embedded data, fetched again: the current shapes, their batch and
+  // every device's last_batch. Resolves null when it cannot be read.
+  function fetchCurrent() {
+    return fetch(ROOT + "/floorplan", { credentials: "same-origin", headers: { Accept: "text/html" } })
+      .then(function (r) { return r.ok ? r.text() : null; })
+      .then(function (html) {
+        var el = html && new DOMParser().parseFromString(html, "text/html").getElementById("fp-data");
+        return el ? JSON.parse(el.textContent || "{}") : null;
+      })
+      .catch(function () { return null; });
+  }
+
+  // The conflict banner: a message, an optional list, and one button per choice. A 409
+  // writes nothing and keeps every pending edit on the page until the user picks.
+  function showConflict(message, items, choices) {
+    var box = document.getElementById("fp-conflict");
+    var text = document.getElementById("fp-conflict-text");
+    var list = document.getElementById("fp-conflict-list");
+    var btns = document.getElementById("fp-conflict-actions");
+    if (!box || !text || !list || !btns) {
+      setStatus(message, true);
+      return;
+    }
+    text.textContent = message;
+    list.textContent = "";
+    (items || []).forEach(function (t) {
+      var li = document.createElement("li");
+      li.textContent = t;
+      list.appendChild(li);
+    });
+    list.hidden = !(items && items.length);
+    btns.textContent = "";
+    choices.forEach(function (c) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = c.label;
+      if (c.secondary) { b.className = "secondary"; }
+      b.addEventListener("click", c.run);
+      btns.appendChild(b);
+    });
+    box.hidden = false;
+    setStatus("");
+    var first = btns.querySelector("button");
+    if (first) { first.focus({ preventScroll: true }); }
+  }
+
+  function hideConflict() {
+    var box = document.getElementById("fp-conflict");
+    if (box) { box.hidden = true; }
+  }
+
+  function reloadDiscarding() {
+    dirty = {};
+    if (draw) { draw.discard(); }
+    window.location.reload();
+  }
+
+  function keepEditing() {
+    hideConflict();
+    refreshDirty();
+    setStatus("Your changes are still here. Save again when ready.");
+  }
+
   // One POST /floorplan/shapes. A 409 means another tab (or an undo) changed the
-  // drawing: the server wrote nothing, and the page reloads with the message.
+  // drawing: the server wrote nothing and the page stays as it is. New shapes are
+  // re-based onto the current drawing; edits to a shape that changed or vanished are
+  // listed and dropped only when the user agrees.
   function saveShapes() {
     saveBtn.disabled = true;
     setStatus("Saving…");
     post("/floorplan/shapes", draw.payload()).then(function (res) {
-      if (res.r.ok || res.r.status === 409) {
+      if (res.r.ok) {
         draw.discard();
-        window.location.assign(ROOT + "/floorplan?" + (res.r.ok ? "saved=shapes&draw=1" : "stale=shapes"));
+        window.location.assign(ROOT + "/floorplan?saved=shapes&draw=1");
+        return;
+      }
+      if (res.r.status === 409) {
+        shapesConflict(res.data && res.data.message);
         return;
       }
       var detail = res.data && res.data.detail;
@@ -1028,6 +1097,69 @@
       setStatus("Network error: your drawing is still here.", true);
       saveBtn.disabled = false;
     });
+  }
+
+  function shapesConflict(message) {
+    var msg = message || "The drawing changed since this page loaded.";
+    var reload = { label: "Reload and discard", secondary: true, run: reloadDiscarding };
+    var keep = { label: "Keep editing", secondary: true, run: keepEditing };
+    fetchCurrent().then(function (cur) {
+      if (!cur || !Array.isArray(cur.shapes)) {
+        showConflict(msg + " The current drawing could not be fetched; your drawing is still here.", [], [reload, keep]);
+        return;
+      }
+      var found = draw.conflicts(cur.shapes);
+      if (!found.length) {
+        draw.rebase(cur.shapes, cur.shapes_batch || 0, false);
+        showConflict(msg + " Your new and edited shapes were kept on top of the current drawing. Check it, then save again.", [], [
+          { label: "Keep editing", run: keepEditing }, reload,
+        ]);
+        return;
+      }
+      showConflict(
+        msg + " These edits are to shapes that changed or were removed:",
+        found.map(function (c) { return c.kind + " " + (c.removed ? "was removed" : "was changed") + " elsewhere"; }),
+        [
+          {
+            label: "Drop those edits, keep the rest",
+            run: function () {
+              draw.rebase(cur.shapes, cur.shapes_batch || 0, true);
+              keepEditing();
+            },
+          },
+          reload,
+          keep,
+        ]
+      );
+    });
+  }
+
+  // A 409 on placements: the other change is not overwritten unless the user keeps
+  // editing, which re-bases the pending devices on what the server has now.
+  function placementsConflict(data) {
+    var msg = (data && data.message) || "A device changed since this page loaded.";
+    showConflict(msg, [], [
+      {
+        label: "Keep editing",
+        secondary: true,
+        run: function () {
+          fetchCurrent().then(function (cur) {
+            if (!cur) {
+              keepEditing();
+              setStatus("Could not fetch the current state; saving again will be refused.", true);
+              return;
+            }
+            [].concat(cur.placed || [], cur.roaming || [], cur.unplaced || []).forEach(function (d) {
+              if (dirty[d.device_id] && devices[d.device_id]) { devices[d.device_id].last_batch = d.last_batch || 0; }
+            });
+            hideConflict();
+            refreshDirty();
+            setStatus("Your placements are kept; saving now replaces the other change to those devices.");
+          });
+        },
+      },
+      { label: "Reload and discard", secondary: true, run: reloadDiscarding },
+    ]);
   }
 
   function save() {
@@ -1054,9 +1186,13 @@
     }).then(function (r) {
       return r.json().then(function (data) { return { r: r, data: data }; }, function () { return { r: r, data: null }; });
     }).then(function (res) {
-      if (res.r.ok || res.r.status === 409) {
+      if (res.r.ok) {
         dirty = {};
-        window.location.assign(ROOT + "/floorplan?" + (res.r.ok ? "saved=placements" : "stale=1"));
+        window.location.assign(ROOT + "/floorplan?saved=placements");
+        return;
+      }
+      if (res.r.status === 409) {
+        placementsConflict(res.data);
         return;
       }
       var detail = res.data && res.data.detail;
@@ -1139,13 +1275,7 @@
         });
       }
       saveBtn.addEventListener("click", save);
-      discardBtn.addEventListener("click", function () {
-        dirty = {};
-        if (draw) {
-          draw.discard();
-        }
-        window.location.reload();
-      });
+      discardBtn.addEventListener("click", reloadDiscarding);
       if (drawBtn) {
         drawBtn.addEventListener("click", function () { setMode(mode === "draw" ? "place" : "draw"); });
       }

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import check_leaks
 from check_leaks import VENDORED_UUID_ALLOW, find_leaks, load_denylist, main
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_leaks.py"
@@ -81,14 +82,37 @@ def test_cidr_private_ip_flagged():
     assert find_leaks("10.0.0.1/24", "x.py", set())
 
 
-def test_non_rfc1918_clean():
-    for ip in ("0.0.0.0", "255.255.255.0", "127.0.0.1", "169.254.1.1"):
+def test_loopback_unspecified_multicast_broadcast_ipv4_clean():
+    for ip in ("0.0.0.0", "127.0.0.1", "127.8.9.10", "224.0.0.251", "239.255.255.250"):
         assert find_leaks(f"ip {ip}", "x.py", set()) == [], ip
+    assert find_leaks("to 255.255.255.255", "x.py", set()) == []
 
 
 def test_rfc1918_boundaries():
     assert find_leaks("172.16.0.1 172.31.255.1", "x.py", set())
-    assert find_leaks("172.15.0.1 172.32.0.1", "x.py", set()) == []
+    assert find_leaks("172.15.0.1 172.32.0.1", "x.py", set())
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "100.64.0.1",  # CGNAT / Tailscale, the case issue #48 names
+        "100.127.255.254",
+        "100.63.255.255",  # just below CGNAT, still not documentation
+        "169.254.1.1",  # link-local
+        "8.8.8.8",  # public
+        "198.51.99.1",  # next to a documentation /24
+        "192.0.3.1",
+        "255.255.255.0",  # a netmask looks like an address; allow-list it if it ever appears
+    ],
+)
+def test_non_documentation_ipv4_flagged(ip):
+    assert find_leaks(f"ip {ip}", "x.py", set())
+
+
+def test_documentation_ipv4_boundaries():
+    assert find_leaks("192.0.2.0 192.0.2.255 198.51.100.1 203.0.113.254", "x.py", set()) == []
+    assert find_leaks("203.0.112.255", "x.py", set())
 
 
 def test_missing_explicit_denylist_fails_closed(tmp_path, monkeypatch, capsys):
@@ -326,3 +350,82 @@ def test_near_doc_uuid_flagged():
 
 def test_uuid_flagged_in_ip_exempt_path():
     assert find_leaks(REAL_UUID, "docs/superpowers/specs/x.md", set())
+
+
+# ---- Issue #48: IPv6 is checked, and an unreadable tracked file fails ---------------------
+
+
+@pytest.mark.parametrize(
+    "text", ["2001:db8::1", "2001:DB8:ffff::1", "2001:db8:0:0:0:0:0:1", "[2001:db8::1]:443"]
+)
+def test_ipv6_documentation_range_allowed(text):
+    assert find_leaks(f"addr {text}", "x.py", set()) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "2001:db9::1",  # just outside 2001:db8::/32
+        "2001:4860:4860::8888",  # public
+        "2600:1:2:3:4:5:6:7",  # public, full form with no ::
+        "fd00::1",  # unique local
+        "ip6:2001:4860:4860::8888",
+        "addr 2001:4860:4860::8888.",  # sentence full stop
+        "fe80::a2b3:c4ff:fed5:e6f7",  # link-local with an EUI-64 interface ID: a MAC
+    ],
+)
+def test_non_documentation_ipv6_flagged(text):
+    assert find_leaks(text, "x.py", set()), text
+
+
+@pytest.mark.parametrize("text", ["::1", "::", "[::1]:8080", "fe80::1"])
+def test_loopback_unspecified_and_plain_link_local_ipv6_clean(text):
+    assert find_leaks(f"addr {text}", "x.py", set()) == [], text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ".fp-item .fp-name::after",  # CSS pseudo-element
+        "ancestor::div[contains(@class,'x')]",  # XPath axis
+        "filterwarnings('ignore::PIL.Image.Warning')",
+        "uuid:abc::upnp:rootdevice",
+    ],
+)
+def test_word_adjacent_double_colon_is_not_ipv6(text):
+    assert find_leaks(text, "x.py", set()) == [], text
+
+
+def test_ipv6_findings_name_the_class():
+    (leak,) = find_leaks("addr 2001:4860:4860::8888", "x.py", set())
+    assert "IPv6" in leak and leak.startswith("x.py:1:")
+
+
+def test_ip_false_positive_allow_list_is_path_scoped(monkeypatch):
+    monkeypatch.setattr(
+        check_leaks,
+        "IP_FALSE_POSITIVES",
+        (("docs/*.md", "8.8.8.8", "example in a doc"), ("x.py", "2001:4860:4860::8888", "t")),
+    )
+    assert find_leaks("v 8.8.8.8", "docs/a.md", set()) == []
+    assert find_leaks("v 8.8.8.8", "src/a.py", set())
+    assert find_leaks("v 8.8.4.4", "docs/a.md", set())
+    assert find_leaks("addr 2001:4860:4860::8888", "x.py", set()) == []
+    assert find_leaks("addr 2001:4860:4860::8888", "y.py", set())
+
+
+def test_unreadable_explicit_path_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LANSCAPE_DENYLIST", raising=False)
+    monkeypatch.delenv("LANSCAPE_LEAK_DENYLIST", raising=False)
+    assert main([str(tmp_path / "nope.txt")]) == 1
+    assert "cannot read file" in capsys.readouterr().out
+
+
+def test_tracked_but_deleted_file_fails(tmp_git_repo, git_add, run_check_leaks, isolated_env):
+    (tmp_git_repo / "gone.txt").write_text("clean\n")
+    git_add(tmp_git_repo, "gone.txt")
+    (tmp_git_repo / "gone.txt").unlink()
+    result = run_check_leaks(tmp_git_repo)
+    assert result.returncode != 0
+    assert "gone.txt: cannot read file" in result.stdout
