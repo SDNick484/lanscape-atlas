@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tomllib
 from collections.abc import Mapping
@@ -9,7 +10,36 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
+
+log = logging.getLogger(__name__)
+
 DEFAULT_DATA_DIR = "/var/lib/lanscape-atlas"
+
+# Keys load_settings reads. Any other key is ignored with a startup warning, so a typo does
+# not quietly fall back to the default.
+_TOP_KEYS = frozenset(
+    {
+        "api_token",
+        "data_dir",
+        "bind_host",
+        "bind_port",
+        "scan_interface",
+        "observation_retention_days",
+        "ip_match_window_min",
+        "allowed_hosts",
+        "router",
+        "home_assistant",
+        "bluetooth",
+        "collectors",
+    }
+)
+_TABLE_KEYS: dict[str, frozenset[str]] = {
+    "router": frozenset({"host", "username", "password", "use_ssl"}),
+    "home_assistant": frozenset({"url", "token", "verify_tls"}),
+    "bluetooth": frozenset({"retention_days", "flush_s", "snapshot_s", "candidate_min_rssi"}),
+}
+_COLLECTOR_KEYS = frozenset({"enabled", "interval_s", "cron", "timeout_s"})
 
 
 @dataclass(frozen=True)
@@ -44,7 +74,7 @@ class CollectorSettings:
     timeout_s: float
 
 
-def _default_collectors() -> dict[str, CollectorSettings]:
+def default_collectors() -> dict[str, CollectorSettings]:
     return {
         "asusrouter": CollectorSettings(False, 120, None, 30),
         "arp": CollectorSettings(True, 300, None, 60),
@@ -66,7 +96,7 @@ class Settings:
     router: RouterSettings | None = None
     home_assistant: HomeAssistantSettings | None = None
     bluetooth: BluetoothSettings = field(default_factory=BluetoothSettings)
-    collectors: dict[str, CollectorSettings] = field(default_factory=_default_collectors)
+    collectors: dict[str, CollectorSettings] = field(default_factory=default_collectors)
     # Extra Host header values the whole app accepts, with or without api_token
     # (DNS-rebinding protection); "name:*" allows any port, "*" turns the check off.
     allowed_hosts: tuple[str, ...] = ()
@@ -93,6 +123,43 @@ def _table(d: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return v
 
 
+def _int_in(
+    d: Mapping[str, Any], key: str, default: int, lo: int, hi: int | None = None, where: str = ""
+) -> int:
+    v: int = _get(d, key, int, default, where)
+    if v < lo or (hi is not None and v > hi):
+        bounds = f"between {lo} and {hi}" if hi is not None else f"at least {lo}"
+        raise ValueError(f"config key '{where}{key}' must be {bounds}, got {v}")
+    return v
+
+
+def _cron_expr(expr: str, key: str) -> str:
+    if not expr:
+        raise ValueError(f"config key '{key}' must be a cron expression such as '17 3 * * *'")
+    try:
+        CronTrigger.from_crontab(expr)
+    except ValueError as e:
+        raise ValueError(f"config key '{key}' is not a valid cron expression: {e}") from e
+    return expr
+
+
+def _warn_unknown_keys(raw: Mapping[str, Any]) -> None:
+    for key, val in raw.items():
+        if key not in _TOP_KEYS:
+            log.warning("config: unknown top-level key %r is ignored", key)
+        elif key in _TABLE_KEYS and isinstance(val, Mapping):
+            _warn_unknown_in(key, val, _TABLE_KEYS[key])
+    for name, ct in _table(raw, "collectors").items():
+        if isinstance(ct, Mapping):
+            _warn_unknown_in(f"collectors.{name}", ct, _COLLECTOR_KEYS)
+
+
+def _warn_unknown_in(table: str, d: Mapping[str, Any], known: frozenset[str]) -> None:
+    for key in d:
+        if key not in known:
+            log.warning("config: unknown key %r in [%s] is ignored", key, table)
+
+
 def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ) -> Settings:
     default_dir = Path(env.get("LANSCAPE_DATA_DIR") or DEFAULT_DATA_DIR)
     cfg_path = path if path is not None else default_dir / "config.toml"
@@ -100,6 +167,7 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
     if cfg_path.is_file():
         with cfg_path.open("rb") as f:
             raw = tomllib.load(f)
+    _warn_unknown_keys(raw)
 
     token = env.get("LANSCAPE_API_TOKEN", _get(raw, "api_token", str, ""))
     router: RouterSettings | None = None
@@ -151,7 +219,7 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
         if val < 1:
             raise ValueError(f"config key 'bluetooth.{key}' must be a positive integer, got {val}")
 
-    collectors = _default_collectors()
+    collectors = default_collectors()
     for name, ct in _table(raw, "collectors").items():
         if name not in collectors:
             raise ValueError(f"unknown collector {name!r} in [collectors]")
@@ -159,13 +227,28 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
             raise ValueError(f"config key 'collectors.{name}' must be a table")
         base = collectors[name]
         w = f"collectors.{name}."
-        interval = _get(ct, "interval_s", int, base.interval_s, w)
-        cron = _get(ct, "cron", str, base.cron, w)
+        if "interval_s" in ct and "cron" in ct:
+            raise ValueError(
+                f"config keys 'collectors.{name}.interval_s' and 'collectors.{name}.cron' are "
+                "both set; use one (setting one clears the collector's default for the other)"
+            )
+        interval, cron = base.interval_s, base.cron
+        if "interval_s" in ct:
+            interval = _int_in(ct, "interval_s", 1, 1, where=w)
+            cron = None
+        if "cron" in ct:
+            cron = _cron_expr(_get(ct, "cron", str, "", w), f"collectors.{name}.cron")
+            interval = None
+        timeout = float(_get(ct, "timeout_s", (int, float), base.timeout_s, w))
+        if timeout <= 0:
+            raise ValueError(
+                f"config key 'collectors.{name}.timeout_s' must be greater than 0, got {timeout}"
+            )
         collectors[name] = CollectorSettings(
             enabled=_get(ct, "enabled", bool, base.enabled, w),
             interval_s=interval,
             cron=cron,
-            timeout_s=float(_get(ct, "timeout_s", (int, float), base.timeout_s, w)),
+            timeout_s=timeout,
         )
     # asusrouter has nothing to talk to without a [router] section.
     if router is None:
@@ -181,11 +264,11 @@ def load_settings(path: Path | None = None, env: Mapping[str, str] = os.environ)
     return Settings(
         data_dir=Path(_get(raw, "data_dir", str, str(default_dir))),
         bind_host=_get(raw, "bind_host", str, "127.0.0.1"),
-        bind_port=_get(raw, "bind_port", int, 8720),
+        bind_port=_int_in(raw, "bind_port", 8720, 1, 65535),
         scan_interface=_get(raw, "scan_interface", str, "eth0"),
         api_token=token or None,
-        observation_retention_days=_get(raw, "observation_retention_days", int, 3),
-        ip_match_window_min=_get(raw, "ip_match_window_min", int, 10),
+        observation_retention_days=_int_in(raw, "observation_retention_days", 3, 1),
+        ip_match_window_min=_int_in(raw, "ip_match_window_min", 10, 1),
         router=router,
         home_assistant=home_assistant,
         bluetooth=bluetooth,

@@ -598,6 +598,19 @@ Each collector has its own table, `[collectors.<name>]`, with `enabled`,
 | `ssdp` | every 600 s |
 | `nmap_light` | cron `17 3 * * *` (nightly) |
 
+Setting `interval_s` on a collector clears its default `cron`, and setting `cron`
+clears its default `interval_s`; setting both in one table is an error. A `cron`
+string is checked when the file loads (five fields, e.g. `"17 3 * * *"`), so a bad
+one stops startup before any collector runs.
+
+Values are checked when the file loads and an out-of-range one stops startup with a
+message naming the key: `bind_port` 1 to 65535; `observation_retention_days` and
+`ip_match_window_min` at least 1; `interval_s` at least 1; `timeout_s` above 0.
+
+A key that is not recognised (a typo, or one from an older release) does not stop
+startup. Atlas logs one warning per key naming the key and its table, e.g.
+`unknown key 'usrname' in [router] is ignored`, and then ignores it.
+
 Secrets can come from the environment instead of the file:
 `LANSCAPE_ROUTER_PASSWORD`, `LANSCAPE_API_TOKEN`. `LANSCAPE_DATA_DIR` moves the data
 directory.
