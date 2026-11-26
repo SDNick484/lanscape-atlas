@@ -433,16 +433,26 @@ only, so other machines cannot open the UI. Set `bind_host` in
 rc-service lanscape-atlas restart
 ```
 
-The UI is then at `http://<bind_host>:8720`. Without an `api_token`, the app only
-answers to `localhost`, `bind_host` and the names in `allowed_hosts` (see below):
-with `0.0.0.0`, or if you browse by a DNS name, add the address or name you type in
-the browser to `allowed_hosts` **with a port pattern**, e.g.
+The UI is then at `http://<bind_host>:8720`. The app only answers to `localhost`,
+`bind_host` and the names in `allowed_hosts` (see below), with or without an
+`api_token`: with `0.0.0.0`, or if you browse by a DNS name, add the address or name
+you type in the browser to `allowed_hosts` **with a port pattern**, e.g.
 `allowed_hosts = ["192.0.2.50:*", "atlas.example.com"]` (a bare entry matches only a
-Host header without a port, which is what a reverse proxy on 80/443 sends).
+Host header without a port, which is what a reverse proxy on 80/443 sends). A request
+for any other name gets `421` and a message naming the refused Host.
 
-Token mode (`api_token` set) turns the Host check off and assumes an authenticating
-proxy (e.g. Cloudflare Access) protects the pages and `/topology`; don't expose
-token mode without one.
+An `api_token` protects only `/api` and `/mcp`. The pages and `/topology` stay open
+to anyone who can reach the port, so put an authenticating proxy (e.g. Cloudflare
+Access) in front before exposing the app beyond a network you trust, and add the
+name the proxy forwards to `allowed_hosts`.
+
+**Upgrading.** Earlier versions switched the Host check off whenever an `api_token`
+was set, which includes every install made by `deploy/setup-alpine.sh`. The check
+now stays on. If you reach such an install by a DNS name, through a reverse proxy, or
+by an address other than `bind_host` (for example with `bind_host = "0.0.0.0"`), set
+`allowed_hosts` in `config.toml` (`ALLOWED_HOSTS` in `setup.env` for the installer)
+**before** upgrading; otherwise the app answers `421` until you do. The refused name
+is in the `421` response and, once per name, in the log.
 
 `arp-scan` and `nmap` need raw sockets. The init script grants
 `cap_net_raw` and `cap_net_admin` to the unprivileged `lanscape` user through
@@ -548,7 +558,7 @@ point.
 | `observation_retention_days` | `30` | How long raw observations are kept |
 | `ip_match_window_min` | `10` | Window for correlating an IP-only sighting to a known device |
 | `api_token` | unset | Static bearer token required for `/api` and `/mcp` |
-| `allowed_hosts` | `[]` | Extra `Host` headers the app accepts when no `api_token` is set |
+| `allowed_hosts` | `[]` | Extra `Host` headers the app accepts (with or without `api_token`) |
 
 `[router]` configures the ASUS collector; remove the table or leave `host` empty to
 disable it.
@@ -577,23 +587,28 @@ directory.
 
 ### `allowed_hosts`
 
-When no `api_token` is set, the whole app (pages, `/api`, `/topology`, `/mcp`) only
-accepts requests whose `Host` header is `localhost`, `127.0.0.1`, the configured
-`bind_host` (each with or without a port), or an entry in `allowed_hosts`; anything
-else gets `421`. This blocks DNS-rebinding attacks. If you bind to `0.0.0.0` and
-browse to the container by its LAN address or name, list that address or name here.
-Matching is exact:
+The whole app (pages, `/api`, `/topology`, `/mcp`) only accepts requests whose
+`Host` header is `localhost`, `127.0.0.1`, the configured `bind_host` (each with or
+without a port), or an entry in `allowed_hosts`; anything else gets `421` with a
+plain-text message naming the refused Host. This blocks DNS-rebinding attacks. It
+applies with or without an `api_token`, because the token guards only `/api` and
+`/mcp`. If you bind to `0.0.0.0` and browse to the container by its LAN address or
+name, or publish the app through a reverse proxy, list that address or name here.
+Each refused name is logged once as a warning. Matching is exact:
 
 - A bare entry such as `"atlas.example.com"` matches only a `Host` header **without**
   a port.
 - `"atlas.example.com:*"` matches that name on **any** port.
-- `["*"]` disables the check; avoid it unless something else protects the app.
+- `["*"]` disables the check, and is the only way to do so; avoid it unless
+  something else protects the app.
 
-In every mode, a `POST`, `PUT`, `PATCH` or `DELETE` to `/api/*` or `/topology/*` that
-carries an `Origin` header for a different host than the request's `Host` is refused
-with `403`, so other web pages cannot trigger undo or scans from your browser. A
+In every mode, a `POST`, `PUT`, `PATCH` or `DELETE` to any path except `/mcp` that
+carries an `Origin` header for a different host or port than the request's `Host` is
+refused with `403`, so other web pages (including another web app on the same
+machine) cannot submit forms, undo changes or start scans from your browser. A
 reverse proxy must therefore pass the original `Host` header through. Clients that
-send no `Origin` (curl, MCP clients) are unaffected.
+send no `Origin` (curl, API clients) are unaffected. `/mcp` instead accepts an
+`Origin` only if it is `http://` or `https://` plus an allowed host.
 
 ## Remote access and security
 
@@ -604,7 +619,7 @@ lanscape-atlas has no accounts of its own. Choose one of these setups:
    example at `https://atlas.example.com`. Set `api_token` so `/api` and `/mcp`
    additionally require `Authorization: Bearer <token>`; automation and MCP clients
    usually cannot complete an interactive proxy login. Add the public hostname to
-   `allowed_hosts` if you run without a token.
+   `allowed_hosts`, with or without a token.
 2. **LAN-only, no auth.** Bind to a LAN interface and set nothing else. This works,
    but **anyone who can reach the port can read and write your inventory**, including
    renaming devices, changing trust, deleting links and triggering scans. Use it only

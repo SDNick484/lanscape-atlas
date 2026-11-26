@@ -284,7 +284,9 @@ def test_topology_data_shape(client: TestClient) -> None:
 def test_topology_data_needs_no_api_token(
     tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
 ) -> None:
-    settings = Settings(data_dir=tmp_path, api_token="test-api-token-123")
+    settings = Settings(
+        data_dir=tmp_path, api_token="test-api-token-123", allowed_hosts=("testserver",)
+    )
     app = create_app(settings, conn=db, clock=clock, start_background=False)
     with TestClient(app) as c:
         assert c.get("/api/v1/topology").status_code == 401
@@ -635,7 +637,9 @@ def test_search_is_same_origin_page_route(
     tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
 ) -> None:
     """Like ``/topology/data``: GET, no CSRF token, no bearer token needed."""
-    settings = Settings(data_dir=tmp_path, api_token="test-api-token-123")
+    settings = Settings(
+        data_dir=tmp_path, api_token="test-api-token-123", allowed_hosts=("testserver",)
+    )
     app = create_app(settings, conn=db, clock=clock, start_background=False)
     with TestClient(app) as c:
         assert c.get("/api/v1/devices", params={"q": "x"}).status_code == 401

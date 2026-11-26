@@ -448,15 +448,18 @@ def test_http_lifespan_restarts(http_app: FastAPI) -> None:
 
 
 def test_http_requires_token(tmp_path: Path, db: sqlite3.Connection, clock: FixedClock) -> None:
-    app = _make_app(tmp_path, db, clock, token=TOKEN)
+    app = _make_app(tmp_path, db, clock, token=TOKEN, allowed_hosts=("testserver",))
     good = f"Bearer {TOKEN}"
     with TestClient(app) as c:
         for path in ("/mcp", "/mcp/"):
             r = _post(c, path, _init())
             assert r.status_code == 401 and TOKEN not in r.text
             assert _post(c, path, _init(), Authorization="Bearer nope").status_code == 401
-        # With the token the Host check is off (the token already defeats DNS rebinding).
         _round_trip(c, "/mcp", Authorization=good)
+        # The token does not switch the Host/Origin checks off.
+        assert _post(c, "/mcp", _init(), Authorization=good, Host="evil.example").status_code == 421
+        r = _post(c, "/mcp", _init(), Authorization=good, Origin="http://evil.example")
+        assert r.status_code == 403
 
 
 def test_http_host_check_without_token(

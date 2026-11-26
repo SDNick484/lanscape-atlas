@@ -917,6 +917,9 @@ preflight() {
 	esac
 	if [ "$BIND_HOST" = 0.0.0.0 ]; then
 		warn "BIND_HOST=0.0.0.0 also listens on tailscale0 and docker0; prefer the LAN address"
+		if [ -z "$ALLOWED_HOSTS" ]; then
+			warn "BIND_HOST=0.0.0.0 without ALLOWED_HOSTS: the UI answers only to localhost (HTTP 421 otherwise); set ALLOWED_HOSTS to the address or name you browse to, e.g. 192.0.2.50:*"
+		fi
 	fi
 }
 
