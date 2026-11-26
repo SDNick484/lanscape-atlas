@@ -97,14 +97,15 @@ def test_older_observation_does_not_steal_lease_back(ing, db, clock):
     ]
 
 
-def test_owner_seen_again_reopens_new_lease(ing, db, clock):
+def test_owner_seen_again_reopens_its_lease(ing, db, clock):
     ing.ingest([obs(mac=MAC_A, ipv4=IP)])
     clock.advance(minutes=5)
     ing.ingest([obs(mac=MAC_B, ipv4=IP, seen_at=clock())])
     clock.advance(minutes=5)
     ing.ingest([obs(mac=MAC_A, ipv4=IP, seen_at=clock())])
     assert open_owner(db) == MAC_A
-    assert [row[4] for row in leases(db)] == [1, 1, 0]
+    # A's earlier lease is reopened rather than a third row inserted (issue #23).
+    assert [row[4] for row in leases(db)] == [0, 1]
 
 
 def test_ip_only_observation_attaches_to_current_owner(ing, db):

@@ -8,18 +8,26 @@ from typing import Any
 
 from lanscape_atlas.collectors.nmap import Runner, ScanRefused, check_deep_scan, scan_ip
 from lanscape_atlas.ingest import Ingestor
+from lanscape_atlas.scheduler import run_blocking
 from lanscape_atlas.service import Service
 
 log = logging.getLogger(__name__)
 
 
+def _recheck(svc: Service, device_id: int) -> str:
+    with svc.lock:
+        return check_deep_scan(svc.conn, device_id, svc.ip_match_window_min)
+
+
 async def _deep_scan_job(svc: Service, ingestor: Ingestor, runner: Runner, device_id: int) -> None:
+    # The database work runs in a worker thread (run_blocking) so a held Service.lock or
+    # another process's write lock never stalls the event loop; cancelling the task (app
+    # shutdown) waits for a started ingest to commit or roll back.
     try:
         # Re-validate at run time: policy or leases may have changed since the request.
-        with svc.lock:
-            ip = check_deep_scan(svc.conn, device_id, svc.ip_match_window_min)
+        ip = await run_blocking(_recheck, svc, device_id)
         observations = await scan_ip(ip, runner=runner, clock=svc.clock)
-        result = ingestor.ingest(observations)
+        result = await run_blocking(ingestor.ingest, observations)
         log.info("deep scan of device %d ingested: %s", device_id, result)
     except asyncio.CancelledError:
         raise

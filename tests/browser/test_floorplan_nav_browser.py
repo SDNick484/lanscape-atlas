@@ -221,6 +221,46 @@ def test_wheel_over_tray_scrolls_tray_not_plan(
     assert _zoom(page) == 1
 
 
+def test_wheel_over_plan_at_zoom_1_scrolls_the_page(
+    page: Any, synthetic_plan_and_room: str
+) -> None:
+    # A short viewport, so the page is taller than the window and has somewhere to scroll.
+    page.set_viewport_size({"width": 1280, "height": 500})
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    assert _zoom(page) == 1
+    assert page.evaluate("document.documentElement.scrollHeight > window.innerHeight")
+    b = _stage_box(page)
+    # Over the plan, near the top of the stage so the point is inside the window.
+    page.mouse.move(b["x"] + b["width"] / 2, b["y"] + 40)
+    page.mouse.wheel(0, 200)  # downwards: zoom-out, which is already at its limit
+    page.wait_for_function("window.scrollY > 0")
+    assert _zoom(page) == 1
+
+
+def test_space_over_plan_at_zoom_1_scrolls_the_page(
+    page: Any, synthetic_plan_and_room: str
+) -> None:
+    page.set_viewport_size({"width": 1280, "height": 500})
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    b = _stage_box(page)
+    page.mouse.move(b["x"] + b["width"] / 2, b["y"] + 40)
+    page.keyboard.press(" ")
+    page.wait_for_function("window.scrollY > 0")
+    assert _zoom(page) == 1
+
+
+def test_plan_takes_touch_only_when_zoomed(page: Any, synthetic_plan_and_room: str) -> None:
+    page.goto(f"{synthetic_plan_and_room}/floorplan")
+    svg = page.locator("#plan-svg")
+    touch = "el => getComputedStyle(el).touchAction"
+    # At zoom 1 a vertical swipe scrolls the page; pan-y keeps horizontal and pinch gestures.
+    assert svg.evaluate(touch) == "pan-y"
+    _set_zoom(page, 2)
+    assert svg.evaluate(touch) == "none"
+    _set_zoom(page, 1)
+    assert svg.evaluate(touch) == "pan-y"
+
+
 def test_touch_pinch_zooms(page: Any, synthetic_plan_and_room: str) -> None:
     page.goto(f"{synthetic_plan_and_room}/floorplan")
     zoom = page.evaluate(

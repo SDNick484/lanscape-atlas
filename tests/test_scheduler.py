@@ -345,6 +345,133 @@ async def test_nmap_reader_takes_service_lock(settings, svc) -> None:
     assert result == [[]]
 
 
+# ------------------------------------------------------------------ off the event loop
+
+
+class HeldLock:
+    """Hold ``svc.lock`` in another thread until :meth:`release`, standing in for it.
+
+    Swaps itself in as ``svc.lock`` and counts the callers that had to wait for it, so a
+    test can wait (on a thread, not the loop) until a job is blocked on the lock.
+    """
+
+    def __init__(self, svc, monkeypatch) -> None:
+        self._inner = svc.lock
+        self._cond = threading.Condition()
+        self.waited = 0
+        self._release = threading.Event()
+        held = threading.Event()
+
+        def hold() -> None:
+            with self._inner:
+                held.set()
+                self._release.wait(10)  # a safety net only; tests call release()
+
+        monkeypatch.setattr(svc, "lock", self)
+        self._thread = threading.Thread(target=hold, daemon=True)
+        self._thread.start()
+        assert held.wait(5)
+
+    def __enter__(self) -> HeldLock:
+        if not self._inner.acquire(blocking=False):
+            with self._cond:
+                self.waited += 1
+                self._cond.notify_all()
+            self._inner.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._inner.release()
+
+    def wait_waiters(self, n: int) -> bool:
+        """Block (call via ``asyncio.to_thread``) until ``n`` callers have waited."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self.waited >= n, timeout=5)
+
+    def release(self) -> None:
+        self._release.set()
+        self._thread.join(5)
+
+
+def device_count(db) -> int:
+    return int(db.execute("select count(*) from device").fetchone()[0])
+
+
+@pytest.mark.parametrize("job", ["ingest", "status", "presence", "prune"])
+async def test_loop_stays_responsive_while_db_work_waits_for_the_lock(
+    job, runner, svc, db, monkeypatch
+) -> None:
+    jobs = {
+        "ingest": lambda: runner.run_once(FakeCollector("arp", [obs("arp", MAC, IP)])),
+        "status": lambda: runner.run_if_due(FakeCollector("arp", [obs("arp", MAC, IP)])),
+        "presence": lambda: scheduler_mod._presence_job(runner.ingestor),
+        "prune": lambda: scheduler_mod._prune_job(svc, 30, 14),
+    }
+    held = HeldLock(svc, monkeypatch)
+    try:
+        task = asyncio.create_task(jobs[job]())
+        # Had the job taken the lock on the loop, the loop would be stuck until the holder
+        # gave up; instead this coroutine keeps running while the job waits.
+        assert await asyncio.to_thread(held.wait_waiters, 1)
+        assert not task.done()
+    finally:
+        held.release()
+    out = await task
+    assert not db.in_transaction
+    if job in ("ingest", "status"):
+        assert out is not None and out.ok
+        assert device_count(db) == 1
+        assert status(db, "arp")["last_ok"] is not None
+
+
+async def test_cancelled_run_waits_for_the_ingest_it_started(runner, svc, db, monkeypatch) -> None:
+    held = HeldLock(svc, monkeypatch)
+    try:
+        task = asyncio.create_task(runner.run_once(FakeCollector("arp", [obs("arp", MAC, IP)])))
+        assert await asyncio.to_thread(held.wait_waiters, 1)
+        task.cancel()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # Not done while its write is pending: a job never overlaps its own previous run.
+        assert not task.done()
+    finally:
+        held.release()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not db.in_transaction
+    assert device_count(db) == 1  # the ingest that had started committed
+    assert status(db, "arp") is None  # cancelled before recording the success
+
+
+async def test_shutdown_during_a_blocked_ingest_ends_cleanly(
+    settings, runner, svc, db, monkeypatch
+) -> None:
+    c = LongLivedCollector("arp")
+    c.observations = [obs("arp", MAC, IP)]
+    # Not in backoff, without reading collector_status: the job's first wait is the ingest.
+    monkeypatch.setattr(runner, "_read_next_run", lambda name: None)
+    held = HeldLock(svc, monkeypatch)
+    try:
+        sched = await start_scheduler(settings, runner, [c], svc)
+        # arp and presence both fire at startup, and both wait for the lock in a thread.
+        assert await asyncio.to_thread(held.wait_waiters, 2)
+        assert c.calls == 1
+        stopping = asyncio.create_task(stop_scheduler(sched, [c], runner))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not stopping.done()  # waits for the writes already started
+        assert c.stopped == 0  # nothing is torn down under a running write
+    finally:
+        held.release()
+    await stopping
+    assert not sched.running
+    assert c.stopped == 1
+    assert not db.in_transaction
+    assert device_count(db) == 1
+    loop = asyncio.get_running_loop()
+    assert not [t for t in scheduler_mod._in_flight if t.get_loop() is loop]
+
+
 # ------------------------------------------------------------------ scheduler
 
 
@@ -410,6 +537,7 @@ async def test_jobs_are_not_dropped_for_a_short_stall(settings, runner, svc) -> 
 async def test_collector_job_function_honors_backoff(settings, runner, svc, db, clock) -> None:
     c = FakeCollector("arp", [obs("arp", MAC, IP)])
     sched = await start_scheduler(settings, runner, [c], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         job = sched.get_job("collector:arp")
         db.execute(
@@ -435,6 +563,7 @@ async def test_failing_collector_job_does_not_stop_others(
     hung = FakeCollector("mdns", delay=30, timeout_s=0.05)
     good = FakeCollector("arp", [obs("arp", MAC, IP)])
     sched = await start_scheduler(settings, runner, [bad, hung, good], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         jobs = [sched.get_job(f"collector:{n}") for n in ("ssdp", "mdns", "arp")]
         await asyncio.gather(*(j.func(*j.args) for j in jobs))
@@ -473,6 +602,7 @@ async def test_failing_start_recorded_and_retried(settings, runner, svc, db, clo
     md = FlakyStart("mdns", fail=2)
     arp = FakeCollector("arp")
     sched = await start_scheduler(settings, runner, [md, arp], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         assert sched.get_job("collector:arp") is not None
         assert md.started == 1
@@ -588,6 +718,7 @@ async def test_prune_and_presence_jobs_call_through(settings, runner, svc, monke
         runner.ingestor, "refresh_presence", lambda now=None: calls.append(("presence", now))
     )
     sched = await start_scheduler(settings, runner, [], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         for jid in ("prune", "presence"):
             j = sched.get_job(jid)
@@ -603,6 +734,7 @@ async def test_prune_job_prunes_ble(tmp_path, runner, svc, monkeypatch) -> None:
     monkeypatch.setattr(svc, "prune_ble", lambda d: calls.append(("ble", d)) or 0)
     s = Settings(data_dir=tmp_path, bluetooth=BluetoothSettings(retention_days=9))
     sched = await start_scheduler(s, runner, [], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         j = sched.get_job("prune")
         await j.func(*j.args)
@@ -647,6 +779,7 @@ async def test_prune_job_swallows_errors(settings, runner, svc, monkeypatch) -> 
 
     monkeypatch.setattr(svc, "prune_observations", boom)
     sched = await start_scheduler(settings, runner, [], svc)
+    sched.pause()  # the test drives the job functions; the scheduler must not too
     try:
         j = sched.get_job("prune")
         await j.func(*j.args)  # must not raise
