@@ -18,6 +18,8 @@ ranges, not a real network.
 - **Discovery** with five collectors: ASUS router client list (`asusrouter`),
   `arp-scan`, mDNS, SSDP, and a nightly light `nmap` scan. A deep `nmap -sV` scan
   runs on demand for a single device. Devices with `scan_policy=never` are skipped.
+  At most two deep scans run at once across all devices; a request over that is
+  refused (not queued) until one finishes.
 - **Stable identity**: names, types, icons, places, owners, notes and trust level,
   each with provenance ("set by user / claude / collector") and precedence
   user > claude > collector.
