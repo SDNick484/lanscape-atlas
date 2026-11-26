@@ -616,8 +616,8 @@ def test_deep_scan_limit_refuses_third_and_frees_slots(app: FastAPI, ending: str
 
         # Over the process-wide limit: refused now, not queued.
         refused = c.post(f"/api/v1/devices/{ids[2]}/deep-scan")
-        assert refused.status_code != 202
-        assert "too many deep scans running (limit 2)" in refused.text
+        assert refused.status_code == 429
+        assert refused.json() == {"detail": "too many deep scans running (limit 2)"}
         assert ids[2] not in app.state.deep_scan_tasks
 
         # End one scan the requested way; its slot must free for the refused device.
