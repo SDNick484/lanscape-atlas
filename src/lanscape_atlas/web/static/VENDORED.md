@@ -4,8 +4,8 @@ Served from `/static`; templates never reference a CDN.
 
 | File | Package | Version | Source | Checksum |
 |------|---------|---------|--------|----------|
-| `htmx.min.js` | `htmx.org` (0BSD) | 2.0.4 | `package/dist/htmx.min.js` from https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.4.tgz (`npm pack htmx.org@2.0.4`) | tarball `sha512-HLxMCdfXDOJirs3vBZl/ZLoY+c7PfM4Ahr2Ad4YXh6d22T5ltbTXFFkpx9Tgb2vvmWFMbIc3LqN2ToNkZJvyYQ==` (matches npm `dist.integrity`); file sha256 `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447` |
-| `cytoscape.min.js` | `cytoscape` (MIT) | 3.34.3 | `package/dist/cytoscape.min.js` from https://registry.npmjs.org/cytoscape/-/cytoscape-3.34.3.tgz (`npm pack cytoscape@3.34.3`) | tarball `sha512-yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ==` (matches npm `dist.integrity`); file sha256 `5f3b5b529546d5af1fc5628590af033b74511a5b6f789f5f4682845863228b91` |
+| `htmx.min.js` | `htmx.org` (0BSD) | 2.0.11 | `package/dist/htmx.min.js` from https://registry.npmjs.org/htmx.org/-/htmx.org-2.0.11.tgz (`npm pack htmx.org@2.0.11`) | tarball `sha512-Thx/WtpeOQqSrqBCw/A1cwGJGg4UrVa3+sW0GmrM3p4gJgO89ecH4qtbnyzDDWFvBTqjnIMCgELTNt636dtamA==` (matches npm `dist.integrity`); file sha256 `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717` |
+| `cytoscape.min.js` | `cytoscape` (MIT) | 3.34.5 | `package/dist/cytoscape.min.js` from https://registry.npmjs.org/cytoscape/-/cytoscape-3.34.5.tgz (`npm pack cytoscape@3.34.5`) | tarball `sha512-nmRD++h7D+AR9bcpggqoXQGKVA+K1SoKBSP1HkETQ3eMRzITegeA2GzNoB3DRSuHT5X8pOowwLCkNM4XAiNlQA==` (matches npm `dist.integrity`); file sha256 `e73eaa8c6206e95578604f4799454e66a09bf98bf318a09be4e68b7e225561af` |
 
 `app.css` and `topology.js` are project code, not vendored.
 
