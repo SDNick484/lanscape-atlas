@@ -10,7 +10,6 @@ import os
 import sys
 import tempfile
 from datetime import timedelta
-from importlib.resources import as_file, files
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -36,14 +35,6 @@ def load_observations(path: Path) -> list[Observation]:
     return [Observation.from_json(json.dumps(d)) for d in raw]
 
 
-def _load_oui(data_dir: Path) -> OuiDB:
-    custom = data_dir / "oui.csv"
-    if custom.is_file():
-        return OuiDB.load(custom)
-    with as_file(files("lanscape_atlas") / "data" / "oui_sample.csv") as sample:
-        return OuiDB.load(sample)
-
-
 def ingest_file(path: Path) -> IngestResult:
     settings = load_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +48,7 @@ def ingest_file(path: Path) -> IngestResult:
             conn,
             service,
             events,
-            _load_oui(settings.data_dir),
+            OuiDB.load_data_dir(settings.data_dir),
             utcnow,
             ip_match_window=timedelta(minutes=settings.ip_match_window_min),
         )

@@ -466,7 +466,10 @@ The service logs (INFO level, with time, level and logger name) to
 
 `lanscape-atlas update-oui` re-downloads the IEEE MA-L list. It validates the file
 before replacing the old one and leaves the old file in place on any failure, so it
-is safe to run from cron. To refresh it weekly as the `lanscape` user, add this line
+is safe to run from cron. A running service needs no restart: it checks the file's
+modification time at most once a minute and reloads the vendor table when it changes
+(a file that fails to parse keeps the table already loaded and logs one warning). To
+refresh it weekly as the `lanscape` user, add this line
 to `/etc/crontabs/root` and make sure `crond` runs (`rc-update add crond default`,
 `rc-service crond start`):
 
@@ -504,8 +507,8 @@ usable wheel, the run ends there and the service was never stopped. Only then do
 stop the service, install from those wheels (no network), back up the database (last
 three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
 start the service. It finishes by refreshing the vendor list (`update-oui`; a failed
-download is only a warning, and the running service uses the new list from its next
-start) and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
+download is only a warning; the running service picks up a new list without a restart)
+and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
 generated on the first run and kept afterwards unless you set `API_TOKEN`; the script
 never prints it.
 
