@@ -645,6 +645,24 @@ reverse proxy must therefore pass the original `Host` header through. Clients th
 send no `Origin` (curl, API clients) are unaffected. `/mcp` instead accepts an
 `Origin` only if it is `http://` or `https://` plus an allowed host.
 
+## Text limits
+
+Every user-supplied text field is checked in one place (the Service), so the pages, the
+API and MCP agree. Text is trimmed and an empty value clears the field (`" Office "` and
+`"Office"` are one place). Text over the limit is refused with a message naming the field
+and the limit; it is never cut short.
+
+| Field | Limit (characters, after trimming) |
+| --- | --- |
+| Device `name`, `type`, `icon`, `owner` | 200 |
+| Device `notes` | 4000 |
+| Place (room) name | 200 |
+| Placeholder device `name` and `type`, new-device `name` and `type` when claiming | 200 |
+| Link `detail` | 200 |
+
+JSON request bodies to `/api` and `/mcp` are limited to 64 KiB (413 above that). The
+floor plan image upload has its own 10 MiB limit and is not affected.
+
 ## Remote access and security
 
 lanscape-atlas has no accounts of its own. Choose one of these setups:

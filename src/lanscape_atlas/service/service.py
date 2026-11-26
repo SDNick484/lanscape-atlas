@@ -106,6 +106,18 @@ WRITE_ACTORS = frozenset({"user", "claude", "system"})
 
 _PLACE_COLUMNS = ("id", "name", "floor", "polygon")
 _TEXT_FIELDS = frozenset({"name", "type", "icon", "owner", "notes"})
+# Longest accepted user-supplied text, in characters (Ruling: one place, so pages, API and
+# MCP agree). Over-long input is refused, never truncated.
+NOTES_MAX = 4000
+SHORT_TEXT_MAX = 200
+TEXT_LIMITS: dict[str, int] = {
+    "name": SHORT_TEXT_MAX,
+    "type": SHORT_TEXT_MAX,
+    "icon": SHORT_TEXT_MAX,
+    "owner": SHORT_TEXT_MAX,
+    "notes": NOTES_MAX,
+}
+LINK_DETAIL_MAX = SHORT_TEXT_MAX
 _LINK_COLUMNS = ("id", "a_device_id", "b_device_id", "kind", "detail", "source", "layout")
 _SERVICE_COLUMNS = (
     "id",
@@ -327,6 +339,31 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def _text(label: str, value: object, limit: int) -> str | None:
+    """User text -> stored value: trimmed, empty becomes ``None``, over ``limit`` refused.
+
+    ``ValueError`` names the field and the limit; the text is never truncated.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string or None, got {value!r}")
+    value = value.strip()
+    if len(value) > limit:
+        raise ValueError(f"{label} must be at most {limit} characters, got {len(value)}")
+    return value or None
+
+
+def _required_text(label: str, value: object, limit: int) -> str:
+    """As ``_text`` but blank is refused too."""
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a non-empty string")
+    cleaned = _text(label, value, limit)
+    if cleaned is None:
+        raise ValueError(f"{label} must be a non-empty string")
+    return cleaned
+
+
 class Service:
     def __init__(
         self,
@@ -439,10 +476,12 @@ class Service:
             (entity, entity_id, field, actor, self._now()),
         )
 
-    def _validate_device_fields(self, fields: Mapping[str, Any]) -> None:
+    def _validate_device_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
+        """Check ``fields`` and return them with the text fields normalised."""
         unknown = set(fields) - USER_FIELDS
         if unknown:
             raise ValueError(f"not user-editable device fields: {sorted(unknown)}")
+        clean = dict(fields)
         for field, value in fields.items():
             if field == "trust" and value not in TRUST_VALUES:
                 raise ValueError(f"trust must be one of {sorted(TRUST_VALUES)}, got {value!r}")
@@ -458,8 +497,9 @@ class Service:
                 and (not isinstance(value, int) or isinstance(value, bool))
             ):
                 raise ValueError(f"place_id must be an int or None, got {value!r}")
-            if field in _TEXT_FIELDS and value is not None and not isinstance(value, str):
-                raise ValueError(f"{field} must be a string or None, got {value!r}")
+            if field in _TEXT_FIELDS:
+                clean[field] = _text(field, value, TEXT_LIMITS[field])
+        return clean
 
     @staticmethod
     def _leaving_room(row: sqlite3.Row, new_place_id: int | None) -> dict[str, Any]:
@@ -524,7 +564,7 @@ class Service:
         self._check_actor(actor)
         if "pos_x" in fields or "pos_y" in fields:
             raise ValueError("pos_x and pos_y cannot be set here; set positions with place_devices")
-        self._validate_device_fields(fields)
+        fields = self._validate_device_fields(fields)
         batch_id = 0
         with self._write_txn():
             row = self._device_row(device_id)
@@ -554,8 +594,7 @@ class Service:
         ``roaming`` is kept.
         """
         self._check_actor(actor)
-        if not isinstance(place_name, str) or not place_name.strip():
-            raise ValueError("place_name must be a non-empty string")
+        place_name = _required_text("place_name", place_name, SHORT_TEXT_MAX)
         batch_id = 0
         with self._write_txn():
             row = self._device_row(device_id)
@@ -597,9 +636,7 @@ class Service:
         the old polygon and those points. Returns 0 if nothing changed.
         """
         self._check_actor(actor)
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("name must be a non-empty string")
-        name = name.strip()
+        name = _required_text("name", name, SHORT_TEXT_MAX)
         text = json.dumps([list(p) for p in parse_polygon(polygon)])
         batch_id = 0
         with self._write_txn():
@@ -650,9 +687,7 @@ class Service:
         Returns 0 if the name is unchanged.
         """
         self._check_actor(actor)
-        if not isinstance(new_name, str) or not new_name.strip():
-            raise ValueError("new_name must be a non-empty string")
-        new_name = new_name.strip()
+        new_name = _required_text("new_name", new_name, SHORT_TEXT_MAX)
         batch_id = 0
         with self._write_txn():
             row = self.conn.execute("SELECT name FROM place WHERE id = ?", (place_id,)).fetchone()
@@ -1124,8 +1159,7 @@ class Service:
             raise ValueError(f"link kind must be one of {sorted(LINK_KINDS)}, got {kind!r}")
         if a_device_id == b_device_id:
             raise ValueError("a link needs two different devices")
-        if detail is not None and not isinstance(detail, str):
-            raise ValueError("detail must be a string or None")
+        detail = _text("detail", detail, LINK_DETAIL_MAX)
         with self._write_txn():
             self._device_row(a_device_id)
             self._device_row(b_device_id)
@@ -1167,7 +1201,7 @@ class Service:
         ``name``/``type`` field changes, so collectors never rename it.
         """
         self._check_actor(actor)
-        self._check_new_device(name, type)
+        name, type = self._check_new_device(name, type)
         with self._write_txn():
             batch_id = self.begin_batch(actor)
             device_id = self._create_device(batch_id, actor, name, type)
@@ -1175,10 +1209,12 @@ class Service:
         return device_id, batch_id
 
     @staticmethod
-    def _check_new_device(name: object, type: object) -> None:
-        for label, value in (("name", name), ("type", type)):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{label} must be a non-empty string")
+    def _check_new_device(name: object, type: object) -> tuple[str, str]:
+        """Normalised ``(name, type)`` for a new device; ``ValueError`` if blank or too long."""
+        return (
+            _required_text("name", name, TEXT_LIMITS["name"]),
+            _required_text("type", type, TEXT_LIMITS["type"]),
+        )
 
     def _create_device(self, batch_id: int, actor: str, name: str, type: str) -> int:
         """Insert a ``trust='known'`` device into ``batch_id``; returns its id.
@@ -1439,7 +1475,7 @@ class Service:
         if (device_id is None) == (new_name is None):
             raise ValueError("claim needs exactly one of device_id or new_name")
         if device_id is None:
-            self._check_new_device(new_name, new_type)
+            new_name, new_type = self._check_new_device(new_name, new_type)
         elif new_type is not None:
             raise ValueError("new_type is only valid with new_name")
         elif not isinstance(device_id, int) or isinstance(device_id, bool):
