@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 # Imported directly but guaranteed by a declared dependency: name -> provider.
@@ -50,3 +55,50 @@ def test_migration_files_are_packaged() -> None:
     assert (ROOT / "src/lanscape_atlas/store/migrations/0005_plan_scale.sql").is_file()
     assert (ROOT / "src/lanscape_atlas/store/migrations/0006_plan_shape.sql").is_file()
     assert (ROOT / "src/lanscape_atlas/store/migrations/0007_hot_indexes.sql").is_file()
+
+
+@pytest.fixture(scope="module")
+def wheel_names(tmp_path_factory: pytest.TempPathFactory) -> set[str]:
+    """File names inside a wheel built from this tree, as production would install it."""
+    out = tmp_path_factory.mktemp("wheel")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pip", "wheel", str(ROOT), "--no-deps", "--no-build-isolation"]
+        + ["--disable-pip-version-check", "-q", "-w", str(out)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        message = f"cannot build the wheel (is hatchling installed?): {proc.stderr[-800:]}"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+    (wheel,) = out.glob("*.whl")
+    with zipfile.ZipFile(wheel) as zf:
+        return set(zf.namelist())
+
+
+def _tracked_under(rel: str, suffixes: tuple[str, ...] | None = None) -> set[str]:
+    base = ROOT / "src"
+    found = {
+        p.relative_to(base).as_posix()
+        for p in (base / rel).rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and (not suffixes or p.suffix in suffixes)
+    }
+    assert found, f"no source files found under src/{rel}"
+    return found
+
+
+def test_wheel_contains_templates_static_migrations_and_data(wheel_names: set[str]) -> None:
+    expected = (
+        _tracked_under("lanscape_atlas/web/templates")
+        | _tracked_under("lanscape_atlas/web/static")
+        | _tracked_under("lanscape_atlas/store/migrations", (".sql",))
+        | _tracked_under("lanscape_atlas/data")
+        | {"lanscape_atlas/store/schema.sql"}
+    )
+    assert (ROOT / "src/lanscape_atlas/store/schema.sql").is_file()
+    missing = sorted(expected - wheel_names)
+    assert not missing, f"missing from the built wheel: {missing}"
+    assert "lanscape_atlas/web/templates/base.html" in wheel_names
+    assert "lanscape_atlas/data/oui_sample.csv" in wheel_names
