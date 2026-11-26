@@ -191,3 +191,60 @@ def test_floor_plan_view_heard_absent_after_24h(svc, db, make_device, clock):
     by_id = {u["device_id"]: u for u in floor_plan_view(db, now=clock())["unplaced"]}
     assert "heard" in by_id[on_edge]
     assert "heard" not in by_id[stale]
+
+
+def test_floor_plan_view_heard_cutoff_is_exact_to_the_second(svc, db, make_device, clock):
+    from datetime import timedelta
+
+    inside = make_device(name="Dev A")
+    outside = make_device(name="Dev B")
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, clock())
+    _hear(svc, inside, clock() - timedelta(hours=24) + timedelta(seconds=30))
+    _hear(svc, outside, clock() - timedelta(hours=24) - timedelta(seconds=30))
+    by_id = {u["device_id"]: u for u in floor_plan_view(db, now=clock())["unplaced"]}
+    assert "heard" in by_id[inside]
+    assert "heard" not in by_id[outside]
+
+
+def test_floor_plan_view_heard_newest_wins_over_stronger_older_sighting(
+    svc, db, make_device, clock
+):
+    from datetime import timedelta
+
+    from lanscape_atlas.bluetooth.aggregator import BLE_MINUTE_FMT, MinuteRow
+
+    dev = make_device(name="Dev A")
+    svc.upsert_scanners({"00:00:5e:00:53:aa": "proxy"}, clock())
+    _hear(svc, dev, clock() - timedelta(hours=23))
+    old = clock() - timedelta(hours=30)
+    svc.record_ble_minutes(
+        [
+            MinuteRow(
+                device_id=dev,
+                source="00:00:5e:00:53:aa",
+                minute=old.strftime(BLE_MINUTE_FMT),
+                max_rssi=-30,
+                adverts=9,
+                last_at=old,
+            )
+        ]
+    )
+    heard = floor_plan_view(db, now=clock())["unplaced"][0]["heard"]
+    assert heard["at"] == iso(clock() - timedelta(hours=23))
+
+
+def test_heard_query_seeks_the_minute_index_not_a_full_scan(svc, db, make_device, clock):
+    from lanscape_atlas.service.queries import _heard_by_device
+
+    plans: list[str] = []
+
+    class Recording:
+        def execute(self, sql, params=()):
+            plans.extend(
+                str(row["detail"]) for row in db.execute("EXPLAIN QUERY PLAN " + sql, params)
+            )
+            return db.execute(sql, params)
+
+    _heard_by_device(Recording(), clock())  # type: ignore[arg-type]
+    assert any(p.startswith("SEARCH ble_sighting USING INDEX ble_sighting_minute") for p in plans)
+    assert "SCAN ble_sighting" not in plans
