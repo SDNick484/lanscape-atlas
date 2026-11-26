@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -648,10 +649,48 @@ def test_openapi_under_api_and_protected(
         assert c.get("/api/openapi.json").status_code == 401
         r = c.get("/api/openapi.json", headers=good)
         assert r.status_code == 200 and "/api/v1/devices" in r.json()["paths"]
-        assert c.get("/api/docs").status_code == 401
-        assert c.get("/api/docs", headers=good).status_code == 200
-        for gone in ("/openapi.json", "/docs", "/redoc"):
+        # FastAPI's own docs page is off; the old /api/docs path is gone.
+        assert c.get("/api/docs", headers=good).status_code == 404
+        assert c.get("/api/redoc", headers=good).status_code == 404
+        for gone in ("/openapi.json", "/redoc"):
             assert c.get(gone).status_code == 404, gone
+
+
+def _page_refs(html: str) -> list[str]:
+    return re.findall(r'(?:src|href)="([^"]+)"', html)
+
+
+@pytest.mark.parametrize("token", [None, TOKEN])
+def test_docs_page_is_local_and_open(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock, token: str | None
+) -> None:
+    """/docs is an ordinary page: no external host, and its assets come from /static."""
+    app = _make_app(tmp_path, db, clock, token=token)
+    with TestClient(app) as c:
+        r = c.get("/docs")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        refs = _page_refs(r.text)
+        assert "/static/swagger-ui-bundle.js" in refs and "/static/swagger-ui.css" in refs
+        for ref in refs:
+            assert ref.startswith("/static/") and "://" not in ref, ref
+            assert c.get(ref).status_code == 200, ref
+        assert "://" not in r.text
+        script = c.get("/static/api-docs.js").text
+        assert "://" not in script and "validatorUrl: null" in script
+        assert '"/api/openapi.json"' in script
+
+
+def test_docs_page_with_token_leaves_spec_protected(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
+) -> None:
+    """The page itself is open, so a browser can load it; the spec still needs the token."""
+    app = _make_app(tmp_path, db, clock, token=TOKEN)
+    with TestClient(app) as c:
+        assert c.get("/docs").status_code == 200
+        assert c.get("/api/openapi.json").status_code == 401
+        wrong = {"Authorization": "Bearer nope"}
+        assert c.get("/api/openapi.json", headers=wrong).status_code == 401
 
 
 # ------------------------------------------------------------- Ruling 44
@@ -693,3 +732,137 @@ def test_configured_ip_match_window_applies(
         assert ({r["id"] for r in rows} == {dev}) is found
         assert c.get(f"/api/v1/devices/{dev}").json()["ipv4"] == "192.0.2.81"
     assert app.state.service.ip_match_window_min == window
+
+
+# ------------------------------------------------------------ forget device
+
+
+def test_delete_device_forgets_and_undo_restores(client: TestClient) -> None:
+    dev = _device_with_ip(client)
+    r = client.delete(f"/api/v1/devices/{dev['id']}")
+    assert r.status_code == 200
+    batch = r.json()["batch_id"]
+    assert client.get(f"/api/v1/devices/{dev['id']}").status_code == 404
+    assert client.delete(f"/api/v1/devices/{dev['id']}").status_code == 404
+    assert client.post(f"/api/v1/changes/{batch}/undo").status_code == 200
+    assert client.get(f"/api/v1/devices/{dev['id']}").json()["name"] == dev["name"]
+
+
+def test_delete_device_refused_with_links_is_422(client: TestClient) -> None:
+    devices = client.get("/api/v1/devices", params={"limit": 1000}).json()
+    a, b = devices[0]["id"], devices[1]["id"]
+    body = {"a_device_id": a, "b_device_id": b, "kind": "wired"}
+    assert client.post("/api/v1/links", json=body).status_code == 200
+    r = client.delete(f"/api/v1/devices/{a}")
+    assert r.status_code == 422 and "links" in json.dumps(r.json())
+    assert client.get(f"/api/v1/devices/{a}").status_code == 200
+
+
+def test_delete_device_validates_id(client: TestClient) -> None:
+    assert client.delete("/api/v1/devices/0").status_code == 422
+
+
+# ------------------------------------------------------------ text bounds
+
+
+def test_text_fields_at_limit_and_one_over(client: TestClient) -> None:
+    d = _device_with_ip(client)
+    url = f"/api/v1/devices/{d['id']}"
+    for field, limit in (("name", 200), ("owner", 200), ("notes", 4000)):
+        assert client.patch(url, json={"fields": {field: "x" * limit}}).status_code == 200
+        r = client.patch(url, json={"fields": {field: "x" * (limit + 1)}})
+        assert r.status_code == 422
+        assert f"{field} must be at most {limit} characters" in r.json()["detail"]
+        assert client.get(url).json()[field] == "x" * limit
+
+    put = f"{url}/place"
+    assert client.put(put, json={"name": "p" * 200}).status_code == 200
+    r = client.put(put, json={"name": "p" * 201})
+    assert r.status_code == 422
+
+    ph = "/api/v1/devices/placeholder"
+    assert client.post(ph, json={"name": "n" * 200, "type": "t" * 200}).status_code == 200
+    assert client.post(ph, json={"name": "n" * 201, "type": "switch"}).status_code == 422
+    assert client.post(ph, json={"name": "n", "type": "t" * 201}).status_code == 422
+
+    a, b = (x["id"] for x in client.get("/api/v1/devices", params={"limit": 2}).json())
+    link = {"a_device_id": a, "b_device_id": b, "kind": "wired"}
+    assert client.post("/api/v1/links", json={**link, "detail": "d" * 200}).status_code == 200
+    assert client.post("/api/v1/links", json={**link, "detail": "d" * 201}).status_code == 422
+
+
+def test_openapi_shows_text_limits(client: TestClient) -> None:
+    schemas = client.get("/api/openapi.json").json()["components"]["schemas"]
+    assert schemas["PlaceBody"]["properties"]["name"]["maxLength"] == 200
+    assert schemas["PlaceholderBody"]["properties"]["type"]["maxLength"] == 200
+    detail = schemas["LinkBody"]["properties"]["detail"]
+    assert 200 in {opt.get("maxLength") for opt in detail["anyOf"]}
+
+
+def test_padded_place_name_is_the_same_place(client: TestClient, app: FastAPI) -> None:
+    a, b = (x["id"] for x in client.get("/api/v1/devices", params={"limit": 2}).json())
+    assert client.put(f"/api/v1/devices/{a}/place", json={"name": " Office "}).status_code == 200
+    assert client.put(f"/api/v1/devices/{b}/place", json={"name": "Office"}).status_code == 200
+    places = {client.get(f"/api/v1/devices/{i}").json()["place"] for i in (a, b)}
+    assert places == {"Office"}
+    assert app.state.conn.execute("select count(*) from place").fetchone()[0] == 1
+
+
+def test_empty_text_clears_the_field(client: TestClient) -> None:
+    d = _device_with_ip(client)
+    url = f"/api/v1/devices/{d['id']}"
+    client.patch(url, json={"fields": {"owner": "Sam"}})
+    assert client.patch(url, json={"fields": {"owner": "  "}}).status_code == 200
+    assert client.get(url).json()["owner"] is None
+
+
+# -------------------------------------------------------- JSON body limit
+
+
+def test_json_body_over_64_kib_is_413(client: TestClient) -> None:
+    d = _device_with_ip(client)
+    url = f"/api/v1/devices/{d['id']}"
+    big = json.dumps({"fields": {"notes": "x" * (64 * 1024)}})
+    r = client.patch(url, content=big, headers={"content-type": "application/json"})
+    assert r.status_code == 413 and "64 KiB" in r.json()["detail"]
+    ok = json.dumps({"fields": {"notes": "x" * 4000}})
+    r = client.patch(url, content=ok, headers={"content-type": "application/json"})
+    assert r.status_code == 200
+
+
+def test_chunked_json_body_over_limit_is_413(client: TestClient) -> None:
+    def chunks() -> Iterator[bytes]:
+        for _ in range(70):
+            yield b" " * 1024
+        yield b"{}"
+
+    r = client.patch(
+        "/api/v1/devices/1", content=chunks(), headers={"content-type": "application/json"}
+    )
+    assert r.status_code == 413
+
+
+def test_chunked_json_body_under_limit_is_replayed(client: TestClient) -> None:
+    d = _device_with_ip(client)
+
+    def chunks() -> Iterator[bytes]:
+        yield b'{"fields": {"owner"'
+        yield b': "Sam"}}'
+
+    r = client.patch(
+        f"/api/v1/devices/{d['id']}",
+        content=chunks(),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200
+    assert client.get(f"/api/v1/devices/{d['id']}").json()["owner"] == "Sam"
+
+
+def test_body_limit_does_not_apply_to_the_plan_upload(client: TestClient) -> None:
+    # 100 KiB of junk to the form upload gets the upload's own refusal (not 413).
+    r = client.post(
+        "/floorplan/plan",
+        files={"file": ("x.png", b"\x89PNG" + b"0" * (100 * 1024), "image/png")},
+        follow_redirects=False,
+    )
+    assert r.status_code != 413

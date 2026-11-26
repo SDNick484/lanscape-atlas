@@ -59,6 +59,7 @@
   var MIN_SIDE = 0.002; // smallest furniture side, as a fraction of the plan width
   var MIN_DRAG_PX = 6; // a furniture rectangle drag shorter than this is no rectangle
   var LABEL_SIZE = 0.02; // a new label's text height, as a fraction of the plan width
+  var HISTORY_MAX = 100; // undo steps kept
   var TEXT_MAX = 80; // server: SHAPE_LABEL_MAX
   var FIT_TOL = 1e-6; // a corner may overshoot the plan by this much (server: 2e-6)
   var SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]]; // rectangle corners, in order
@@ -318,6 +319,10 @@
     var rectDrag = null; // Furniture rectangle tool: {from, to, at} while dragging
     var pendingLabel = null; // Label tool: the plan point its text box will place
     var discarded = false;
+    var base = {}; // id -> JSON of the server's {geometry, label} this page last saw
+    var undoStack = [], redoStack = []; // JSON snapshots of the pending state, newest last
+    var current = null; // snapshot of the state as it is now
+    var merging = null; // id whose text is being typed: its keystrokes make one entry
 
     var gShapes = svgEl("g", { "class": "fp-shapes" });
     var gTexts = svgEl("g", { "class": "fp-texts" });
@@ -328,6 +333,8 @@
     var hintEl = document.getElementById("draw-hint");
     var flipBtn = document.getElementById("door-flip");
     var deleteBtn = document.getElementById("shape-delete");
+    var undoBtn = document.getElementById("draw-undo");
+    var redoBtn = document.getElementById("draw-redo");
     var lengthIn = document.getElementById("draw-length");
     var labelIn = document.getElementById("draw-text");
     var textIn = document.getElementById("shape-text");
@@ -779,7 +786,54 @@
 
     // ------------------------------------------------------------- edits
 
-    function changed() {
+    // ---------------------------------------------------------- history
+    // One entry per completed gesture: every edit funnels through changed(), which
+    // runs once per drop, click or key (a drag is not one call per pointermove).
+
+    function snapshot() {
+      return JSON.stringify({ shapes: shapes, order: order, created: created, updated: updated, deleted: deleted, nextTemp: nextTemp });
+    }
+
+    function restore(json) {
+      var o = JSON.parse(json);
+      shapes = o.shapes; order = o.order; created = o.created; updated = o.updated; deleted = o.deleted; nextTemp = o.nextTemp;
+      current = json;
+      if (selectedId !== null && (!shapes[selectedId] || deleted[selectedId])) { selectedId = null; }
+      ctx.changed();
+      render();
+      updatePanel();
+    }
+
+    function resetHistory() {
+      undoStack = []; redoStack = []; merging = null;
+      current = snapshot();
+    }
+
+    function canAct() { return active && !drag && !rectDrag && !pendingLabel; }
+
+    function undo() {
+      if (!undoStack.length || !canAct()) { return; }
+      redoStack.push(current);
+      merging = null;
+      restore(undoStack.pop());
+    }
+
+    function redo() {
+      if (!redoStack.length || !canAct()) { return; }
+      undoStack.push(current);
+      merging = null;
+      restore(redoStack.pop());
+    }
+
+    function changed(mergeId) {
+      var same = mergeId !== undefined && merging === mergeId && undoStack.length;
+      merging = mergeId === undefined ? null : mergeId;
+      if (!same) {
+        undoStack.push(current);
+        if (undoStack.length > HISTORY_MAX) { undoStack.shift(); }
+      }
+      redoStack = [];
+      current = snapshot();
       ctx.changed();
       render();
       updatePanel();
@@ -795,9 +849,9 @@
       return id;
     }
 
-    function touch(id) {
+    function touch(id, mergeId) {
       if (id > 0) { updated[id] = true; }
-      changed();
+      changed(mergeId);
     }
 
     function remove(id) {
@@ -1169,7 +1223,7 @@
       labelIn.focus({ preventScroll: true });
     }
 
-    function placeLabel() {
+    function placeLabel(refocus) {
       var text = labelIn.value.trim();
       if (!pendingLabel || !text) {
         ctx.status("Type the label's text first.", true);
@@ -1177,7 +1231,7 @@
       }
       var p = pendingLabel;
       closeLabel();
-      stage.focus({ preventScroll: true });
+      if (refocus !== false) { stage.focus({ preventScroll: true }); }
       select(add("label", { x: round6(clamp01(p[0])), y: round6(clamp01(p[1])), size: LABEL_SIZE }, text.slice(0, TEXT_MAX)));
     }
 
@@ -1302,6 +1356,8 @@
       var s = selectedId !== null ? shapes[selectedId] : null;
       if (flipBtn) { flipBtn.disabled = !(s && s.kind === "door"); }
       if (deleteBtn) { deleteBtn.disabled = !s; }
+      if (undoBtn) { undoBtn.disabled = !undoStack.length; }
+      if (redoBtn) { redoBtn.disabled = !redoStack.length; }
       if (textIn) {
         var texty = !!(s && (s.kind === "furniture" || s.kind === "label"));
         textIn.disabled = !texty;
@@ -1316,6 +1372,11 @@
       return !!(el && el.closest && el.closest(EDITABLE));
     }
 
+    // A field that takes text keeps its own Ctrl+Z; buttons and checkboxes do not.
+    function typingIn(el) {
+      return !!(el && el.closest && el.closest("input:not([type=checkbox]):not([type=button]), textarea, select, [contenteditable]"));
+    }
+
     var KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
     function onKeyDown(e) {
@@ -1326,6 +1387,11 @@
           if (e.key === "Alt") { e.preventDefault(); }
           renderOverlay();
         }
+        return;
+      }
+      if (active && (e.ctrlKey || e.metaKey) && !e.altKey && /^[zy]$/i.test(e.key) && !typingIn(e.target)) {
+        if (/y/i.test(e.key) || e.shiftKey) { redo(); } else { undo(); }
+        e.preventDefault();
         return;
       }
       if (!active || e.target === lengthIn || isEditable(e.target)) {
@@ -1436,7 +1502,10 @@
           if (selectedId !== null) { remove(selectedId); }
         });
       }
+      if (undoBtn) { undoBtn.addEventListener("click", undo); }
+      if (redoBtn) { redoBtn.addEventListener("click", redo); }
       if (textIn) {
+        textIn.addEventListener("focus", function () { merging = null; });
         textIn.addEventListener("input", function () {
           var s = selectedId !== null ? shapes[selectedId] : null;
           if (!s || (s.kind !== "furniture" && s.kind !== "label")) {
@@ -1447,7 +1516,7 @@
             return; // a label always has text; the box shows the old text again on leaving
           }
           s.label = text;
-          touch(s.id);
+          touch(s.id, s.id); // typing in the box is one undo step, not one per key
         });
         textIn.addEventListener("change", updatePanelText);
         textIn.addEventListener("blur", updatePanelText);
@@ -1463,17 +1532,85 @@
         labelIn.addEventListener("keydown", function (e) {
           if (e.key === "Enter") {
             e.preventDefault();
-            placeLabel();
+            placeLabel(true);
           } else if (e.key === "Escape") {
             e.preventDefault();
             closeLabel();
             stage.focus({ preventScroll: true });
           }
         });
-        labelIn.addEventListener("blur", closeLabel);
+        // Leaving the box keeps what was typed (Escape and Enter clear it first).
+        labelIn.addEventListener("blur", function () {
+          if (pendingLabel && labelIn.value.trim()) {
+            placeLabel(false);
+          } else {
+            closeLabel();
+          }
+        });
       }
       if (snapBox) { snapBox.addEventListener("change", renderOverlay); }
       if (lengthsBox) { lengthsBox.addEventListener("change", render); }
+    }
+
+    // ---------------------------------------------------- re-base after a 409
+
+    function shapeKey(s) { return JSON.stringify([s.geometry, s.label === undefined ? null : s.label]); }
+
+    // Pending edits and deletes of saved shapes whose server copy changed or vanished
+    // since this page loaded: [{id, kind, removed}]. New shapes never conflict.
+    function conflictsWith(server) {
+      var byId = {};
+      server.forEach(function (s) { byId[s.id] = s; });
+      var out = [];
+      Object.keys(updated).concat(Object.keys(deleted)).map(Number).forEach(function (id) {
+        var cur = byId[id];
+        if (deleted[id] && !cur) {
+          return; // already gone: nothing to delete, nothing lost
+        }
+        if (!cur || shapeKey(cur) !== base[id]) {
+          out.push({ id: id, kind: (shapes[id] || {}).kind || "shape", removed: !cur });
+        }
+      });
+      return out;
+    }
+
+    // Put the pending drawing on top of the server's current shapes. Unedited shapes
+    // take the server's copy, new shapes stay, and a conflicting edit is dropped (the
+    // server's copy wins) only when `drop` is true; otherwise nothing changes.
+    function rebaseOnto(server, batch, drop) {
+      var found = conflictsWith(server);
+      if (found.length && !drop) {
+        return found;
+      }
+      var byId = {};
+      server.forEach(function (s) { byId[s.id] = s; });
+      found.forEach(function (c) { delete updated[c.id]; delete deleted[c.id]; });
+      Object.keys(deleted).forEach(function (id) { if (!byId[id]) { delete deleted[id]; } });
+      var next = [];
+      server.forEach(function (s) {
+        if (!(s && typeof s.id === "number" && s.geometry && typeof s.geometry === "object")) { return; }
+        next.push(s.id);
+        base[s.id] = shapeKey(s);
+        if (!updated[s.id]) {
+          shapes[s.id] = { id: s.id, kind: String(s.kind), geometry: s.geometry, label: s.label === undefined ? null : s.label };
+        }
+      });
+      order.forEach(function (id) {
+        if (id > 0 && byId[id] === undefined) {
+          delete shapes[id]; delete updated[id]; delete base[id];
+        } else if (id < 0 && shapes[id]) {
+          next.push(id);
+        }
+      });
+      order = next;
+      if (selectedId !== null && !shapes[selectedId]) { selectedId = null; }
+      ctx.batch = batch;
+      changed();
+      // The re-base rewrote shapes and `base` under the stack, so earlier snapshots
+      // would put pre-rebase copies back over the server's: start the history afresh.
+      resetHistory();
+      updatePanel();
+      return [];
     }
 
     // ------------------------------------------------------------------ load
@@ -1482,8 +1619,10 @@
       if (s && typeof s.id === "number" && s.geometry && typeof s.geometry === "object") {
         shapes[s.id] = { id: s.id, kind: String(s.kind), geometry: s.geometry, label: s.label === undefined ? null : s.label };
         order.push(s.id);
+        base[s.id] = shapeKey(shapes[s.id]);
       }
     });
+    resetHistory();
     wire();
     render();
 
@@ -1532,7 +1671,9 @@
         }
         return Object.keys(created).length + Object.keys(updated).length + Object.keys(deleted).length;
       },
-      discard: function () { discarded = true; },
+      discard: function () { discarded = true; resetHistory(); updatePanel(); },
+      conflicts: conflictsWith,
+      rebase: rebaseOnto,
       payload: function () {
         var creates = [], updates = [];
         order.forEach(function (id) {

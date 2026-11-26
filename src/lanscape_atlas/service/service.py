@@ -8,7 +8,7 @@ text so ``None`` and numbers round-trip.
 
 Transactions: the public user-facing writes (``update_device``, ``set_place``,
 ``add_link``, ``remove_link``, ``create_placeholder_device``, ``claim_interface``,
-``claim_ble``, ``unclaim_ble``, ``hide_ble``, ``unhide_ble``, ``link_scanner``,
+``forget_device``, ``claim_ble``, ``unclaim_ble``, ``hide_ble``, ``unhide_ble``, ``link_scanner``,
 ``place_devices``, ``save_shapes``, ``undo``) each own one ``BEGIN IMMEDIATE``
 transaction, hold ``self.lock`` for its duration, and publish ``change.applied``
 after commit. The Bluetooth collector writes (``record_ble_minutes``,
@@ -26,6 +26,9 @@ deleted device's JSON also carries its ``field_source`` rows under
 if any) so undo restores provenance and layout with the row. A claim logs
 ``interface.device_id`` and ``service.device_id`` moves as plain field changes
 (``old_actor``/``old_set_at`` NULL: those columns have no ``field_source``).
+``forget_device`` logs each of the device's interfaces and services as a row-level
+deletion too (an interface's JSON carries its ip_lease rows under ``"_leases"``),
+then the device itself, in one batch.
 
 Floor plan (schema v5): creating the plan (blank or first image) logs a row-level
 creation; turning a blank plan into an image plan logs a row-level **replacement**
@@ -103,6 +106,18 @@ WRITE_ACTORS = frozenset({"user", "claude", "system"})
 
 _PLACE_COLUMNS = ("id", "name", "floor", "polygon")
 _TEXT_FIELDS = frozenset({"name", "type", "icon", "owner", "notes"})
+# Longest accepted user-supplied text, in characters (Ruling: one place, so pages, API and
+# MCP agree). Over-long input is refused, never truncated.
+NOTES_MAX = 4000
+SHORT_TEXT_MAX = 200
+TEXT_LIMITS: dict[str, int] = {
+    "name": SHORT_TEXT_MAX,
+    "type": SHORT_TEXT_MAX,
+    "icon": SHORT_TEXT_MAX,
+    "owner": SHORT_TEXT_MAX,
+    "notes": NOTES_MAX,
+}
+LINK_DETAIL_MAX = SHORT_TEXT_MAX
 _LINK_COLUMNS = ("id", "a_device_id", "b_device_id", "kind", "detail", "source", "layout")
 _SERVICE_COLUMNS = (
     "id",
@@ -155,6 +170,22 @@ _DEVICE_REF_ENTITIES = frozenset({"interface", "service", "ble_scanner"})
 _FIELD_SOURCE_KEY = "_field_source"
 # A deleted device's saved topology position ({"x", "y"}), present only if it had one.
 _LAYOUT_KEY = "_layout"
+_INTERFACE_COLUMNS = (
+    "id",
+    "device_id",
+    "kind",
+    "address",
+    "is_random",
+    "vendor",
+    "ap_node",
+    "band",
+    "hints",
+    "first_seen",
+    "last_seen",
+)
+_LEASE_COLUMNS = ("id", "interface_id", "ipv4", "first_seen", "last_seen", "closed")
+# A deleted interface's ip_lease rows (list of dicts), present only if it had any.
+_LEASES_KEY = "_leases"
 _DEVICE_COLUMNS = (
     "id",
     "name",
@@ -290,6 +321,7 @@ _ENTITY_COLUMNS: dict[str, frozenset[str]] = {
 }
 _ROW_COLUMNS: dict[str, tuple[str, ...]] = {
     "device": _DEVICE_COLUMNS,
+    "interface": _INTERFACE_COLUMNS,
     "link": _LINK_COLUMNS,
     "service": _SERVICE_COLUMNS,
     "floor_plan": _FLOOR_PLAN_COLUMNS,
@@ -305,6 +337,31 @@ def _dump(value: Any) -> str:
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _text(label: str, value: object, limit: int) -> str | None:
+    """User text -> stored value: trimmed, empty becomes ``None``, over ``limit`` refused.
+
+    ``ValueError`` names the field and the limit; the text is never truncated.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string or None, got {value!r}")
+    value = value.strip()
+    if len(value) > limit:
+        raise ValueError(f"{label} must be at most {limit} characters, got {len(value)}")
+    return value or None
+
+
+def _required_text(label: str, value: object, limit: int) -> str:
+    """As ``_text`` but blank is refused too."""
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a non-empty string")
+    cleaned = _text(label, value, limit)
+    if cleaned is None:
+        raise ValueError(f"{label} must be a non-empty string")
+    return cleaned
 
 
 class Service:
@@ -419,10 +476,12 @@ class Service:
             (entity, entity_id, field, actor, self._now()),
         )
 
-    def _validate_device_fields(self, fields: Mapping[str, Any]) -> None:
+    def _validate_device_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
+        """Check ``fields`` and return them with the text fields normalised."""
         unknown = set(fields) - USER_FIELDS
         if unknown:
             raise ValueError(f"not user-editable device fields: {sorted(unknown)}")
+        clean = dict(fields)
         for field, value in fields.items():
             if field == "trust" and value not in TRUST_VALUES:
                 raise ValueError(f"trust must be one of {sorted(TRUST_VALUES)}, got {value!r}")
@@ -438,8 +497,9 @@ class Service:
                 and (not isinstance(value, int) or isinstance(value, bool))
             ):
                 raise ValueError(f"place_id must be an int or None, got {value!r}")
-            if field in _TEXT_FIELDS and value is not None and not isinstance(value, str):
-                raise ValueError(f"{field} must be a string or None, got {value!r}")
+            if field in _TEXT_FIELDS:
+                clean[field] = _text(field, value, TEXT_LIMITS[field])
+        return clean
 
     @staticmethod
     def _leaving_room(row: sqlite3.Row, new_place_id: int | None) -> dict[str, Any]:
@@ -504,7 +564,7 @@ class Service:
         self._check_actor(actor)
         if "pos_x" in fields or "pos_y" in fields:
             raise ValueError("pos_x and pos_y cannot be set here; set positions with place_devices")
-        self._validate_device_fields(fields)
+        fields = self._validate_device_fields(fields)
         batch_id = 0
         with self._write_txn():
             row = self._device_row(device_id)
@@ -534,8 +594,7 @@ class Service:
         ``roaming`` is kept.
         """
         self._check_actor(actor)
-        if not isinstance(place_name, str) or not place_name.strip():
-            raise ValueError("place_name must be a non-empty string")
+        place_name = _required_text("place_name", place_name, SHORT_TEXT_MAX)
         batch_id = 0
         with self._write_txn():
             row = self._device_row(device_id)
@@ -577,9 +636,7 @@ class Service:
         the old polygon and those points. Returns 0 if nothing changed.
         """
         self._check_actor(actor)
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("name must be a non-empty string")
-        name = name.strip()
+        name = _required_text("name", name, SHORT_TEXT_MAX)
         text = json.dumps([list(p) for p in parse_polygon(polygon)])
         batch_id = 0
         with self._write_txn():
@@ -630,9 +687,7 @@ class Service:
         Returns 0 if the name is unchanged.
         """
         self._check_actor(actor)
-        if not isinstance(new_name, str) or not new_name.strip():
-            raise ValueError("new_name must be a non-empty string")
-        new_name = new_name.strip()
+        new_name = _required_text("new_name", new_name, SHORT_TEXT_MAX)
         batch_id = 0
         with self._write_txn():
             row = self.conn.execute("SELECT name FROM place WHERE id = ?", (place_id,)).fetchone()
@@ -1104,8 +1159,7 @@ class Service:
             raise ValueError(f"link kind must be one of {sorted(LINK_KINDS)}, got {kind!r}")
         if a_device_id == b_device_id:
             raise ValueError("a link needs two different devices")
-        if detail is not None and not isinstance(detail, str):
-            raise ValueError("detail must be a string or None")
+        detail = _text("detail", detail, LINK_DETAIL_MAX)
         with self._write_txn():
             self._device_row(a_device_id)
             self._device_row(b_device_id)
@@ -1147,7 +1201,7 @@ class Service:
         ``name``/``type`` field changes, so collectors never rename it.
         """
         self._check_actor(actor)
-        self._check_new_device(name, type)
+        name, type = self._check_new_device(name, type)
         with self._write_txn():
             batch_id = self.begin_batch(actor)
             device_id = self._create_device(batch_id, actor, name, type)
@@ -1155,10 +1209,12 @@ class Service:
         return device_id, batch_id
 
     @staticmethod
-    def _check_new_device(name: object, type: object) -> None:
-        for label, value in (("name", name), ("type", type)):
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{label} must be a non-empty string")
+    def _check_new_device(name: object, type: object) -> tuple[str, str]:
+        """Normalised ``(name, type)`` for a new device; ``ValueError`` if blank or too long."""
+        return (
+            _required_text("name", name, TEXT_LIMITS["name"]),
+            _required_text("type", type, TEXT_LIMITS["type"]),
+        )
 
     def _create_device(self, batch_id: int, actor: str, name: str, type: str) -> int:
         """Insert a ``trust='known'`` device into ``batch_id``; returns its id.
@@ -1235,6 +1291,67 @@ class Service:
                 self._delete_entity("device", source)
         self._publish(batch_id, actor)
         return batch_id
+
+    def forget_device(self, actor: str, device_id: int) -> int:
+        """Delete a device with its interfaces, leases and services; returns the batch id.
+
+        One batch, so *History -> Undo* restores everything with the original ids,
+        values and provenance. Usable by any write actor, including ``"system"``
+        (the nightly expiry job).
+
+        Cascades (each logged, so undo restores them): the device's interfaces
+        and their ``ip_lease`` rows, its services, its placement (room, floor-plan
+        point, roaming flag), its field provenance and its saved topology
+        position. Not restored by undo: raw ``observation`` rows (detached from
+        the interface, then pruned by retention) and Bluetooth sightings.
+
+        Refuses, deleting nothing, with ``ValueError``: a device that has links
+        (remove them first), Bluetooth identities (unclaim them) or a linked
+        Bluetooth scanner (unlink it). ``KeyError`` for an unknown device.
+
+        If the device is seen again afterwards it comes back as a new device
+        (``trust='new'``), not as the one forgotten. Undo then raises
+        ``UndoConflict`` if one of its interfaces (same kind and address) has
+        reappeared on another device, or its room has since been deleted.
+        """
+        self._check_actor(actor)
+        with self._write_txn():
+            self._device_row(device_id)
+            self._refuse_if_referenced(device_id, "forgetting")
+            batch_id = self.begin_batch(actor)
+            for table in ("interface", "service"):
+                for (row_id,) in self.conn.execute(
+                    f"SELECT id FROM {table} WHERE device_id = ? ORDER BY id", (device_id,)
+                ).fetchall():
+                    self._log_change(
+                        batch_id, table, row_id, "*", self._snapshot(table, row_id), None
+                    )
+                    self._delete_entity(table, row_id)
+            self._log_change(
+                batch_id, "device", device_id, "*", self._snapshot("device", device_id), None
+            )
+            self._delete_entity("device", device_id)
+        self._publish(batch_id, actor)
+        return batch_id
+
+    def _refuse_if_referenced(self, device_id: int, verb: str) -> None:
+        """Refuse when links, Bluetooth identities or a linked scanner hang off the device."""
+        if self.conn.execute(
+            "SELECT 1 FROM link WHERE a_device_id = ? OR b_device_id = ?", (device_id, device_id)
+        ).fetchone():
+            raise ValueError(f"device {device_id} has links; remove them before {verb}")
+        if self.conn.execute(
+            "SELECT 1 FROM ble_identity WHERE device_id = ?", (device_id,)
+        ).fetchone():
+            raise ValueError(
+                f"device {device_id} has Bluetooth identities; unclaim them before {verb}"
+            )
+        if self.conn.execute(
+            "SELECT 1 FROM ble_scanner WHERE device_id = ?", (device_id,)
+        ).fetchone():
+            raise ValueError(
+                f"device {device_id} is linked to a Bluetooth scanner; unlink it before {verb}"
+            )
 
     def _plan_merge(self, source: int, target: int) -> list[str]:
         """Return the curated source fields to copy onto ``target`` (Ruling 42), or refuse.
@@ -1358,7 +1475,7 @@ class Service:
         if (device_id is None) == (new_name is None):
             raise ValueError("claim needs exactly one of device_id or new_name")
         if device_id is None:
-            self._check_new_device(new_name, new_type)
+            new_name, new_type = self._check_new_device(new_name, new_type)
         elif new_type is not None:
             raise ValueError("new_type is only valid with new_name")
         elif not isinstance(device_id, int) or isinstance(device_id, bool):
@@ -1667,6 +1784,7 @@ class Service:
                 ):
                     # Gone without a live batch to blame (deleted outside the change log).
                     raise UndoConflict([], f"cannot undo: device {device_id} no longer exists")
+            self._check_undo_reinserts(rows)
             cur = self.conn.execute(
                 "INSERT INTO batch(actor, at, undoes_batch_id) VALUES (?, ?, ?)",
                 (actor, self._now(), batch_id),
@@ -1679,6 +1797,36 @@ class Service:
             self._check_undo_placements(batch_id, new_batch, rows)
         self._publish(new_batch, actor)
         return new_batch
+
+    def _check_undo_reinserts(self, rows: list[_Change]) -> None:
+        """Refuse an undo whose re-inserted rows would collide with data seen since.
+
+        An interface is unique by (kind, address): if the collectors have seen the
+        address again, it now belongs to a new device. A restored device's room
+        must still exist. Neither is in the change log (discovery is not logged,
+        and a room's deletion is only found by name), so ``conflicting`` is empty.
+        """
+        for ch in rows:
+            if ch.field != "*" or ch.old is None or ch.new is not None:
+                continue
+            if ch.entity == "interface":
+                owner = self.conn.execute(
+                    "SELECT device_id FROM interface WHERE kind = ? AND address = ?",
+                    (ch.old["kind"], ch.old["address"]),
+                ).fetchone()
+                if owner is not None:
+                    raise UndoConflict(
+                        [],
+                        f"cannot undo: an interface of device {ch.old['device_id']} was seen"
+                        f" again and now belongs to device {owner[0]}",
+                    )
+            elif ch.entity == "device" and ch.old.get("place_id") is not None:
+                if not self.conn.execute(
+                    "SELECT 1 FROM place WHERE id = ?", (ch.old["place_id"],)
+                ).fetchone():
+                    raise UndoConflict(
+                        [], f"cannot undo: the room of device {ch.entity_id} no longer exists"
+                    )
 
     def _check_undo_placements(self, batch_id: int, new_batch: int, rows: list[_Change]) -> None:
         """After an undo's inverses are applied, refuse a placement that breaks spec section 3.
@@ -1871,7 +2019,7 @@ class Service:
             if ch.field == "*" and isinstance(ch.old, dict):
                 if ch.entity == "link":
                     refs.update((ch.old["a_device_id"], ch.old["b_device_id"]))
-                elif ch.entity in ("service", "ble_identity"):
+                elif ch.entity in ("service", "ble_identity", "interface"):
                     refs.add(ch.old["device_id"])
             elif (
                 ch.field == "device_id"
@@ -1917,6 +2065,14 @@ class Service:
                     # service ids are not AUTOINCREMENT; a later discovery may
                     # have taken it. Re-insert under a fresh id and log that id.
                     row["id"] = None
+                if (
+                    ch.entity == "interface"
+                    and self.conn.execute(
+                        "SELECT 1 FROM interface WHERE id = ?", (entity_id,)
+                    ).fetchone()
+                ):
+                    # interface ids are not AUTOINCREMENT either; take a fresh one.
+                    row["id"] = None
                 if ch.entity == "device":
                     # Snapshots logged before schema v2 have no roaming key.
                     row.setdefault("roaming", 0)
@@ -1930,6 +2086,8 @@ class Service:
                     row.get(_FIELD_SOURCE_KEY, {}).items()
                 ):
                     self._restore_source(ch.entity, entity_id, field, src_actor, src_set_at)
+                if ch.entity == "interface":
+                    self._restore_leases(entity_id, row.get(_LEASES_KEY, []))
                 layout = row.get(_LAYOUT_KEY)
                 if ch.entity == "device" and isinstance(layout, dict):
                     self.conn.execute(
@@ -1977,6 +2135,19 @@ class Service:
             f"UPDATE {ch.entity} SET {ch.field} = ? WHERE id = ?", (ch.old, ch.entity_id)
         )
         self._restore_source(ch.entity, ch.entity_id, ch.field, ch.old_actor, ch.old_set_at)
+
+    def _restore_leases(self, interface_id: int, leases: list[dict[str, Any]]) -> None:
+        """Re-insert a deleted interface's leases (original ids unless discovery took them)."""
+        cols = [c for c in _LEASE_COLUMNS if c not in ("id", "interface_id")]
+        for lease in leases:
+            lease_id = lease["id"]
+            if self.conn.execute("SELECT 1 FROM ip_lease WHERE id = ?", (lease_id,)).fetchone():
+                lease_id = None
+            self.conn.execute(
+                f"INSERT INTO ip_lease(id, interface_id, {', '.join(cols)})"
+                f" VALUES (?, ?, {', '.join('?' for _ in cols)})",
+                (lease_id, interface_id, *(lease[c] for c in cols)),
+            )
 
     def _restore_row(self, batch_id: int, ch: _Change) -> None:
         """Undo a row-level replacement: write ``ch.old``'s columns and provenance back.
@@ -2043,6 +2214,17 @@ class Service:
             )
             if layout is not None:
                 snap[_LAYOUT_KEY] = {"x": layout["x"], "y": layout["y"]}
+        elif entity == "interface":
+            leases = [
+                {c: r[c] for c in _LEASE_COLUMNS}
+                for r in self.conn.execute(
+                    f"SELECT {', '.join(_LEASE_COLUMNS)} FROM ip_lease"
+                    " WHERE interface_id = ? ORDER BY id",
+                    (entity_id,),
+                )
+            ]
+            if leases:
+                snap[_LEASES_KEY] = leases
         return snap
 
     def _row_dict(self, entity: str, entity_id: int) -> dict[str, Any]:
@@ -2092,6 +2274,10 @@ class Service:
             self.conn.execute("DELETE FROM topology_layout WHERE device_id = ?", (entity_id,))
             # Sightings are collector data and are not restored by undo (spec section 7).
             self.conn.execute("DELETE FROM ble_sighting WHERE device_id = ?", (entity_id,))
+        elif entity == "interface":
+            # Leases go with the interface (logged in its snapshot); observations
+            # are raw input and are detached by ON DELETE SET NULL.
+            self.conn.execute("DELETE FROM ip_lease WHERE interface_id = ?", (entity_id,))
         elif entity == "place":
             if self.conn.execute(
                 "SELECT 1 FROM device WHERE place_id = ?", (entity_id,)

@@ -24,19 +24,39 @@ ranges, not a real network.
   each with provenance ("set by user / claude / collector") and precedence
   user > claude > collector.
 - **Inbox** for never-seen devices and unclaimed random-MAC interfaces, with quick
-  actions to name, type, claim, or mark known/unwanted.
+  actions to name, type, claim, mark known/unwanted, or forget a device (see
+  [Forgetting a device](#forgetting-a-device)).
 - **Topology** view: router, mesh nodes, switches, devices. Discovered links are
   dashed, manual links solid; drag to arrange, add placeholders for unmanaged switches.
   See [Topology](#topology) below.
 - **History** of every change, grouped by batch, with per-batch **Undo**.
 - **Status** page with collector health and counts.
 - **HTTP API** under `/api/v1` (OpenAPI via FastAPI) and an **MCP server** at `/mcp`
-  in the same process.
+  in the same process. The API description is at `/docs` (Swagger UI, served from the
+  app, no CDN). The spec itself is `/api/openapi.json`, which needs the bearer token
+  when `api_token` is set; `/docs` then asks for the token and keeps it in the page only.
 - **Vendor lookup** from a local IEEE OUI file; no network call at lookup time.
 - **Floor plan** (Phase 2): upload a plan or start a blank one with real dimensions,
   set its scale, draw rooms, place devices. See below.
 - **Bluetooth Find** (Phase 3): where was my remote or phone last heard, by room, from
   ESP32 Bluetooth proxies through Home Assistant. See below.
+
+## Forgetting a device
+
+*Forget device* (on the device page, and in the Inbox quick actions) deletes a device
+together with its interfaces, IP history and services, so a stale random-MAC device does
+not sit in the Inbox for ever. A confirmation page comes first (no JavaScript dialog).
+The same action is `DELETE /api/v1/devices/{id}` and the MCP tool `forget_device`; each
+returns the `batch_id`.
+
+- It is one History batch: **Undo** restores the device with its original id, values,
+  provenance, room and saved topology position. Raw observations are detached rather than
+  restored, and Bluetooth sightings are not restored.
+- It is refused while the device has manual links, Bluetooth identities or a linked
+  Bluetooth scanner: remove or unclaim those first.
+- A device that is seen on the network again comes back as a **new** device in the Inbox,
+  not as the one you forgot. Once that has happened Undo is refused (the interface now
+  belongs to the new device); merge the new device with *claim* instead.
 
 ## Topology
 
@@ -95,7 +115,9 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
   move it within its room, or select it and use the arrow keys. Nothing is written
   until you press *Save changes*; *Discard* drops the pending edits. If another tab
   or Claude moved the same device in the meantime, the save is refused (409) and the
-  page reloads with a message instead of overwriting.
+  page stays as it is with a message and two choices: *Keep editing* (your placements
+  are kept, and saving again replaces the other change to those devices) or *Reload and
+  discard*. Nothing is overwritten until you choose.
 - **Roaming devices** (phones, laptops) belong to a room's list but have no point on
   the plan. Tick *roaming* next to the device in the list, or press *Mark roaming* (and *Mark fixed* to undo it) on its device page.
   Turning roaming off leaves the device in that room's list, ready to be dropped.
@@ -122,12 +144,20 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
     nudge it.
   - With a scale, each wall segment shows its length (*Show lengths* in the toolbar)
     and a wall being drawn shows its length as you go.
+  - *Undo* and *Redo* (Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y; Cmd on a Mac) step through the
+    pending edits: a finished drag, click, key press or typed name is one step, up to 100
+    steps. They are off while you type in a field, and the history clears on *Save changes*,
+    *Discard*, and after a refused save (409) is re-based onto the current drawing.
   - Nothing is written until *Save changes*; *Discard* drops the pending drawing, and
     leaving the page asks first. While a drawing edit is pending the page stays in
     Draw mode, and while a placement is pending *Draw* is disabled, so one save never
     mixes the two. If another tab (or an undo) changed the drawing since the page
-    loaded, the save is refused (409), nothing is written and the page reloads with a
-    message. Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
+    loaded, the save is refused (409) and nothing is written, but the page keeps your
+    work: new shapes are re-based onto the current drawing, and you save again. Pending
+    edits to a shape that changed or was removed meanwhile are listed, and dropped only
+    if you choose *Drop those edits, keep the rest*; *Reload and discard* throws it all
+    away and *Keep editing* leaves things as they are. A label's text is kept when you
+    click away from its box (an empty box just closes). Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
   - Drawing is page-only: there is no API or MCP write for it. `GET /api/v1/floorplan`
     lists the shapes (`shapes`); `get_floor_plan` gives only a summary (see MCP below).
 - **Draw furniture, fixtures and labels.** Also under *Draw*, and also a picture only.
@@ -192,10 +222,36 @@ Put real room names in a denylist file and point `LANSCAPE_LEAK_DENYLIST` (or
 **Upgrading from Phase 1.** The database migrates from schema v1 to v2 on start. The
 scripted install backs up `atlas.db` first. On a manual install, copy `atlas.db`
 before upgrading. The floor plan images live in `$DATA_DIR/floorplan`; back that
-directory up together with `atlas.db` (the scripted backup copies only `atlas.db`).
+directory up together with `atlas.db` (`lanscape-atlas backup`, below, does both; the
+installer's own pre-upgrade copy covers `atlas.db` only).
 Schema v5 (blank plans and scale) rebuilds the `floor_plan` table on start; an existing
 plan keeps its image, has no scale and shows imperial units until you change them. Schema v6 adds the
 `plan_shape` table for drawn walls, doors, furniture and labels; nothing existing changes.
+
+## Backup and restore
+
+```sh
+lanscape-atlas backup [--out PATH] [--keep N]
+lanscape-atlas restore PATH
+```
+
+`backup` writes one `.tar.gz` holding a consistent copy of the database (made with SQLite's
+online-backup API, so it is safe while the server runs), the floor plan images, and a small
+manifest. The file is mode 0600 because the database is your network inventory. Without
+`--out` it goes to `$DATA_DIR/backups/atlas-backup-YYYYmmdd-HHMMSS.tar.gz`; `--out FILE` names
+the archive, and `--out DIR` (an existing directory) puts a timestamped file there. After
+writing, only the newest `--keep` (default 7; 0 keeps all) `atlas-backup-*.tar.gz` files in
+that directory are kept. Run it as the service user (`doas -u lanscape lanscape-atlas backup`
+on the Alpine install) so the data directory stays readable by the service. Copy the archive
+off the host: a backup on the same disk does not survive the disk.
+
+`restore` replaces the live data with an archive. It exits with status 1 and changes nothing
+if the service is still answering on its `bind_host`/`bind_port` (stop it first,
+`rc-service lanscape-atlas stop`), if the file is not a valid backup (member names and
+types are checked, nothing is extracted by path), if the database fails its integrity check, or
+if the backup's schema is newer than the installed code. The replaced `atlas.db` and
+`floorplan/` are moved, not deleted, into `$DATA_DIR/replaced-YYYYmmdd-HHMMSS/`; remove that
+directory when you are satisfied. An older schema is migrated when the service next starts.
 
 ## Bluetooth (Find)
 
@@ -394,7 +450,7 @@ package normally includes the `venv` module; if `python3 -m venv` reports it
 missing on your release, install `py3-virtualenv` and use `virtualenv` instead.
 
 ```sh
-apk add python3 py3-pip git arp-scan nmap
+apk add python3 py3-pip git arp-scan nmap logrotate
 
 # Get the code; every later step runs from inside the checkout
 git clone https://github.com/SDNick484/lanscape-atlas.git
@@ -424,6 +480,9 @@ su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-ou
 install -m 0755 deploy/openrc/lanscape-atlas /etc/init.d/lanscape-atlas
 rc-update add lanscape-atlas default
 rc-service lanscape-atlas start
+
+# Log rotation (logrotate runs daily from /etc/periodic/daily)
+install -m 0644 deploy/logrotate/lanscape-atlas /etc/logrotate.d/lanscape-atlas
 ```
 
 **Make it reachable from the LAN.** By default `serve` listens on `127.0.0.1`
@@ -461,14 +520,23 @@ is in the `421` response and, once per name, in the log.
 `capabilities="^cap_net_raw,^cap_net_admin"` and exports `NMAP_PRIVILEGED=1` so
 nmap uses them. Ambient capabilities under `supervise-daemon` require
 **OpenRC 0.45 or newer**; on older versions run the service as root, or set file
-capabilities on the binaries and remove the `NMAP_PRIVILEGED` line.
+capabilities on the binaries and remove the `NMAP_PRIVILEGED` line. Why the init script
+does not use file capabilities itself: see [Remote access and security](#remote-access-and-security).
 
 The service logs (INFO level, with time, level and logger name) to
-`/var/log/lanscape-atlas.log`.
+`/var/log/lanscape-atlas.log`. `deploy/logrotate/lanscape-atlas` rotates it weekly, or
+as soon as the daily logrotate run finds it over 10 MB, and keeps four old logs. If the
+service crashes, `supervise-daemon` starts it again after 5 s, but gives up after 5
+restarts within 5 minutes; `rc-service lanscape-atlas status` then says `crashed`. Fix
+the cause (see the log), then `rc-service lanscape-atlas zap` and
+`rc-service lanscape-atlas start`.
 
 `lanscape-atlas update-oui` re-downloads the IEEE MA-L list. It validates the file
 before replacing the old one and leaves the old file in place on any failure, so it
-is safe to run from cron. To refresh it weekly as the `lanscape` user, add this line
+is safe to run from cron. A running service needs no restart: it checks the file's
+modification time at most once a minute and reloads the vendor table when it changes
+(a file that fails to parse keeps the table already loaded and logs one warning). To
+refresh it weekly as the `lanscape` user, add this line
 to `/etc/crontabs/root` and make sure `crond` runs (`rc-update add crond default`,
 `rc-service crond start`):
 
@@ -476,13 +544,16 @@ to `/etc/crontabs/root` and make sure `crond` runs (`rc-update add crond default
 17 4 * * 0 su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-oui'
 ```
 
+The scripted install below sets this up for you (as a weekly `/etc/periodic` job).
+
 ### Scripted install and upgrade
 
 `deploy/setup-alpine.sh` performs the steps above and is safe to re-run, so the same
 command installs and later upgrades. It needs root, an Alpine container with OpenRC
 0.45 or newer, and Python 3.12 or newer. It only touches `/opt/lanscape-atlas`,
-`/etc/lanscape-atlas`, `/var/lib/lanscape-atlas`, the log file, its own init script
-and logrotate entry; it never upgrades packages or restarts other services.
+`/etc/lanscape-atlas`, `/var/lib/lanscape-atlas`, the log file, its own init script,
+logrotate entry and weekly job, and its lock; it never upgrades packages or restarts
+other services.
 
 1. Copy `deploy/setup.env.example` to `/etc/lanscape-atlas/setup.env`, fill it in and
    `chmod 600` it. It holds your router password, API token and (for Bluetooth Find)
@@ -503,11 +574,11 @@ running: it fetches and checks out `--ref` (default `main`), then downloads and 
 the app and its dependencies as wheels (`pip wheel`, into a temporary directory under
 `/opt/lanscape-atlas`). If GitHub or PyPI cannot be reached, or a dependency has no
 usable wheel, the run ends there and the service was never stopped. Only then does it
-stop the service, install from those wheels (no network), back up the database (last
-three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
+stop the service, install from those wheels (no network), back up the database (as
+`lanscape`; last three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
 start the service. It finishes by refreshing the vendor list (`update-oui`; a failed
-download is only a warning, and the running service uses the new list from its next
-start) and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
+download is only a warning; the running service picks up a new list without a restart)
+and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
 generated on the first run and kept afterwards unless you set `API_TOKEN`; the script
 never prints it.
 
@@ -519,6 +590,40 @@ which case the code may not match the database and may not start; the pre-upgrad
 is in `/var/lib/lanscape-atlas/backups`). It reports the service as started only if
 `rc-service lanscape-atlas status` says so afterwards, and otherwise says it is down. A
 service that was not running when the script began is not started by a failed run.
+
+Other things a run takes care of:
+
+- **One run at a time.** A run holds `/run/lanscape-atlas-setup.lock` (a directory with
+  its PID) from after the first config check until it exits; a second run stops with the
+  PID of the first. A lock whose PID no longer runs (the run was killed with `kill -9`)
+  is stale and is taken over with a warning. `--dry-run` takes no lock.
+- **A crashed service.** If `rc-service lanscape-atlas status` says `crashed` (it gave
+  up respawning), the script resets it with `rc-service lanscape-atlas zap`, which
+  `rc-service lanscape-atlas start` needs before it starts anything, and then starts it
+  as usual; a failed run starts it again too.
+- **A changed `REPO_URL`.** The checkout follows `REPO_URL` in `setup.env`: when it
+  differs from the checkout's `origin`, the script runs `git remote set-url origin`
+  before fetching (the URLs are not printed).
+- **A Python upgrade.** After an Alpine upgrade from, say, Python 3.12 to 3.13 the old
+  virtualenv's `python` still runs but has no packages and no pip. The script compares
+  the version in the virtualenv's `pyvenv.cfg` with `python3` and checks
+  `python -m pip --version`, and rebuilds the virtualenv from the wheels when either
+  fails.
+- **Temporary files.** Everything goes in one temporary directory (plus a file next to
+  `config.toml` while it is replaced), removed when the script exits, whatever the
+  outcome. The config checks and `--dry-run` render `config.toml` in memory only, so
+  its secrets are never written to a temporary file.
+- **The smoke test** passes only when a collector finished a run after this start, not
+  on a `last_ok` left in the database by the previous version. When it fails, it says
+  whether `rc-service` reports the service running.
+- **The weekly vendor list refresh.** The script installs
+  `/etc/periodic/weekly/lanscape-atlas-update-oui`, which runs `update-oui` as
+  `lanscape` and appends its output to the service log. Alpine's root crontab runs
+  `/etc/periodic/weekly` (Saturday 03:00) as long as `crond` runs; the script warns if
+  it is not in the default runlevel, but does not start it. To opt out, set
+  `UPDATE_OUI_WEEKLY=false` in `setup.env` and re-run: the job is removed. If
+  `/etc/crontabs/root` already has an `update-oui` line (the manual install above), no
+  job is added.
 
 Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
 run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If a hand
@@ -600,6 +705,19 @@ Each collector has its own table, `[collectors.<name>]`, with `enabled`,
 | `ssdp` | every 600 s |
 | `nmap_light` | cron `17 3 * * *` (nightly) |
 
+Setting `interval_s` on a collector clears its default `cron`, and setting `cron`
+clears its default `interval_s`; setting both in one table is an error. A `cron`
+string is checked when the file loads (five fields, e.g. `"17 3 * * *"`), so a bad
+one stops startup before any collector runs.
+
+Values are checked when the file loads and an out-of-range one stops startup with a
+message naming the key: `bind_port` 1 to 65535; `observation_retention_days` and
+`ip_match_window_min` at least 1; `interval_s` at least 1; `timeout_s` above 0.
+
+A key that is not recognised (a typo, or one from an older release) does not stop
+startup. Atlas logs one warning per key naming the key and its table, e.g.
+`unknown key 'usrname' in [router] is ignored`, and then ignores it.
+
 Secrets can come from the environment instead of the file:
 `LANSCAPE_ROUTER_PASSWORD`, `LANSCAPE_API_TOKEN`. `LANSCAPE_DATA_DIR` moves the data
 directory.
@@ -629,6 +747,24 @@ reverse proxy must therefore pass the original `Host` header through. Clients th
 send no `Origin` (curl, API clients) are unaffected. `/mcp` instead accepts an
 `Origin` only if it is `http://` or `https://` plus an allowed host.
 
+## Text limits
+
+Every user-supplied text field is checked in one place (the Service), so the pages, the
+API and MCP agree. Text is trimmed and an empty value clears the field (`" Office "` and
+`"Office"` are one place). Text over the limit is refused with a message naming the field
+and the limit; it is never cut short.
+
+| Field | Limit (characters, after trimming) |
+| --- | --- |
+| Device `name`, `type`, `icon`, `owner` | 200 |
+| Device `notes` | 4000 |
+| Place (room) name | 200 |
+| Placeholder device `name` and `type`, new-device `name` and `type` when claiming | 200 |
+| Link `detail` | 200 |
+
+JSON request bodies to `/api` and `/mcp` are limited to 64 KiB (413 above that). The
+floor plan image upload has its own 10 MiB limit and is not affected.
+
 ## Remote access and security
 
 lanscape-atlas has no accounts of its own. Choose one of these setups:
@@ -644,6 +780,33 @@ lanscape-atlas has no accounts of its own. Choose one of these setups:
    renaming devices, changing trust, deleting links and triggering scans. Use it only
    on a network you fully trust, and never expose the port to the internet.
 
+**The service account and the installer.** The app runs as the unprivileged
+`lanscape` user, which owns `/var/lib/lanscape-atlas` and can therefore put a symbolic
+link (or a hard link) anywhere in it. `deploy/setup-alpine.sh` runs as root, so it never
+follows one there: it stops with a message naming the path when `/var/lib/lanscape-atlas`,
+its `floorplan` directory, `backups` directory or `config.toml` is a symbolic link
+(`--dry-run` reports it). It creates those directories with `mkdir`, which does not
+follow a link, and sets their owner and mode through a descriptor opened with
+`O_NOFOLLOW` (not `install -d -o`, which follows a linked directory). `config.toml` and
+its timestamped backups are written into a temporary file the script made, opened
+without following a link and refused if it is no longer a regular file of root's with a
+single link, then renamed into place. The database backup before a migration is made by
+`lanscape` itself (into `/var/lib/lanscape-atlas/backups`, 0700, three kept), so root
+never opens the database or writes into that directory.
+
+**Capabilities.** The init script still grants `cap_net_raw` and `cap_net_admin` as
+ambient capabilities, which the whole Python process and every child inherit, not only
+`arp-scan` and `nmap`. File capabilities restricted to the `lanscape` group (`arp-scan`
+needs only `cap_net_raw`) would be narrower, but are not used yet: `setcap` on
+`/usr/bin/arp-scan` and `/usr/bin/nmap` changes files `apk` owns and is lost whenever
+`apk` upgrades or reinstalls them, which would stop the collectors until the installer
+runs again; private copies under `/opt/lanscape-atlas` would miss nmap's security
+updates; and neither has been shown to work for the collectors in an unprivileged
+Alpine LXC container, where `setcap` needs namespaced file capabilities. The symbolic
+link refusals are covered by the test suite, which CI runs under the shells it has
+(including busybox `sh` in an Alpine container); they were not tested on Alpine itself
+as root with OpenRC, and file capabilities were not tested at all.
+
 ## MCP
 
 The MCP server uses streamable HTTP at `/mcp`. With a token configured:
@@ -654,7 +817,7 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 ```
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
-`claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
+`claim_interface`, `set_place`, `forget_device`, `run_deep_scan`, `recent_changes`, `undo`,
 `get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`, `hide_ble`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
@@ -676,7 +839,20 @@ python3 -m venv .venv
 .venv/bin/pre-commit install      # runs the leak check on every commit
 ```
 
-CI runs ruff, mypy, pytest and the leak check. Tests never touch the network.
+CI runs ruff, mypy, pytest and the leak check, and the browser tests in a separate
+job. Tests never touch the network.
+
+The Playwright tests in `tests/browser` drive the UI in Chromium. They are skipped
+unless Playwright and a browser are installed:
+
+```sh
+.venv/bin/pip install -e '.[browser]'
+.venv/bin/playwright install chromium    # add --with-deps on a bare Linux host
+.venv/bin/pytest tests/browser
+```
+
+With `LANSCAPE_BROWSER_TESTS=1` set a missing Playwright or Chromium fails the run
+instead of skipping; the CI browser job sets it.
 `lanscape-atlas ingest-file tests/fixtures/fake_house.json` loads the fake-house
 dataset for local UI work.
 
@@ -694,8 +870,10 @@ Tools:
 
 - `scripts/check_leaks.py` fails on MAC addresses outside the documentation range,
   128-bit UUIDs other than `00000000-0000-4000-8000-0000000000xx` and the Bluetooth base
-  (`xxxxxxxx-0000-1000-8000-00805f9b34fb`), private (RFC 1918) IPv4 addresses, and any
-  term from your personal denylist. The
+  (`xxxxxxxx-0000-1000-8000-00805f9b34fb`), IPv4 addresses outside the documentation
+  ranges (including RFC 1918, CGNAT (RFC 6598) and public addresses), IPv6 addresses
+  outside `2001:db8::/32` (link-local only when it embeds a MAC), and any term from your
+  personal denylist. A tracked file that cannot be read also fails. The
   pre-commit hook runs it on staged files; CI runs it on the whole repository.
 - The optional denylist lives **outside the repository** at
   `~/.config/lanscape-atlas/denylist.txt` (one term per line, `#` comments). Put your

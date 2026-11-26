@@ -10,10 +10,10 @@ import os
 import sys
 import tempfile
 from datetime import timedelta
-from importlib.resources import as_file, files
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from lanscape_atlas import backup
 from lanscape_atlas.clock import utcnow
 from lanscape_atlas.config import load_settings
 from lanscape_atlas.events import EventBus
@@ -36,14 +36,6 @@ def load_observations(path: Path) -> list[Observation]:
     return [Observation.from_json(json.dumps(d)) for d in raw]
 
 
-def _load_oui(data_dir: Path) -> OuiDB:
-    custom = data_dir / "oui.csv"
-    if custom.is_file():
-        return OuiDB.load(custom)
-    with as_file(files("lanscape_atlas") / "data" / "oui_sample.csv") as sample:
-        return OuiDB.load(sample)
-
-
 def ingest_file(path: Path) -> IngestResult:
     settings = load_settings()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +49,7 @@ def ingest_file(path: Path) -> IngestResult:
             conn,
             service,
             events,
-            _load_oui(settings.data_dir),
+            OuiDB.load_data_dir(settings.data_dir),
             utcnow,
             ip_match_window=timedelta(minutes=settings.ip_match_window_min),
         )
@@ -160,7 +152,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", help="bind address (default: bind_host from config)")
     p.add_argument("--port", type=int, help="bind port (default: bind_port from config)")
     sub.add_parser("update-oui", help="download the IEEE OUI vendor list")
+    p = sub.add_parser(
+        "backup", help="archive the database and floor plan images (safe while serving)"
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        help="archive file, or directory for a timestamped name (default: DATA_DIR/backups/)",
+    )
+    p.add_argument(
+        "--keep",
+        type=int,
+        default=backup.DEFAULT_KEEP,
+        help=f"keep the newest N archives there (default {backup.DEFAULT_KEEP}, 0 = all)",
+    )
+    p = sub.add_parser("restore", help="restore a backup archive (the service must be stopped)")
+    p.add_argument("path", type=Path)
     return parser
+
+
+def _restore(path: Path) -> int:
+    try:
+        settings = load_settings()
+        if backup.service_running(settings):
+            raise backup.BackupError(
+                f"the service is running ({settings.bind_host}:{settings.bind_port} accepts "
+                "connections); stop it first, e.g. rc-service lanscape-atlas stop"
+            )
+        replaced = backup.restore_backup(settings, path)
+    except (OSError, ValueError, backup.BackupError) as exc:
+        print(f"lanscape-atlas: restore refused: {exc}", file=sys.stderr)
+        return 1
+    print(f"restored {path}; the previous data was kept in {replaced}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,6 +221,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"lanscape-atlas: {exc}", file=sys.stderr)
             return 1
         return 0
+    if args.command == "backup":
+        try:
+            print(backup.create_backup(load_settings(), args.out, args.keep))
+        except (OSError, ValueError, backup.BackupError) as exc:
+            print(f"lanscape-atlas: backup failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "restore":
+        return _restore(args.path)
     return 2  # pragma: no cover - argparse enforces a known subcommand
 
 

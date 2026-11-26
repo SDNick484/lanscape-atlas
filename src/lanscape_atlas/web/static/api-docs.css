@@ -1,0 +1,9 @@
+  body { margin: 0; }
+  #api-docs-gate { max-width: 28rem; margin: 2rem auto; padding: 0 1rem;
+    font-family: system-ui, sans-serif; }
+  #api-docs-gate label, #api-docs-gate input, #api-docs-gate button {
+    display: block; width: 100%; box-sizing: border-box; }
+  #api-docs-gate input { margin: 0.25rem 0 0.75rem; padding: 0.5rem; font: inherit; }
+  #api-docs-gate button { padding: 0.5rem; font: inherit; cursor: pointer; }
+  #api-docs-error { color: #b00020; min-height: 1.25rem; }
+  #api-docs-status { font-family: system-ui, sans-serif; padding: 1rem; }

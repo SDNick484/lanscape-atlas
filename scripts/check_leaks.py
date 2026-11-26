@@ -12,7 +12,11 @@ source (e.g. room names) with the same rules and is also fail-closed; terms from
 sources are merged.
 
 MAC addresses, 128-bit UUIDs (other than the documentation UUIDs and the Bluetooth base) and
-denylist terms are flagged in every file; only the private-IPv4 check has a path allow-list.
+denylist terms are flagged in every file. IPv4 and IPv6 addresses are flagged unless they are
+in a documentation range, loopback, unspecified, multicast or (IPv4) broadcast; link-local
+IPv6 is flagged only when it embeds an EUI-64 interface ID (a MAC). The IP checks skip the
+paths in ``IP_ALLOWED_PATH_GLOBS`` and honour ``IP_FALSE_POSITIVES``. An unreadable tracked
+file is an error.
 
 Image files (.png .jpg .jpeg .svg .gif .webp) must never be committed, whether found by
 the default ``git ls-files`` scan or passed as explicit paths (pre-commit). Only paths
@@ -30,29 +34,40 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-# Spec section 9: the path allow-list exempts a file from the private-IP check
-# ONLY. MAC addresses and denylist terms are flagged everywhere.
+# Spec section 9: the path allow-list exempts a file from the IP-address checks
+# ONLY. MAC addresses, UUIDs and denylist terms are flagged everywhere.
 IP_ALLOWED_PATH_GLOBS = (
     "docs/superpowers/**",
     "scripts/check_leaks.py",
     "tests/test_check_leaks.py",
 )
+# Exact address-shaped tokens that are not addresses (version strings, OIDs, ...), each
+# (path glob, token, reason). A token is ignored only in files matching its glob.
+IP_FALSE_POSITIVES: tuple[tuple[str, str, str], ...] = ()
 # Documentation MAC blocks (RFC 7042 style) and synthetic random MACs,
 # compared as 10 lowercase hex digits with separators removed.
 ALLOWED_MAC_PREFIXES = ("00005e0053", "02005e0053")
 # The canonical documentation placeholder, allowed as an exact match only.
 PLACEHOLDER_MACS = ("aabbccddeeff",)
-# Exactly RFC 1918; loopback, link-local, 0.0.0.0 etc. are not leaks.
-RFC1918_NETWORKS = tuple(
-    ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+# Only these IPv4 networks are documentation addresses (RFC 5737). Any other IPv4 address is a
+# leak, including RFC 1918, CGNAT (100.64.0.0/10), public WAN addresses and link-local.
+IPV4_DOC_NETWORKS = tuple(
+    ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
 )
+# The only IPv6 documentation range (RFC 3849).
+IPV6_DOC_NETWORK = ipaddress.ip_network("2001:db8::/32")
+IPV4_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
 
 # Boundaries reject only an adjacent hex digit, so "mac:<mac>" and "<mac>: up" match.
 MAC_RE = re.compile(
     r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])"
     r"|(?<![0-9A-Fa-f.])(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}(?![0-9A-Fa-f])"
 )
-IPV6_CANDIDATE_RE = re.compile(r"[0-9A-Fa-f:.]*::[0-9A-Fa-f:.]*")
+# Maximal runs of IPv6 characters; each is validated with ipaddress, so full and compressed
+# forms are both caught and anything that is not an IPv6 address is ignored. A word character
+# on either side rules a run out, so CSS "name::after", XPath "ancestor::div" and
+# "ignore::Warning" are not read as addresses.
+IPV6_CANDIDATE_RE = re.compile(r"(?<!\w)[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?!\w)")
 # 128-bit UUIDs (iBeacon UUIDs, custom service UUIDs) identify real devices. Allowed: the
 # documentation UUIDs 00000000-0000-4000-8000-0000000000xx and anything on the Bluetooth
 # base UUID (xxxxxxxx-0000-1000-8000-00805f9b34fb, the 16/32-bit assigned numbers).
@@ -63,6 +78,16 @@ UUID_RE = re.compile(
 ALLOWED_UUID_RE = re.compile(
     r"00000000-0000-4000-8000-0000000000[0-9a-f]{2}|[0-9a-f]{8}-0000-1000-8000-00805f9b34fb"
 )
+# Exact UUID values a vendored file carries as library constants, keyed by the repo-relative
+# path they may appear in. Swagger UI 5.34.1 (swagger-ui-bundle.js) uses this one as the
+# sample value for JSON Schema "uuid" and "string_uuid" formats; it is not a device UUID.
+# Path-scoped and exact-value: nothing else in the tree may use it, and the file may not
+# carry any other UUID.
+# Split so this file does not itself match UUID_RE; the joined value is the UUID.
+_SWAGGER_UI_SAMPLE_UUID = "3fa85f64" + "-5717-4562-b3fc-2c963f66afa6"
+VENDORED_UUID_ALLOW: dict[str, frozenset[str]] = {
+    "src/lanscape_atlas/web/static/swagger-ui-bundle.js": frozenset({_SWAGGER_UI_SAMPLE_UUID}),
+}
 IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.]*\d)")
 
 
@@ -117,12 +142,40 @@ def is_ip_exempt(path: str) -> bool:
     return any(fnmatch(path, glob) for glob in IP_ALLOWED_PATH_GLOBS)
 
 
-def _ip_is_leak(raw: str) -> bool:
+def is_ip_false_positive(path: str, token: str) -> bool:
+    return any(
+        fnmatch(path, glob) and token == value for glob, value, _reason in IP_FALSE_POSITIVES
+    )
+
+
+def _ipv4_is_leak(raw: str) -> bool:
     try:
-        ip = ipaddress.ip_address(raw)
+        ip = ipaddress.IPv4Address(raw)
     except ValueError:
         return False
-    return any(ip in net for net in RFC1918_NETWORKS)
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip == IPV4_BROADCAST:
+        return False
+    return not any(ip in net for net in IPV4_DOC_NETWORKS)
+
+
+def _ipv6_address(token: str) -> ipaddress.IPv6Address | None:
+    """Parse a candidate run as IPv6, tolerating a trailing ``:`` or ``.`` from prose."""
+    for candidate in (token, token.rstrip(":."), token.rstrip(":.") + ":"):
+        try:
+            return ipaddress.IPv6Address(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _ipv6_is_leak(ip: ipaddress.IPv6Address) -> bool:
+    if ip in IPV6_DOC_NETWORK or ip.is_loopback or ip.is_unspecified:
+        return False
+    if ip.is_link_local:
+        # A link-local address is only a leak when its interface ID is EUI-64 (the MAC is
+        # visible as bytes 11-12 == ff:fe). Other link-local IDs identify nothing.
+        return ip.packed[11:13] == b"\xff\xfe"
+    return True
 
 
 def _mask_ipv6(line: str) -> str:
@@ -130,13 +183,9 @@ def _mask_ipv6(line: str) -> str:
 
     def repl(m: re.Match[str]) -> str:
         token = m.group()
-        for candidate in (token, token.rstrip(":."), token.rstrip(":.") + ":"):
-            try:
-                ipaddress.IPv6Address(candidate.split("/")[0])
-            except ValueError:
-                continue
-            return " " * len(token)
-        return token
+        if _ipv6_address(token) is None:
+            return token
+        return " " * len(token)
 
     return IPV6_CANDIDATE_RE.sub(repl, line)
 
@@ -144,6 +193,7 @@ def _mask_ipv6(line: str) -> str:
 def find_leaks(text: str, path: str, denylist: set[str]) -> list[str]:
     """Return ``path:line: reason`` strings for each leak found in ``text``."""
     check_ips = not is_ip_exempt(path)
+    vendored_uuids = VENDORED_UUID_ALLOW.get(path, frozenset())
     found: list[str] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         for m in MAC_RE.finditer(_mask_ipv6(line)):
@@ -151,12 +201,20 @@ def find_leaks(text: str, path: str, denylist: set[str]) -> list[str]:
             if digits not in PLACEHOLDER_MACS and not digits.startswith(ALLOWED_MAC_PREFIXES):
                 found.append(f"{path}:{lineno}: MAC address outside documentation range")
         for m in UUID_RE.finditer(line):
-            if not ALLOWED_UUID_RE.fullmatch(m.group().lower()):
+            value = m.group().lower()
+            if not ALLOWED_UUID_RE.fullmatch(value) and value not in vendored_uuids:
                 found.append(f"{path}:{lineno}: UUID outside the documentation range")
         if check_ips:
             for m in IPV4_RE.finditer(line):
-                if _ip_is_leak(m.group()):
-                    found.append(f"{path}:{lineno}: RFC 1918 IPv4 address")
+                if _ipv4_is_leak(m.group()) and not is_ip_false_positive(path, m.group()):
+                    found.append(f"{path}:{lineno}: IPv4 address outside the documentation ranges")
+            for m in IPV6_CANDIDATE_RE.finditer(line):
+                ip6 = _ipv6_address(m.group())
+                if ip6 is None or not _ipv6_is_leak(ip6):
+                    continue
+                if is_ip_false_positive(path, m.group()):
+                    continue
+                found.append(f"{path}:{lineno}: IPv6 address outside the documentation range")
         lowered = line.lower()
         for term in sorted(denylist):
             if term in lowered:
@@ -185,7 +243,9 @@ def main(argv: list[str]) -> int:
             continue
         try:
             data = Path(path).read_bytes()
-        except OSError:
+        except OSError as exc:
+            # An unreadable file could hide anything, so it fails the check rather than passing.
+            leaks.append(f"{path}: cannot read file, so it cannot be checked ({exc.strerror})")
             continue
         if b"\0" in data:
             continue  # binary

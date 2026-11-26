@@ -211,6 +211,50 @@ def test_new_ip_opens_second_lease_without_closing(ing, db):
     assert [tuple(r) for r in rows] == [(IP, 0), ("192.0.2.20", 0)]
 
 
+def test_alternating_interfaces_keep_lease_rows_bounded(ing, db, clock):
+    for n in range(100):
+        t = clock.advance(seconds=30)
+        ing.ingest([obs(mac=MAC if n % 2 == 0 else MAC2, ipv4=IP, seen_at=t)])
+    rows = db.execute("select interface_id, closed from ip_lease where ipv4 = ?", (IP,)).fetchall()
+    assert len(rows) == 2
+    assert sorted(r["closed"] for r in rows) == [0, 1]
+
+
+def test_ip_only_observation_for_contested_address_not_attached(ing, db, clock):
+    for n in range(4):
+        t = clock.advance(seconds=30)
+        ing.ingest([obs(mac=MAC if n % 2 == 0 else MAC2, ipv4=IP, seen_at=t)])
+    t = clock.advance(seconds=30)
+    r = ing.ingest([obs(source="mdns", seen_at=t, ipv4=IP, hostname=TV)])
+    assert r.unattached == 1 and r.updated == 0
+    row = db.execute(
+        "select interface_id, attached from observation where source='mdns'"
+    ).fetchone()
+    assert tuple(row) == (None, 0)
+
+
+def test_dhcp_reassignment_still_closes_and_opens(ing, db, clock):
+    ing.ingest([obs(mac=MAC, ipv4=IP)])
+    t = clock.advance(minutes=1)
+    ing.ingest([obs(mac=MAC2, ipv4=IP, seen_at=t)])
+    rows = db.execute("select interface_id, closed from ip_lease order by id").fetchall()
+    assert [tuple(r) for r in rows] == [(1, 1), (2, 0)]
+    t = clock.advance(minutes=1)
+    r = ing.ingest([obs(source="mdns", seen_at=t, ipv4=IP, hostname=TV)])
+    assert r.unattached == 0 and r.updated == 1
+
+
+def test_get_device_limits_leases_with_count(ing, db, svc):
+    from lanscape_atlas.service import queries
+
+    ing.ingest([obs(mac=MAC, ipv4="192.0.2.10")])
+    for n in range(queries.LEASE_LIMIT + 5):
+        ing.ingest([obs(mac=MAC, ipv4=f"198.51.100.{n}", attrs={"n": n})])
+    d = queries.get_device(db, 1)
+    assert len(d.leases) == queries.LEASE_LIMIT
+    assert d.lease_count == queries.LEASE_LIMIT + 6
+
+
 def test_iface_kind_rules(ing, db):
     ing.ingest([obs(mac=MAC, iface_kind="bogus")])
     assert iface_rows(db)[0]["kind"] == "unknown"

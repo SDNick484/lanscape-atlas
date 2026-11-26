@@ -7,8 +7,10 @@ the database. The connection is retried forever, with capped exponential backoff
 
 Failure logging is rate limited: the first failure of an outage (and any change of error)
 is a WARNING, the same error again is a WARNING at most once per ``REPEAT_WARNING``, and
-every other attempt is at DEBUG. Reconnecting after an outage is one INFO line with how long
-the connection was down.
+every other attempt is at DEBUG. Reconnecting is one INFO line with how long the connection
+had been failing. A connection only counts as recovered once it has stayed up for
+``STABLE_SESSION``: until then its failures keep growing the backoff and the rate limit
+stays in force, so a session that fails right after the handshake does not reset either.
 
 HA's advert stream is change-driven: an address is only pushed when its payload
 (manufacturer data, service data, service UUIDs, name) changes, so a steady beacon is pushed
@@ -53,6 +55,8 @@ _MAX_ERROR = 300
 BACKOFF_BASE_S = 1.0
 BACKOFF_CAP_S = 300.0
 REPEAT_WARNING = timedelta(hours=1)  # an unchanged error is warned again at most this often
+# A connection up this long has recovered: its failure count and rate limit start again.
+STABLE_SESSION = timedelta(seconds=60)
 
 
 def equal_jitter(delay: float) -> float:
@@ -135,11 +139,16 @@ class HaBluetoothClient:
         self._connected = False
         self._since: datetime | None = None
         self._last_error: str | None = None
-        self._failures = 0  # consecutive failed attempts
-        # Outage logging: when the current outage began, and the last WARNING's error/time.
-        self._down_since: datetime | None = None
+        self._failures = 0  # consecutive failed attempts (backoff); reset after a stable session
+        self._outage_since: datetime | None = None  # first failure of the outage (reminders)
+        # Rate limit: the last WARNING's error and time (kept until a stable session).
         self._warned_error: str | None = None
         self._warned_at: datetime | None = None
+        # Handshake of the connection now running, if any.
+        self._up_since: datetime | None = None
+        # Since the last handshake: when failing began, and failures counted (the INFO line).
+        self._down_since: datetime | None = None
+        self._segment_failures = 0
 
     # -- public API -------------------------------------------------------------------------
 
@@ -156,6 +165,7 @@ class HaBluetoothClient:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        self._up_since = None
         self._set_connected(False)
 
     def status(self) -> ClientStatus:
@@ -175,19 +185,35 @@ class HaBluetoothClient:
             self._since = self._clock()
 
     def _record_error(self, text: str) -> None:
-        """Count one failed attempt and log it (rate limited; redacted, never with exc_info)."""
+        """Count one failed attempt and log it (rate limited; redacted, never with exc_info).
+
+        Called once for each connection that ends. One that had completed its handshake and
+        stayed up for ``STABLE_SESSION`` has recovered, so the failure count and the rate
+        limit start again. A shorter one counts as a failure, whatever its handshake did.
+        """
         now = self._clock()
+        if self._up_since is not None:
+            if now - self._up_since >= STABLE_SESSION:
+                self._failures = 0
+                self._outage_since = self._warned_error = self._warned_at = None
+            self._up_since = None
         error = self._last_error = self._redact(text)
         self._failures += 1
+        self._segment_failures += 1
         if self._down_since is None:
             self._down_since = now  # connected (or starting) -> failing
-        elif error == self._warned_error and self._warned_at is not None:
+        if self._outage_since is None:
+            self._outage_since = now
+            log.warning("Home Assistant Bluetooth: %s", error)
+            self._warned_error, self._warned_at = error, now
+            return
+        if error == self._warned_error and self._warned_at is not None:
             if now - self._warned_at < REPEAT_WARNING:
                 log.debug("Home Assistant Bluetooth: %s", error)
                 return
             log.warning(
                 "Home Assistant Bluetooth: still failing after %s (%s): %s",
-                _duration(now - self._down_since),
+                _duration(now - self._outage_since),
                 _attempts(self._failures),
                 error,
             )
@@ -197,16 +223,22 @@ class HaBluetoothClient:
         self._warned_error, self._warned_at = error, now
 
     def _mark_connected(self) -> None:
-        """Handshake complete: log the end of an outage (once) and reset failure state."""
+        """Handshake complete: mark connected and log the end of the stretch of failures.
+
+        The failure count and rate limit are left alone: they reset only once the session has
+        stayed up (see ``_record_error``).
+        """
+        now = self._clock()
         if self._down_since is not None:
             log.info(
                 "Home Assistant Bluetooth: connected again after %s down (%s)",
-                _duration(self._clock() - self._down_since),
-                _attempts(self._failures),
+                _duration(now - self._down_since),
+                _attempts(self._segment_failures),
             )
-        self._failures = 0
+        self._down_since = None
+        self._segment_failures = 0
         self._last_error = None
-        self._down_since = self._warned_error = self._warned_at = None
+        self._up_since = now
         self._set_connected(True)
 
     def _reconnect_delay(self) -> float:

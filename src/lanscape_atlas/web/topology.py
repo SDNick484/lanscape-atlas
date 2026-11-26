@@ -23,6 +23,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field, FiniteFloat
 
 from lanscape_atlas.service import Service
+from lanscape_atlas.service.service import LINK_DETAIL_MAX, SHORT_TEXT_MAX
 
 # sqlite INTEGER range; ids start at 1. Out of range -> 422, never an OverflowError 500.
 MAX_ID = 2**63 - 1
@@ -32,15 +33,15 @@ Graph = dict[str, list[dict[str, Any]]]
 
 
 class PlaceholderBody(BaseModel):
-    name: str
-    type: str
+    name: str = Field(max_length=SHORT_TEXT_MAX)
+    type: str = Field(max_length=SHORT_TEXT_MAX)
 
 
 class LinkBody(BaseModel):
     a_device_id: BodyId
     b_device_id: BodyId
     kind: str
-    detail: str | None = None
+    detail: str | None = Field(default=None, max_length=LINK_DETAIL_MAX)
 
 
 class LayoutBody(BaseModel):

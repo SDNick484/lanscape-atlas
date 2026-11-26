@@ -280,6 +280,10 @@ class Ingestor:
         this pair's latest closed lease when within ``ip_match_window``.
         Otherwise every other open lease on ``ipv4`` is closed (its
         ``last_seen`` kept) and this pair's open lease is opened or bumped.
+        When this pair has no open lease but closed one on ``ipv4`` that was
+        seen within ``ip_match_window`` (another interface took the address
+        and now it is back), that lease is reopened rather than a new row
+        inserted, so two interfaces alternating on one address keep two rows.
         """
         blocking = self.conn.execute(
             "SELECT 1 FROM ip_lease WHERE ipv4 = ? AND closed = 0 AND interface_id != ?"
@@ -299,11 +303,20 @@ class Ingestor:
             (iface_id, ipv4),
         ).fetchone()
         if row is None:
-            self.conn.execute(
-                "INSERT INTO ip_lease(interface_id, ipv4, first_seen, last_seen)"
-                " VALUES (?, ?, ?, ?)",
-                (iface_id, ipv4, seen, seen),
-            )
+            back = self.conn.execute(
+                "SELECT id FROM ip_lease WHERE interface_id = ? AND ipv4 = ? AND closed = 1"
+                " AND last_seen >= ? ORDER BY last_seen DESC, id DESC LIMIT 1",
+                (iface_id, ipv4, iso(parse_iso(seen) - self.ip_match_window)),
+            ).fetchone()
+            if back is not None:
+                self.conn.execute("UPDATE ip_lease SET closed = 0 WHERE id = ?", (int(back[0]),))
+                self._bump_last_seen("ip_lease", int(back[0]), seen)
+            else:
+                self.conn.execute(
+                    "INSERT INTO ip_lease(interface_id, ipv4, first_seen, last_seen)"
+                    " VALUES (?, ?, ?, ?)",
+                    (iface_id, ipv4, seen, seen),
+                )
         else:
             self._bump_last_seen("ip_lease", int(row[0]), seen)
 
@@ -334,12 +347,24 @@ class Ingestor:
         lo = iso(seen_at - self.ip_match_window)
         hi = iso(seen_at + self.ip_match_window)
         row = self.conn.execute(
-            "SELECT i.id, i.device_id FROM ip_lease l JOIN interface i ON i.id = l.interface_id"
+            "SELECT i.id, i.device_id, l.first_seen FROM ip_lease l"
+            " JOIN interface i ON i.id = l.interface_id"
             " WHERE l.ipv4 = ? AND l.closed = 0 AND l.last_seen >= ? AND l.first_seen <= ?"
             " ORDER BY l.last_seen DESC, l.id DESC LIMIT 1",
             (ipv4, lo, hi),
         ).fetchone()
         if row is None:
+            return None
+        # Contested: another interface was seen on this address, inside the window, after
+        # the winner's lease began. An ordinary reassignment ends the old lease before the
+        # new one starts, so it is not contested; alternating claimants overlap.
+        rival = self.conn.execute(
+            "SELECT 1 FROM ip_lease WHERE ipv4 = ? AND interface_id != ?"
+            " AND last_seen >= ? AND last_seen >= ? AND first_seen <= ? LIMIT 1",
+            (ipv4, int(row[0]), lo, str(row["first_seen"]), hi),
+        ).fetchone()
+        if rival is not None:
+            log.debug("ip-only observation for contested %s not attributed", ipv4)
             return None
         return int(row[0]), int(row[1])
 

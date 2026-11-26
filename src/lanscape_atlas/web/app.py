@@ -22,7 +22,6 @@ import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,7 +32,7 @@ from fastapi.exception_handlers import (
     request_validation_exception_handler,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -55,6 +54,7 @@ from lanscape_atlas.store.db import migrate, open_db
 from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.ble_api import router as ble_router
+from lanscape_atlas.web.body_limit import JsonBodyLimitMiddleware
 from lanscape_atlas.web.deep_scan import DeepScanLimitReached, start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE, STALE_SHAPES_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
@@ -63,14 +63,9 @@ log = logging.getLogger(__name__)
 
 PROTECTED_PREFIXES = ("/api", "/mcp")
 
-
-def load_oui(data_dir: Path) -> OuiDB:
-    """``$data_dir/oui.csv`` if present, else the packaged sample."""
-    custom = data_dir / "oui.csv"
-    if custom.is_file():
-        return OuiDB.load(custom)
-    with as_file(files("lanscape_atlas") / "data" / "oui_sample.csv") as sample:
-        return OuiDB.load(sample)
+# The API description page (Swagger UI, vendored under static/). Outside /api so a browser
+# can open it: its spec, /api/openapi.json, is the part behind the bearer token.
+API_DOCS_PAGE = Path(__file__).parent / "static" / "api-docs.html"
 
 
 def _is_protected(path: str) -> bool:
@@ -456,7 +451,7 @@ def create_app(
 
     events = EventBus()
     service = Service(db, events, clock, ip_match_window_min=settings.ip_match_window_min)
-    oui = load_oui(settings.data_dir)
+    oui = OuiDB.load_data_dir(settings.data_dir)
     ingestor = Ingestor(
         db,
         service,
@@ -497,15 +492,22 @@ def create_app(
             if owns_conn:
                 db.close()
 
-    # OpenAPI/docs live under /api so the bearer token covers them (Ruling 33d).
+    # The OpenAPI spec stays under /api so the bearer token covers it (Ruling 33d).
+    # FastAPI's own docs page loads Swagger UI from a CDN, so it is off; /docs serves
+    # the vendored page instead.
     app = FastAPI(
         title="lanscape-atlas",
         version="0.1.0",
         lifespan=lifespan,
         openapi_url="/api/openapi.json",
-        docs_url="/api/docs",
+        docs_url=None,
         redoc_url=None,
     )
+
+    @app.get("/docs", include_in_schema=False)
+    async def api_docs() -> FileResponse:
+        return FileResponse(API_DOCS_PAGE, media_type="text/html; charset=utf-8")
+
     app.state.settings = settings
     app.state.conn = db
     app.state.clock = clock
@@ -520,6 +522,7 @@ def create_app(
     # device_id -> in-flight deep scan task (at most one per device).
     app.state.deep_scan_tasks = {}
 
+    app.add_middleware(JsonBodyLimitMiddleware)  # /api and /mcp bodies; see web/body_limit.py
     # Added last = outermost: Host check, then Origin check, then bearer auth.
     if settings.api_token:
         app.add_middleware(BearerAuthMiddleware, token=settings.api_token)

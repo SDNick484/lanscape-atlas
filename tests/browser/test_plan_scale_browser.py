@@ -240,7 +240,10 @@ def test_set_scale_on_image_plan(page: Any, synthetic_plan_and_room: str, tmp_pa
     assert m is not None
     assert int(m[1]) * 12 + int(m[2]) == pytest.approx(2250 / 25.4, abs=1.5)
     page.fill("#scale-length", "14'6\"")
-    page.keyboard.press("Enter")
+    # The flash from the first save may still be on the page, so wait for the
+    # navigation the second save causes rather than for a ".flash" element.
+    with page.expect_navigation():
+        page.keyboard.press("Enter")
     page.wait_for_selector(".flash")
     # 14' 6" = 4419.6 mm over 0.3 of the depth (0.3 * 1200/1600 of the width).
     want = 4419.6 / (0.3 * 1200 / 1600)
