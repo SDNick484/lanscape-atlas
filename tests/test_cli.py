@@ -236,3 +236,214 @@ async def test_apscheduler_logs_only_failures_and_misses(
     assert all(level >= logging.WARNING for level, _ in messages), messages
     assert any(lvl == logging.ERROR and "raised an exception" in m for lvl, m in messages)
     assert any(lvl == logging.WARNING and "was missed by" in m for lvl, m in messages)
+
+
+# --- backup / restore --------------------------------------------------------------------
+
+
+def _seed_data(data: Path) -> bytes:
+    """A migrated database with one marker row plus one stored plan image; return the image."""
+    import sqlite3
+
+    from lanscape_atlas.floorplan.image import store_plan_file
+
+    assert main(["migrate"]) == 0
+    conn = sqlite3.connect(str(data / "atlas.db"))
+    conn.execute("CREATE TABLE marker (v TEXT)")
+    conn.execute("INSERT INTO marker VALUES ('before')")
+    conn.commit()
+    conn.close()
+    image = b"\x89PNG\r\n\x1a\n" + b"plan-bytes"
+    store_plan_file(data, image, "png")
+    return image
+
+
+@pytest.fixture
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    data = tmp_path / "data"
+    monkeypatch.setenv("LANSCAPE_DATA_DIR", str(data))
+    monkeypatch.setattr("lanscape_atlas.backup.service_running", lambda s: False)
+    return data
+
+
+def _marker(data: Path) -> str:
+    import sqlite3
+
+    conn = sqlite3.connect(str(data / "atlas.db"))
+    try:
+        return str(conn.execute("SELECT v FROM marker").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def test_backup_restore_round_trip(data_dir: Path, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    import sqlite3
+
+    image = _seed_data(data_dir)
+    out = tmp_path / "out" / "b.tar.gz"
+    assert main(["backup", "--out", str(out)]) == 0
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    # change the live data, then restore
+    conn = sqlite3.connect(str(data_dir / "atlas.db"))
+    conn.execute("UPDATE marker SET v='after'")
+    conn.commit()
+    conn.close()
+    for f in (data_dir / "floorplan").iterdir():
+        f.unlink()
+    capsys.readouterr()
+    assert main(["restore", str(out)]) == 0
+    assert _marker(data_dir) == "before"
+    plans = list((data_dir / "floorplan").iterdir())
+    assert len(plans) == 1 and plans[0].read_bytes() == image
+    kept = list(data_dir.glob("replaced-*"))
+    assert len(kept) == 1
+    old = sqlite3.connect(str(kept[0] / "atlas.db"))
+    assert old.execute("SELECT v FROM marker").fetchone()[0] == "after"
+    old.close()
+    assert not list(data_dir.glob(".restore-*"))
+
+
+def test_backup_default_dir_and_rotation(data_dir: Path) -> None:
+    from lanscape_atlas import backup
+
+    _seed_data(data_dir)
+    folder = data_dir / "backups"
+    folder.mkdir()
+    for n in range(1, 5):
+        (folder / f"atlas-backup-2020010{n}-000000.tar.gz").write_bytes(b"x")
+    (folder / "unrelated.txt").write_text("keep me")
+    assert main(["backup", "--keep", "2"]) == 0
+    names = sorted(p.name for p in folder.iterdir())
+    assert "unrelated.txt" in names
+    archives = [n for n in names if n.startswith(backup.ARCHIVE_PREFIX)]
+    assert len(archives) == 2
+    assert archives[0] == "atlas-backup-20200104-000000.tar.gz"
+    assert stat.S_IMODE((folder / archives[1]).stat().st_mode) == 0o600
+
+
+def test_backup_without_database_fails(data_dir: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["backup"]) == 1
+    assert "no database" in capsys.readouterr().err
+
+
+def test_restore_refuses_while_running(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    _seed_data(data_dir)
+    out = tmp_path / "b.tar.gz"
+    assert main(["backup", "--out", str(out)]) == 0
+    monkeypatch.setattr("lanscape_atlas.backup.service_running", lambda s: True)
+    assert main(["restore", str(out)]) == 1
+    assert "running" in capsys.readouterr().err
+    assert not list(data_dir.glob("replaced-*"))
+
+
+def test_service_running_detects_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from lanscape_atlas import backup
+    from lanscape_atlas.config import load_settings
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        monkeypatch.setenv("LANSCAPE_DATA_DIR", "/nonexistent")
+        s = load_settings()
+        from dataclasses import replace
+
+        s = replace(s, bind_host="127.0.0.1", bind_port=srv.getsockname()[1])
+        assert backup.service_running(s) is True
+    finally:
+        srv.close()
+    assert backup.service_running(s) is False
+
+
+def test_restore_refuses_newer_schema(data_dir: Path, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    import sqlite3
+
+    from lanscape_atlas.store.db import SCHEMA_VERSION
+
+    _seed_data(data_dir)
+    conn = sqlite3.connect(str(data_dir / "atlas.db"))
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    out = tmp_path / "b.tar.gz"
+    assert main(["backup", "--out", str(out)]) == 0
+    capsys.readouterr()
+    assert main(["restore", str(out)]) == 1
+    assert "newer" in capsys.readouterr().err
+    assert not list(data_dir.glob("replaced-*"))
+
+
+def _tar(path: Path, members: list[tuple[str, bytes, bytes | None]]) -> None:
+    """Write a tar.gz; (name, data, link target) - a link target makes it a symlink."""
+    import tarfile
+
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data, link in members:
+            info = tarfile.TarInfo(name)
+            if link is not None:
+                info.type = tarfile.SYMTYPE
+                info.linkname = link.decode()
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "../evil",
+        "/etc/evil",
+        "floorplan/../../evil",
+        "floorplan/notahash.png",
+        "extra.txt",
+        "floorplan/" + "a" * 64 + ".exe",
+    ],
+)
+def test_restore_rejects_bad_member_paths(
+    data_dir: Path,
+    tmp_path: Path,
+    bad_name: str,
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    _seed_data(data_dir)
+    good = tmp_path / "good.tar.gz"
+    assert main(["backup", "--out", str(good)]) == 0
+    import tarfile
+
+    with tarfile.open(good) as t:
+        members = [(m.name, t.extractfile(m).read(), None) for m in t.getmembers()]  # type: ignore[union-attr]
+    bad = tmp_path / "bad.tar.gz"
+    _tar(bad, [*members, (bad_name, b"x", None)])
+    capsys.readouterr()
+    assert main(["restore", str(bad)]) == 1
+    assert "restore refused" in capsys.readouterr().err
+    assert _marker(data_dir) == "before"  # untouched
+    assert not (tmp_path / "evil").exists() and not (data_dir.parent / "evil").exists()
+
+
+def test_restore_rejects_symlink_member(data_dir: Path, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    _seed_data(data_dir)
+    bad = tmp_path / "bad.tar.gz"
+    _tar(bad, [("manifest.json", b"{}", None), ("atlas.db", b"", b"/etc/passwd")])
+    assert main(["restore", str(bad)]) == 1
+    assert "regular file" in capsys.readouterr().err
+
+
+def test_restore_rejects_non_archive_and_missing(data_dir: Path, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    _seed_data(data_dir)
+    junk = tmp_path / "junk.tar.gz"
+    junk.write_bytes(b"not a tarball")
+    assert main(["restore", str(junk)]) == 1
+    assert main(["restore", str(tmp_path / "missing.tar.gz")]) == 1
+    empty = tmp_path / "empty.tar.gz"
+    _tar(empty, [("manifest.json", b"{}", None)])
+    assert main(["restore", str(empty)]) == 1
+    assert _marker(data_dir) == "before"
