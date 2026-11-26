@@ -801,3 +801,71 @@ async def test_first_connection_logs_nothing(
 
     await run(client, body)
     assert not [r for r in caplog.records if r.name == LOGGER]
+
+
+async def test_session_closed_right_after_handshake_keeps_backing_off(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Every connection is closed by HA straight after its handshake: the session is shorter
+    # than STABLE_SESSION, so each one counts as a failure and the delays keep doubling.
+    fake, server = ha
+    fake.drop_after_frames.update(range(5))
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    sleep = FakeSleep(clock, step_s=0, limit=5)  # no time passes on the fake clock
+    client = make_client(
+        server,
+        Sink(),
+        clock,
+        sleep=sleep,
+        jitter=lambda d: d,
+        backoff_base_s=1.0,
+        backoff_cap_s=300.0,
+    )
+    await run_until_parked(client, sleep)
+    assert sleep.delays == [1, 2, 4, 8, 16]
+    assert fake.connections == 5
+    assert [r.getMessage() for r in records(caplog, logging.WARNING)] == [
+        "Home Assistant Bluetooth: connection closed"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("held_s", "third_delay", "warnings"),
+    [(59, 4, 2), (60, 1, 3)],
+    ids=["59s-not-stable", "60s-stable"],
+)
+async def test_stable_session_resets_backoff_and_log_limit(
+    ha: tuple[FakeHA, TestServer],
+    clock: FixedClock,
+    caplog: pytest.LogCaptureFixture,
+    held_s: float,
+    third_delay: float,
+    warnings: int,
+) -> None:
+    fake, server = ha
+    fail = {"id": 2, "type": "result", "success": False, "error": {"message": "boom"}}
+    fake.drop_after_frames.add(0)  # connection 0: HA closes it straight after the handshake
+    fake.frames[1] = [fail]  # connection 1: the subscription fails straight after the handshake
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    sleep = FakeSleep(clock, step_s=0, limit=3)
+    client = make_client(
+        server,
+        Sink(),
+        clock,
+        sleep=sleep,
+        jitter=lambda d: d,
+        backoff_base_s=1.0,
+        backoff_cap_s=300.0,
+    )
+
+    async def body() -> None:
+        await wait_for(lambda: fake.connections == 3 and client.status().connected)
+        clock.advance(seconds=held_s)  # connection 2 stays up this long, then fails
+        await fake.send(2, fail)
+        await wait_for(lambda: sleep.parked.is_set())
+
+    await run(client, body)
+    # Two short sessions: the backoff doubles. Then a session held for held_s fails.
+    assert sleep.delays == [1, 2, third_delay]
+    # A session held 60 s starts a new rate limit, so the repeated "boom" is warned again.
+    assert len(records(caplog, logging.WARNING)) == warnings
