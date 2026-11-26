@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import logging
 import os
 import stat
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -140,3 +144,95 @@ def test_serve_keeps_existing_logging(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(root, "level", logging.DEBUG)
     assert main(["serve"]) == 0
     assert root.handlers == [mine] and root.level == logging.DEBUG
+
+
+class _Collect(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def fresh_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[], None]]:
+    """Call the yielded function in the test body (pytest adds its own root handlers when
+    the call phase starts) to get an unconfigured root logger. Levels are restored with
+    setLevel afterwards, which also clears the loggers' isEnabledFor caches."""
+    root, aps = logging.getLogger(), logging.getLogger("apscheduler")
+    saved = (root.level, aps.level)
+
+    def unconfigure() -> None:
+        monkeypatch.setattr(root, "handlers", [])
+        root.setLevel(logging.WARNING)
+        aps.setLevel(logging.NOTSET)
+
+    yield unconfigure
+    root.setLevel(saved[0])  # setLevel (not monkeypatch) also clears isEnabledFor caches
+    aps.setLevel(saved[1])
+
+
+def test_serve_sets_apscheduler_to_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_logging: Callable[[], None]
+) -> None:
+    fresh_logging()
+    monkeypatch.setenv("LANSCAPE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: None)
+    assert main(["serve"]) == 0
+    assert logging.getLogger().level == logging.INFO  # our own INFO lines are unchanged
+    assert logging.getLogger("apscheduler").level == logging.WARNING
+    executor = logging.getLogger("apscheduler.executors.default")
+    assert executor.getEffectiveLevel() == logging.WARNING
+
+
+async def test_apscheduler_logs_only_failures_and_misses(
+    fresh_logging: Callable[[], None],
+) -> None:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    fresh_logging()
+    cli.configure_logging()
+    assert logging.getLogger().level == logging.INFO
+    seen = _Collect()
+    aps = logging.getLogger("apscheduler")
+    aps.addHandler(seen)
+    ran: list[str] = []
+
+    async def ok() -> None:
+        ran.append("ok")
+
+    async def boom() -> None:
+        ran.append("boom")
+        raise RuntimeError("job failed")
+
+    sched = AsyncIOScheduler()
+    now = datetime.now(UTC)
+    sched.add_job(ok, "date", run_date=now, id="ok", name="ok")
+    sched.add_job(boom, "date", run_date=now, id="boom", name="boom")
+    # Due an hour ago with a 1 s grace: skipped as missed.
+    sched.add_job(
+        ok,
+        IntervalTrigger(hours=2),
+        next_run_time=now - timedelta(hours=1),
+        misfire_grace_time=1,
+        id="late",
+        name="late",
+    )
+    try:
+        sched.start()
+        for _ in range(200):
+            if len(ran) >= 2 and any("missed" in r.getMessage() for r in seen.records):
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        sched.shutdown(wait=False)
+        await asyncio.sleep(0)
+        aps.removeHandler(seen)
+
+    assert sorted(ran) == ["boom", "ok"]
+    messages = [(r.levelno, r.getMessage()) for r in seen.records]
+    assert all(level >= logging.WARNING for level, _ in messages), messages
+    assert any(lvl == logging.ERROR and "raised an exception" in m for lvl, m in messages)
+    assert any(lvl == logging.WARNING and "was missed by" in m for lvl, m in messages)
