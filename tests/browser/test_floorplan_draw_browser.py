@@ -545,10 +545,7 @@ def test_discard_reverts_and_unload_guard(page: Any, live_server: str, tmp_path:
     assert _shapes(_db(tmp_path)) == []
 
 
-def test_stale_save_shows_reload_message_and_writes_nothing(
-    page: Any, live_server: str, tmp_path: Path
-) -> None:
-    db = _db(tmp_path)
+def _stale_setup(page: Any, live_server: str, db: Path) -> None:
     _blank(live_server)
     _open_draw(page, live_server, "wall")
     _click(page, 0.2, 0.2)
@@ -557,11 +554,114 @@ def test_stale_save_shows_reload_message_and_writes_nothing(
     _click(page, 0.35, 0.2)
     # Another tab saves a drawing meanwhile.
     _seed(live_server, db, ("wall", {"points": [[0.1, 0.9], [0.9, 0.9]], "closed": False}))
+
+
+def test_stale_save_keeps_the_drawing_and_rebases_new_shapes(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _stale_setup(page, live_server, db)
     page.click("#save-changes")
-    page.wait_for_selector(".flash.error")
-    assert "drawing changed" in page.locator(".flash").inner_text()
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    assert "drawing changed" in page.locator("#fp-conflict").inner_text()
+    assert page.url.endswith("/floorplan")  # no reload
     assert [s["geometry"]["points"] for s in _shapes(db)] == [[[0.1, 0.9], [0.9, 0.9]]]
-    assert page.locator(".fp-wall").count() == 1  # the reloaded page shows the server's
+    # The pending wall and door are kept on top of the other tab's wall.
+    assert page.locator(".fp-wall").count() == 2 and page.locator(".fp-door").count() == 1
+    assert page.locator("#fp-conflict button", has_text="Reload and discard").count() == 1
+    page.click("#fp-conflict button:has-text('Keep editing')")
+    assert page.locator("#fp-conflict").is_hidden()
+    _save(page)
+    assert sorted(s["kind"] for s in _shapes(db)) == ["door", "wall", "wall"]
+
+
+def test_stale_save_reload_and_discard(page: Any, live_server: str, tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _stale_setup(page, live_server, db)
+    page.click("#save-changes")
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    page.click("#fp-conflict button:has-text('Reload and discard')")
+    page.wait_for_load_state()
+    page.wait_for_selector("#plan-svg")
+    assert page.locator(".fp-wall").count() == 1  # the server's drawing only
+    assert len(_shapes(db)) == 1
+
+
+def test_stale_save_lists_conflicting_edits_and_drops_them_only_on_consent(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    (wall,) = _seed(
+        live_server, db, ("wall", {"points": [[0.1, 0.9], [0.9, 0.9]], "closed": False})
+    )
+    _open_draw(page, live_server, "select")
+    _click(page, 0.5, 0.9)
+    page.click("#shape-delete")  # pending delete of the wall
+    page.click("#tool-wall")
+    _click(page, 0.2, 0.2)
+    _click(page, 0.5, 0.2)
+    # Another tab moves that wall.
+    based_on = _rows(db, "SELECT max(batch_id) FROM change WHERE entity = 'plan_shape'")[0][0]
+    moved = {"points": [[0.1, 0.8], [0.9, 0.8]], "closed": False}
+    r = _post(
+        live_server,
+        "/floorplan/shapes",
+        json={
+            "creates": [],
+            "updates": [{"id": wall, "geometry": moved}],
+            "deletes": [],
+            "based_on": based_on,
+        },
+    )
+    assert r.status_code == 200
+    page.click("#save-changes")
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    assert "changed" in page.locator("#fp-conflict li").inner_text()
+    assert page.locator("#fp-conflict button", has_text="Drop those edits").count() == 1
+    assert [s["id"] for s in _shapes(db)] == [wall]
+    page.click("#fp-conflict button:has-text('Drop those edits')")
+    _save(page)
+    shapes = _shapes(db)
+    assert len(shapes) == 2 and any(s["geometry"]["points"] == moved["points"] for s in shapes)
+
+
+def test_placement_conflict_keeps_edits_until_the_user_chooses(
+    page: Any, live_server: str, tmp_path: Path
+) -> None:
+    db = _db(tmp_path)
+    _blank(live_server)
+    room = {"name": "Room A", "polygon": json.dumps(SQ_POINTS)}
+    assert _post(live_server, "/floorplan/rooms", data=room, follow_redirects=False).is_redirect
+    conn = sqlite3.connect(db, timeout=5.0)
+    with conn:
+        dev = conn.execute(
+            "INSERT INTO device(name, first_seen, last_seen, trust, online)"
+            " VALUES ('Device One', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'new', 1)"
+        ).lastrowid
+    conn.close()
+    room_id = _rows(db, "SELECT id FROM place WHERE name = 'Room A'")[0][0]
+    page.goto(f"{live_server}/floorplan")
+    drag_to_room_centre(page, page.locator(f"[data-tray-device='{dev}']"))
+    r = _post(
+        live_server,
+        "/floorplan/placements",
+        json={
+            "placements": [{"device_id": dev, "place_id": room_id, "x": 0.2, "y": 0.2}],
+            "based_on": {},
+        },
+    )
+    assert r.status_code == 200, r.text
+    page.click("#save-changes")
+    page.wait_for_selector("#fp-conflict:not([hidden])")
+    assert page.url.endswith("/floorplan")
+    assert _dirty(page) == 0  # Save waits for the choice
+    page.click("#fp-conflict button:has-text('Keep editing')")
+    page.wait_for_selector("#fp-conflict", state="hidden")
+    assert _dirty(page) == 1
+    page.click("#save-changes")
+    page.wait_for_selector(".flash")
+    assert "saved" in page.locator(".flash").inner_text().lower()
 
 
 def test_placement_and_shape_edits_are_never_pending_together(
@@ -862,6 +962,20 @@ def test_place_a_label(page: Any, live_server: str, tmp_path: Path) -> None:
     assert shape["geometry"]["x"] == pytest.approx(0.5, abs=0.003)
     page.goto(f"{live_server}/floorplan")
     assert page.locator(".fp-label").text_content() == "Deck"
+
+
+def test_label_text_is_committed_on_blur(page: Any, live_server: str, tmp_path: Path) -> None:
+    _blank(live_server)
+    _open_draw(page, live_server, "label")
+    _click(page, 0.5, 0.2)
+    page.keyboard.type("Garage")
+    page.click("#snap-toggle")  # focus leaves the box
+    assert page.locator("#draw-text").is_hidden()
+    assert page.locator(".fp-label").text_content() == "Garage"
+    assert _dirty(page) == 1
+    _click(page, 0.7, 0.4)
+    page.keyboard.press("Tab")  # an empty box just closes
+    assert page.locator(".fp-label").count() == 1
 
 
 def test_label_and_furniture_move_delete_and_layers(

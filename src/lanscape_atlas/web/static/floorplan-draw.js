@@ -318,6 +318,7 @@
     var rectDrag = null; // Furniture rectangle tool: {from, to, at} while dragging
     var pendingLabel = null; // Label tool: the plan point its text box will place
     var discarded = false;
+    var base = {}; // id -> JSON of the server's {geometry, label} this page last saw
 
     var gShapes = svgEl("g", { "class": "fp-shapes" });
     var gTexts = svgEl("g", { "class": "fp-texts" });
@@ -1169,7 +1170,7 @@
       labelIn.focus({ preventScroll: true });
     }
 
-    function placeLabel() {
+    function placeLabel(refocus) {
       var text = labelIn.value.trim();
       if (!pendingLabel || !text) {
         ctx.status("Type the label's text first.", true);
@@ -1177,7 +1178,7 @@
       }
       var p = pendingLabel;
       closeLabel();
-      stage.focus({ preventScroll: true });
+      if (refocus !== false) { stage.focus({ preventScroll: true }); }
       select(add("label", { x: round6(clamp01(p[0])), y: round6(clamp01(p[1])), size: LABEL_SIZE }, text.slice(0, TEXT_MAX)));
     }
 
@@ -1463,17 +1464,81 @@
         labelIn.addEventListener("keydown", function (e) {
           if (e.key === "Enter") {
             e.preventDefault();
-            placeLabel();
+            placeLabel(true);
           } else if (e.key === "Escape") {
             e.preventDefault();
             closeLabel();
             stage.focus({ preventScroll: true });
           }
         });
-        labelIn.addEventListener("blur", closeLabel);
+        // Leaving the box keeps what was typed (Escape and Enter clear it first).
+        labelIn.addEventListener("blur", function () {
+          if (pendingLabel && labelIn.value.trim()) {
+            placeLabel(false);
+          } else {
+            closeLabel();
+          }
+        });
       }
       if (snapBox) { snapBox.addEventListener("change", renderOverlay); }
       if (lengthsBox) { lengthsBox.addEventListener("change", render); }
+    }
+
+    // ---------------------------------------------------- re-base after a 409
+
+    function shapeKey(s) { return JSON.stringify([s.geometry, s.label === undefined ? null : s.label]); }
+
+    // Pending edits and deletes of saved shapes whose server copy changed or vanished
+    // since this page loaded: [{id, kind, removed}]. New shapes never conflict.
+    function conflictsWith(server) {
+      var byId = {};
+      server.forEach(function (s) { byId[s.id] = s; });
+      var out = [];
+      Object.keys(updated).concat(Object.keys(deleted)).map(Number).forEach(function (id) {
+        var cur = byId[id];
+        if (deleted[id] && !cur) {
+          return; // already gone: nothing to delete, nothing lost
+        }
+        if (!cur || shapeKey(cur) !== base[id]) {
+          out.push({ id: id, kind: (shapes[id] || {}).kind || "shape", removed: !cur });
+        }
+      });
+      return out;
+    }
+
+    // Put the pending drawing on top of the server's current shapes. Unedited shapes
+    // take the server's copy, new shapes stay, and a conflicting edit is dropped (the
+    // server's copy wins) only when `drop` is true; otherwise nothing changes.
+    function rebaseOnto(server, batch, drop) {
+      var found = conflictsWith(server);
+      if (found.length && !drop) {
+        return found;
+      }
+      var byId = {};
+      server.forEach(function (s) { byId[s.id] = s; });
+      found.forEach(function (c) { delete updated[c.id]; delete deleted[c.id]; });
+      Object.keys(deleted).forEach(function (id) { if (!byId[id]) { delete deleted[id]; } });
+      var next = [];
+      server.forEach(function (s) {
+        if (!(s && typeof s.id === "number" && s.geometry && typeof s.geometry === "object")) { return; }
+        next.push(s.id);
+        base[s.id] = shapeKey(s);
+        if (!updated[s.id]) {
+          shapes[s.id] = { id: s.id, kind: String(s.kind), geometry: s.geometry, label: s.label === undefined ? null : s.label };
+        }
+      });
+      order.forEach(function (id) {
+        if (id > 0 && byId[id] === undefined) {
+          delete shapes[id]; delete updated[id]; delete base[id];
+        } else if (id < 0 && shapes[id]) {
+          next.push(id);
+        }
+      });
+      order = next;
+      if (selectedId !== null && !shapes[selectedId]) { selectedId = null; }
+      ctx.batch = batch;
+      changed();
+      return [];
     }
 
     // ------------------------------------------------------------------ load
@@ -1482,6 +1547,7 @@
       if (s && typeof s.id === "number" && s.geometry && typeof s.geometry === "object") {
         shapes[s.id] = { id: s.id, kind: String(s.kind), geometry: s.geometry, label: s.label === undefined ? null : s.label };
         order.push(s.id);
+        base[s.id] = shapeKey(shapes[s.id]);
       }
     });
     wire();
@@ -1533,6 +1599,8 @@
         return Object.keys(created).length + Object.keys(updated).length + Object.keys(deleted).length;
       },
       discard: function () { discarded = true; },
+      conflicts: conflictsWith,
+      rebase: rebaseOnto,
       payload: function () {
         var creates = [], updates = [];
         order.forEach(function (id) {

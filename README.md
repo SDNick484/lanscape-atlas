@@ -93,7 +93,9 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
   move it within its room, or select it and use the arrow keys. Nothing is written
   until you press *Save changes*; *Discard* drops the pending edits. If another tab
   or Claude moved the same device in the meantime, the save is refused (409) and the
-  page reloads with a message instead of overwriting.
+  page stays as it is with a message and two choices: *Keep editing* (your placements
+  are kept, and saving again replaces the other change to those devices) or *Reload and
+  discard*. Nothing is overwritten until you choose.
 - **Roaming devices** (phones, laptops) belong to a room's list but have no point on
   the plan. Tick *roaming* next to the device in the list, or press *Mark roaming* (and *Mark fixed* to undo it) on its device page.
   Turning roaming off leaves the device in that room's list, ready to be dropped.
@@ -124,8 +126,12 @@ The **Floor plan** page (`/floorplan`) puts devices on a map of your home.
     leaving the page asks first. While a drawing edit is pending the page stays in
     Draw mode, and while a placement is pending *Draw* is disabled, so one save never
     mixes the two. If another tab (or an undo) changed the drawing since the page
-    loaded, the save is refused (409), nothing is written and the page reloads with a
-    message. Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
+    loaded, the save is refused (409) and nothing is written, but the page keeps your
+    work: new shapes are re-based onto the current drawing, and you save again. Pending
+    edits to a shape that changed or was removed meanwhile are listed, and dropped only
+    if you choose *Drop those edits, keep the rest*; *Reload and discard* throws it all
+    away and *Keep editing* leaves things as they are. A label's text is kept when you
+    click away from its box (an empty box just closes). Shapes never take clicks outside Draw mode. Up to 5,000 shapes per plan.
   - Drawing is page-only: there is no API or MCP write for it. `GET /api/v1/floorplan`
     lists the shapes (`shapes`); `get_floor_plan` gives only a summary (see MCP below).
 - **Draw furniture, fixtures and labels.** Also under *Draw*, and also a picture only.
