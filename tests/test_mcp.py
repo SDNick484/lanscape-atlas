@@ -37,6 +37,7 @@ EXPECTED = {
     "update_device",
     "claim_interface",
     "set_place",
+    "forget_device",
     "run_deep_scan",
     "recent_changes",
     "undo",
@@ -133,7 +134,7 @@ async def test_tool_names_exact(app: FastAPI) -> None:
     async with _session(app) as client:
         tools = (await client.list_tools()).tools
         assert {t.name for t in tools} == EXPECTED
-        assert len(tools) == 16
+        assert len(tools) == 17
         assert set(TOOL_NAMES) == EXPECTED
         for t in tools:
             assert t.description and len(t.description) > 20, t.name
@@ -831,3 +832,18 @@ def test_error_message_for_stale_shapes() -> None:
 
     msg = error_message(StaleShapes([7]))
     assert msg is not None and "drawing changed" in msg and "device" not in msg
+
+
+async def test_forget_device_tool_is_claude_and_undoable(app: FastAPI) -> None:
+    async with _session(app) as client:
+        d = await _device_with_ip(client)
+        r = _data(await _call(client, "forget_device", device_id=d["id"]))
+        gone = await _call(client, "get_device", device_id=d["id"])
+        assert gone.is_error and _text(gone) == f"device {d['id']} not found"
+        again = await _call(client, "forget_device", device_id=d["id"])
+        assert again.is_error and _text(again) == f"device {d['id']} not found"
+        changes = _data(await _call(client, "recent_changes", limit=1))
+        assert changes[0]["batch_id"] == r["batch_id"] and changes[0]["actor"] == "claude"
+        _data(await _call(client, "undo", batch_id=r["batch_id"]))
+        view = _data(await _call(client, "get_device", device_id=d["id"]))
+        assert view["name"] == d["name"]

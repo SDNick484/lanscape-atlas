@@ -624,3 +624,31 @@ def test_configured_ip_match_window_applies(
         assert ({r["id"] for r in rows} == {dev}) is found
         assert c.get(f"/api/v1/devices/{dev}").json()["ipv4"] == "192.0.2.81"
     assert app.state.service.ip_match_window_min == window
+
+
+# ------------------------------------------------------------ forget device
+
+
+def test_delete_device_forgets_and_undo_restores(client: TestClient) -> None:
+    dev = _device_with_ip(client)
+    r = client.delete(f"/api/v1/devices/{dev['id']}")
+    assert r.status_code == 200
+    batch = r.json()["batch_id"]
+    assert client.get(f"/api/v1/devices/{dev['id']}").status_code == 404
+    assert client.delete(f"/api/v1/devices/{dev['id']}").status_code == 404
+    assert client.post(f"/api/v1/changes/{batch}/undo").status_code == 200
+    assert client.get(f"/api/v1/devices/{dev['id']}").json()["name"] == dev["name"]
+
+
+def test_delete_device_refused_with_links_is_422(client: TestClient) -> None:
+    devices = client.get("/api/v1/devices", params={"limit": 1000}).json()
+    a, b = devices[0]["id"], devices[1]["id"]
+    body = {"a_device_id": a, "b_device_id": b, "kind": "wired"}
+    assert client.post("/api/v1/links", json=body).status_code == 200
+    r = client.delete(f"/api/v1/devices/{a}")
+    assert r.status_code == 422 and "links" in json.dumps(r.json())
+    assert client.get(f"/api/v1/devices/{a}").status_code == 200
+
+
+def test_delete_device_validates_id(client: TestClient) -> None:
+    assert client.delete("/api/v1/devices/0").status_code == 422

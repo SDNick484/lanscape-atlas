@@ -19,6 +19,7 @@
     <form method="post" action="{{ root }}/inbox/{{ d.id }}/unwanted">
       <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="secondary">Mark unwanted</button>
     </form>
+    <a class="button secondary" href="{{ root }}/devices/{{ d.id }}/forget?next=inbox">Forget device&hellip;</a>
     <form class="inline" method="post" action="{{ root }}/inbox/{{ d.id }}/name">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input name="name" value="{{ d.name or '' }}" placeholder="Name" aria-label="Name" required>

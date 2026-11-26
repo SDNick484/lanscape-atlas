@@ -112,6 +112,15 @@ def patch_device(request: Request, device_id: PathId, body: PatchDeviceBody) -> 
     return {"batch_id": _service(request).update_device(ACTOR, device_id, body.fields)}
 
 
+@router.delete("/devices/{device_id}")
+def forget_device(request: Request, device_id: PathId) -> dict[str, int]:
+    """Forget a device with its interfaces, leases and services; undoable by batch id.
+
+    404 unknown device; 422 while it has links, Bluetooth identities or a linked scanner.
+    """
+    return {"batch_id": _service(request).forget_device(ACTOR, device_id)}
+
+
 @router.put("/devices/{device_id}/place")
 def set_place(request: Request, device_id: PathId, body: PlaceBody) -> dict[str, int]:
     return {"batch_id": _service(request).set_place(ACTOR, device_id, body.name)}

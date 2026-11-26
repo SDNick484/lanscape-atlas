@@ -134,6 +134,16 @@ button {
   cursor: pointer;
 }
 button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+a.button {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 5px 12px;
+  text-decoration: none;
+  background: var(--accent);
+  color: #fff;
+}
+a.button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+button.danger { background: var(--danger); color: #fff; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }

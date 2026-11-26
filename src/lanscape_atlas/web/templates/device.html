@@ -52,6 +52,12 @@
   {% if d.scan_policy == "never" %}<p class="muted">Disabled: scan policy is <em>never</em>.</p>{% endif %}
 </div>
 
+<div class="card" id="device-forget">
+  <h2>Forget device</h2>
+  <p class="muted">Removes this device with its interfaces, IP history and services. Undo it from History.</p>
+  <p><a class="button secondary" href="{{ root }}/devices/{{ d.id }}/forget">Forget device&hellip;</a></p>
+</div>
+
 <div class="card" id="device-floorplan">
   <h2>Floor plan</h2>
   <p>{% if roaming %}<span class="tag">Roaming</span> in {{ d.place }}{% elif d.place %}Fixed in {{ d.place }}{% else %}<span class="muted">No room assigned.</span>{% endif %}</p>
