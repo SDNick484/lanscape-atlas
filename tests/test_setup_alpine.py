@@ -1925,21 +1925,38 @@ def test_the_lock_is_taken_before_anything_is_installed() -> None:
 # ------------------------------------------------------------------- temporary files
 
 
-def logging_mktemp(tmp_path: Path, env: dict[str, str]) -> Path:
+def logging_mktemp(tmp_path: Path, env: dict[str, str], stub: bool = True) -> Path:
     """A mktemp first on PATH that logs its arguments; TMPDIR is a fresh directory."""
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    env["TMPDIR"] = str(tmpdir)
+    env["FAKE_MKTEMP_LOG"] = str(tmp_path / "mktemp.log")
+    if not stub:
+        return tmpdir
     real = shutil.which("mktemp")
     assert real
     fake = tmp_path / "fakebin" / "mktemp"
     fake.parent.mkdir(exist_ok=True)
     fake.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >>"$FAKE_MKTEMP_LOG"\nexec "{real}" "$@"\n')
     fake.chmod(0o755)
-    tmpdir = tmp_path / "tmpdir"
-    tmpdir.mkdir()
-    env["TMPDIR"] = str(tmpdir)
-    env["FAKE_MKTEMP_LOG"] = str(tmp_path / "mktemp.log")
     if not env["PATH"].startswith(str(fake.parent)):
         env["PATH"] = f"{fake.parent}{os.pathsep}{env['PATH']}"
     return tmpdir
+
+
+def mktemp_logging_script(tmp_path: Path) -> Path:
+    """The script with a logging mktemp *function* defined first.
+
+    A stub first on PATH is not enough: busybox ash (Alpine) runs its own mktemp applet
+    without a PATH lookup. A shell function comes before applets and PATH in every shell.
+    """
+    harness = tmp_path / "logging" / "deploy" / "setup-alpine.sh"
+    harness.parent.mkdir(parents=True)
+    shutil.copy(ROOT / "config.example.toml", harness.parent.parent / "config.example.toml")
+    shebang, rest = SCRIPT.read_text().split("\n", 1)
+    log = 'mktemp() {\n\tprintf \'%s\\n\' "$*" >>"$FAKE_MKTEMP_LOG"\n\tcommand mktemp "$@"\n}\n'
+    harness.write_text(f"{shebang}\n{log}{rest}")
+    return harness
 
 
 def mktemp_calls(tmp_path: Path) -> list[str]:
@@ -1953,10 +1970,12 @@ def test_checks_never_write_the_rendered_config_to_a_temp_file(
 ) -> None:
     conf = hand_edited_conf(shell, tmp_path)
     env = fake_rc_service(tmp_path, stopped=False)
-    tmpdir = logging_mktemp(tmp_path, env)
-    early = check_conf(shell, tmp_path, BASE_ENV, conf, env=env)
+    tmpdir = logging_mktemp(tmp_path, env, stub=False)
+    script = mktemp_logging_script(tmp_path)
+    early = check_conf(shell, tmp_path, BASE_ENV, conf, env=env, script=script)
     assert early.returncode != 0 and "config.toml was edited by hand" in early.stderr
-    dry = run(shell, "--env", str(write_env(tmp_path, BASE_ENV)), "--dry-run", env=env)
+    env_file = str(write_env(tmp_path, BASE_ENV))
+    dry = run(shell, "--env", env_file, "--dry-run", env=env, script=script)
     assert "dry-run" in dry.stdout
     # Only this run's own directory; the renders stayed in python's memory.
     assert mktemp_calls(tmp_path) == ["-d", "-d"]
