@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import re
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -223,17 +224,20 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def allowed_host_patterns(settings: Settings) -> list[str] | None:
-    """Host header patterns accepted in LAN-only mode, or ``None`` when the check is off.
+    """Host header patterns the app accepts, or ``None`` when the check is off.
 
-    - ``api_token`` set: off. A rebinding page cannot supply the bearer token, and a
-      proxy may forward any Host name.
-    - ``allowed_hosts`` contains ``"*"``: off (explicit opt-out).
+    - ``allowed_hosts`` contains ``"*"``: off. This explicit opt-out is the only way
+      to turn the check off.
     - Otherwise: localhost, ``bind_host`` (unless a wildcard bind) and every entry of
       ``allowed_hosts``. Local names and ``bind_host`` match with or without a port;
       a bare ``allowed_hosts`` entry matches only a Host without a port, and
       ``"name:*"`` matches that name on any port.
+
+    ``api_token`` does not change this: the token guards only ``/api`` and ``/mcp``,
+    so a DNS-rebinding page could still read the pages and post their forms. A reverse
+    proxy forwards the public name as Host; that name must be in ``allowed_hosts``.
     """
-    if settings.api_token or "*" in settings.allowed_hosts:
+    if "*" in settings.allowed_hosts:
         return None
     names = list(_LOCAL_HOSTS)
     bind = settings.bind_host
@@ -261,25 +265,76 @@ def _header(scope: Scope, name: bytes) -> str | None:
     return None
 
 
+# How many distinct rejected Host names get a log line (and are remembered) per process.
+REJECTED_HOSTS_LOGGED_MAX = 32
+_HOST_SHOWN_MAX = 80
+_HOST_UNSAFE = re.compile(r"[^A-Za-z0-9.:_\[\]-]")
+
+
+def _shown_host(host: str) -> str:
+    """A client-supplied Host made safe to echo and log: hostname characters only, bounded."""
+    shown = _HOST_UNSAFE.sub("?", host[:_HOST_SHOWN_MAX])
+    return shown + "..." if len(host) > _HOST_SHOWN_MAX else shown
+
+
+def _rejected_host_message(host: str | None) -> str:
+    if not host:
+        return "Request refused: it has no Host header.\n"
+    return (
+        f'Request refused: Host "{_shown_host(host)}" is not in allowed_hosts.\n'
+        "If this is the address or name you use to reach lanscape-atlas, add it to\n"
+        "allowed_hosts in config.toml and restart the service. A bare entry matches\n"
+        'only a Host without a port; "name:*" matches that name on any port.\n'
+    )
+
+
 class HostAllowlistMiddleware:
-    """LAN-only mode (no ``api_token``): every request's Host must be allow-listed.
+    """Every request's Host must be allow-listed, with or without an ``api_token``.
 
     Blocks DNS rebinding against the whole app (pages, ``/api``, ``/topology``,
-    ``/mcp``); a mismatch answers 421 like the MCP SDK's own check.
+    ``/mcp``); a mismatch answers 421 like the MCP SDK's own check, in plain text that
+    names the refused Host and the ``allowed_hosts`` setting. Each distinct refused
+    name is logged once at WARNING, for at most ``REJECTED_HOSTS_LOGGED_MAX`` names.
     """
 
     def __init__(self, app: ASGIApp, patterns: list[str]) -> None:
         self.app = app
         self._patterns = patterns
+        self._logged: set[str] = set()
+        self._log_full = False
+
+    def _log_rejected(self, host: str | None) -> None:
+        shown = _shown_host(host).lower() if host else "(no Host header)"
+        if shown in self._logged or self._log_full:
+            return
+        if len(self._logged) >= REJECTED_HOSTS_LOGGED_MAX:
+            self._log_full = True
+            log.warning(
+                "refused requests for more than %d different Host names; "
+                "further names are not logged",
+                REJECTED_HOSTS_LOGGED_MAX,
+            )
+            return
+        self._logged.add(shown)
+        log.warning(
+            "refused a request for Host %s: not in allowed_hosts. If you reach the app "
+            "by this name, add it to allowed_hosts in config.toml and restart",
+            shown,
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] in ("http", "websocket"):
             host = _header(scope, b"host")
             if not host or not host_allowed(host, self._patterns):
+                self._log_rejected(host)
                 if scope["type"] == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
                     return
-                response = PlainTextResponse("Invalid Host header", status_code=421)
+                response = PlainTextResponse(
+                    _rejected_host_message(host),
+                    status_code=421,
+                    headers={"X-Content-Type-Options": "nosniff"},
+                )
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -302,21 +357,25 @@ def _origin_matches_host(origin: str, host: str) -> bool:
         return False
 
 
+_MCP_PATHS = ("/mcp", "/mcp/")
+
+
 def _origin_checked(scope: Scope) -> bool:
+    """Every unsafe method, except on the MCP endpoint (the path routing will use)."""
     if scope.get("method", "GET").upper() not in _UNSAFE_METHODS:
         return False
-    return any(
-        p == "/api" or p.startswith(("/api/", "/topology/", "/floorplan/"))
-        for p in (_route_path(scope), scope.get("path", ""))
-    )
+    return _route_path(scope) not in _MCP_PATHS
 
 
 class OriginCheckMiddleware:
-    """Unsafe methods on ``/api/*``, ``/topology/*`` and ``/floorplan/*``: foreign ``Origin``: 403.
+    """Unsafe methods on every path but ``/mcp``: an ``Origin`` other than the Host: 403.
 
-    Applies in every mode: browsers attach ``Origin`` to cross-site form posts and
-    fetches, so a page elsewhere cannot trigger undo or scans. Requests without an
-    ``Origin`` (curl, MCP and API clients) are unaffected.
+    Applies in every mode: browsers attach ``Origin`` to cross-origin form posts and
+    fetches, so a page elsewhere cannot trigger edits, undo or scans. This also covers
+    the form routes, whose double-submit CSRF cookie another web app on the same host
+    (a different port) could plant, since cookies are not scoped to a port. Requests
+    without an ``Origin`` (curl, MCP and API clients) are unaffected. ``/mcp`` has the
+    MCP SDK's own Origin check (see ``mcp_transport_security``).
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -338,7 +397,8 @@ def mcp_transport_security(settings: Settings) -> TransportSecuritySettings:
     """Host/Origin checks for ``/mcp`` (the SDK's DNS-rebinding protection).
 
     Uses the same allowlist as ``HostAllowlistMiddleware`` (see
-    ``allowed_host_patterns``); a browser Origin must be ``http(s)://`` one of those.
+    ``allowed_host_patterns``), with or without an ``api_token``; a browser Origin must
+    be ``http(s)://`` one of those. Off only with ``allowed_hosts = ["*"]``.
     """
     hosts = allowed_host_patterns(settings)
     if hosts is None:

@@ -67,8 +67,8 @@ class Settings:
     home_assistant: HomeAssistantSettings | None = None
     bluetooth: BluetoothSettings = field(default_factory=BluetoothSettings)
     collectors: dict[str, CollectorSettings] = field(default_factory=_default_collectors)
-    # Extra Host header values the whole app accepts when no api_token is set (DNS-rebinding
-    # protection); "name:*" allows any port, "*" turns the check off.
+    # Extra Host header values the whole app accepts, with or without api_token
+    # (DNS-rebinding protection); "name:*" allows any port, "*" turns the check off.
     allowed_hosts: tuple[str, ...] = ()
 
 
