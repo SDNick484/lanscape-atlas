@@ -8,6 +8,7 @@ imported lazily so collection works before those tasks land.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -212,33 +213,45 @@ def live_server(tmp_path: Path, clock: FixedClock) -> Iterator[str]:
 
     conn = open_db(tmp_path / "live.db")
     migrate(conn)
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    # Bind once and hand the listening socket to uvicorn: no window in which another
+    # process can take the port between choosing it and serving on it.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(128)
+    port = sock.getsockname()[1]
     settings = Settings(data_dir=tmp_path, allowed_hosts=(f"127.0.0.1:{port}",))
     app = create_app(settings, conn=conn, clock=clock, start_background=False)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
+    thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
     thread.start()
-    for _ in range(100):
-        if server.started:
-            break
-        time.sleep(0.05)
+    deadline = time.monotonic() + 10
+    while not server.started and thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not server.started:
+        server.should_exit = True
+        thread.join(timeout=5)
+        sock.close()
+        conn.close()
+        pytest.fail("live_server: uvicorn did not start within 10 s")
     app.state.live_conn = conn
     yield f"http://127.0.0.1:{port}"
     server.should_exit = True
     thread.join(timeout=5)
+    sock.close()
     conn.close()
 
 
 @pytest.fixture
 def page() -> Iterator[Any]:
-    """A Playwright page; the test is skipped when Playwright or a browser is unavailable."""
+    """A Playwright page. Skipped when Playwright or Chromium is unavailable, except
+    with CI set, where a missing browser is a failure (the tests must not vanish)."""
     sync_api = pytest.importorskip("playwright.sync_api")
     with sync_api.sync_playwright() as pw:
         try:
             browser = pw.chromium.launch()
         except Exception as exc:  # browser binary not installed
+            if os.environ.get("CI"):
+                pytest.fail(f"Playwright browser unavailable but CI is set: {exc}")
             pytest.skip(f"Playwright browser unavailable: {exc}")
         pg = browser.new_page(viewport={"width": 1280, "height": 900})
         yield pg

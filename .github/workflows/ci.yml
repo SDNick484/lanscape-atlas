@@ -41,6 +41,22 @@ jobs:
       - run: pytest
       - run: python scripts/check_leaks.py
 
+  # The Playwright tests in tests/browser skip when Playwright or Chromium is missing;
+  # with CI set they fail instead, so they cannot silently stop running.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .[dev,browser]
+      - run: playwright install --with-deps chromium
+      - run: pytest tests/browser
+
   # CI used editable installs while production installs a wheel. Build the wheel,
   # install it into a clean virtualenv away from the source tree and exercise it, so a
   # packaging-data regression (templates, static files, migrations, data/) fails here.

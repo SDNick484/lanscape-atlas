@@ -674,7 +674,20 @@ python3 -m venv .venv
 .venv/bin/pre-commit install      # runs the leak check on every commit
 ```
 
-CI runs ruff, mypy, pytest and the leak check. Tests never touch the network.
+CI runs ruff, mypy, pytest and the leak check, and the browser tests in a separate
+job. Tests never touch the network.
+
+The Playwright tests in `tests/browser` drive the UI in Chromium. They are skipped
+unless Playwright and a browser are installed:
+
+```sh
+.venv/bin/pip install -e '.[browser]'
+.venv/bin/playwright install chromium    # add --with-deps on a bare Linux host
+.venv/bin/pytest tests/browser
+```
+
+With `CI` set in the environment a missing Playwright or Chromium fails the run
+instead of skipping, which is how CI uses it.
 `lanscape-atlas ingest-file tests/fixtures/fake_house.json` loads the fake-house
 dataset for local UI work.
 

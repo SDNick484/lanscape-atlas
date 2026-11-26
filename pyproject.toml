@@ -37,6 +37,10 @@ dev = [
     "hatchling",
     "pre-commit",
 ]
+# tests/browser drives the UI in Chromium. After installing, run `playwright install chromium`.
+browser = [
+    "playwright",
+]
 
 [project.scripts]
 lanscape-atlas = "lanscape_atlas.cli:main"
