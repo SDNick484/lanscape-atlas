@@ -7,12 +7,15 @@ config.example.toml) and ``--dry-run`` (inspect and report, change nothing).
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -340,7 +343,7 @@ def test_shellcheck_clean() -> None:
 
 def test_deploy_script_creates_floorplan_dir() -> None:
     text = SCRIPT.read_text()
-    pattern = r'install -d -m 0750 -o "\$SVC_USER" -g "\$SVC_USER" "\$DATA_DIR/floorplan"'
+    pattern = r'service_dir "\$DATA_DIR/floorplan" 0750'
     assert re.search(pattern, text)
 
 
@@ -1168,6 +1171,7 @@ def run_main(
     stub_extra: dict[str, str] | None = None,
     env: dict[str, str] | None = None,
     overrides: tuple[str, ...] = (),
+    shell: tuple[str, ...] = ("sh",),
 ) -> subprocess.CompletedProcess[str]:
     text = SCRIPT.read_text()
     head, main = text.split(MAIN_MARKER, 1)
@@ -1186,7 +1190,7 @@ def run_main(
     env_file = write_env(tmp_path, data)
     if env is None:
         env = fake_rc_service(tmp_path, stopped=False)
-    return run(["sh"], "--env", str(env_file), *args, env=env, script=harness)
+    return run(list(shell), "--env", str(env_file), *args, env=env, script=harness)
 
 
 def test_main_sequence_runs_every_step_on_a_clean_config(tmp_path: Path) -> None:
@@ -2010,7 +2014,8 @@ def test_write_config_failure_leaves_no_temp_file_next_to_config(tmp_path: Path)
         {**BASE_ENV, "BIND_PORT": "8721"},
         conf,
         {"write_config"},
-        overrides=('chmod() { command chmod "$@"; [ "$2" != "$CONF_TMP" ] || exit 1; }',),
+        # Fail once the temp file is written, before it is renamed over config.toml.
+        overrides=('mv() { case " $* " in *" $CONF_TMP "*) exit 1 ;; esac; command mv "$@"; }',),
     )
     assert proc.returncode != 0
     assert sorted(p.name for p in conf.parent.iterdir() if not BACKUP_RE.fullmatch(p.name)) == [
@@ -2262,4 +2267,276 @@ def test_readme_documents_the_installer_robustness() -> None:
         "git remote set-url",
         "pyvenv.cfg",
     ):
+        assert needle in section, needle
+
+
+# ------------------------------------------- symbolic links in the service user's directory
+#
+# The service user owns the data directory and can put a link (or a hard link) anywhere
+# in it. The script runs as root, so it must refuse to create, chown, chmod or write
+# through one. The tests run as an ordinary user: SVC_USER and SVC_GROUP are the current
+# user and group, so the chown the script does is one to the owner the file already has.
+
+ME = pwd.getpwuid(os.getuid()).pw_name
+MY_GROUP = grp.getgrgid(os.getgid()).gr_name
+LINK_REFUSED = "it is a symbolic link. The "
+
+
+def data_dirs_run(
+    shell: list[str], tmp_path: Path, data_dir: Path, *args: str, overrides: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """The real make_data_dirs (called by the stubbed ensure_user) against DATA_DIR."""
+    return run_main(
+        tmp_path,
+        BASE_ENV,
+        conf_path(tmp_path),
+        set(),
+        *args,
+        stub_extra={"ensure_user": "make_data_dirs"},
+        overrides=(
+            f"DATA_DIR='{data_dir}'",
+            f"SVC_USER='{ME}'",
+            f"SVC_GROUP='{MY_GROUP}'",
+            *overrides,
+        ),
+        shell=tuple(shell),
+    )
+
+
+def outside_dir(tmp_path: Path) -> Path:
+    """A directory the script must not change (mode 0755, empty)."""
+    target = tmp_path / "outside"
+    target.mkdir()
+    target.chmod(0o755)
+    return target
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_data_dirs_are_created_with_their_modes(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    proc = data_dirs_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data / "floorplan").stat().st_mode) == 0o750
+    data.chmod(0o755)
+    (data / "floorplan").chmod(0o777)
+    shutil.rmtree(tmp_path / "harness")
+    assert data_dirs_run(shell, tmp_path, data).returncode == 0  # an existing one is fixed
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    assert stat.S_IMODE((data / "floorplan").stat().st_mode) == 0o750
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("which", ["floorplan", "data_dir"])
+def test_a_linked_data_dir_is_refused(shell: list[str], which: str, tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    if which == "floorplan":
+        data.mkdir()
+        (data / "floorplan").symlink_to(target)
+        link = data / "floorplan"
+    else:
+        data.symlink_to(target)
+        link = data
+    proc = data_dirs_run(shell, tmp_path, data)
+    assert proc.returncode == 1
+    assert f"refusing to create or chown {link}: {LINK_REFUSED}" in proc.stderr
+    assert link.is_symlink()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_dry_run_reports_a_linked_floorplan_dir(shell: list[str], tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    data.mkdir()
+    (data / "floorplan").symlink_to(target)
+    proc = data_dirs_run(shell, tmp_path, data, "--dry-run")
+    assert proc.returncode == 1
+    assert f"PROBLEM: refusing to create or chown {data / 'floorplan'}" in proc.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("kind", ["symlink", "file"])
+def test_a_link_planted_after_the_check_is_not_followed(
+    shell: list[str], kind: str, tmp_path: Path
+) -> None:
+    # refuse_link is switched off, as if the link appeared just after it looked.
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    data.mkdir()
+    if kind == "symlink":
+        (data / "floorplan").symlink_to(target)
+    else:
+        (data / "floorplan").write_text("not a directory\n")
+    proc = data_dirs_run(shell, tmp_path, data, overrides=("refuse_link() { :; }",))
+    assert proc.returncode == 1
+    assert f"ERROR: refusing to chown {data / 'floorplan'}" in proc.stderr
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("hook", ["--write-config", "--check-config"])
+def test_a_linked_config_toml_is_refused(shell: list[str], hook: str, tmp_path: Path) -> None:
+    target = tmp_path / "outside.toml"
+    target.write_text("keep = true\n")
+    target.chmod(0o644)
+    conf = conf_path(tmp_path)
+    conf.symlink_to(target)
+    env_file = write_env(tmp_path, BASE_ENV)
+    proc = run(shell, "--env", str(env_file), hook, str(conf))
+    assert proc.returncode == 1
+    assert f"refusing to read or replace {conf}: {LINK_REFUSED}" in proc.stderr
+    assert conf.is_symlink()
+    assert target.read_text() == "keep = true\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    dry = run(shell, "--env", str(env_file), hook, str(conf), "--dry-run")
+    assert dry.returncode == 1
+    assert f"PROBLEM: refusing to read or replace {conf}" in dry.stderr
+
+
+def swapping_script(tmp_path: Path, pattern: str, how: str) -> Path:
+    """The script with a mktemp *function* that replaces the temp file whose name matches
+    PATTERN by a link to $SWAP_TARGET, as the service user could right after mktemp.
+
+    A function, not a stub on PATH: busybox ash runs its mktemp and ln applets without
+    a PATH lookup.
+    """
+    ln = "ln -s" if how == "symlink" else "ln"
+    harness = tmp_path / "swapping" / "deploy" / "setup-alpine.sh"
+    harness.parent.mkdir(parents=True)
+    shutil.copy(ROOT / "config.example.toml", harness.parent.parent / "config.example.toml")
+    shebang, rest = SCRIPT.read_text().split("\n", 1)
+    swap = (
+        "mktemp() {\n"
+        '\t_made=$(command mktemp "$@") || return 1\n'
+        f'\tcase $_made in */{pattern}*) rm -f "$_made"; {ln} "$SWAP_TARGET" "$_made" ;; esac\n'
+        "\tprintf '%s\\n' \"$_made\"\n"
+        "}\n"
+    )
+    harness.write_text(f"{shebang}\n{swap}{rest}")
+    return harness
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("how", ["symlink", "hardlink"])
+@pytest.mark.parametrize("which", [".config.", ".config-backup."])
+def test_a_swapped_temp_file_is_not_written_through(
+    shell: list[str], how: str, which: str, tmp_path: Path
+) -> None:
+    conf = conf_path(tmp_path)
+    assert write_conf(shell, tmp_path, BASE_ENV, conf).returncode == 0
+    before = conf.read_bytes()
+    target = tmp_path / "victim"
+    target.write_text("victim\n")
+    target.chmod(0o644)
+    env = {**os.environ, "SWAP_TARGET": str(target)}
+    script = swapping_script(tmp_path, which, how)
+    env_file = write_env(tmp_path, {**BASE_ENV, "RETENTION_DAYS": "7"})  # a change: backup
+    proc = run(shell, "--env", str(env_file), "--write-config", str(conf), env=env, script=script)
+    assert proc.returncode == 1
+    assert "ERROR: refusing to write" in proc.stderr or "ERROR: refusing to back up" in proc.stderr
+    assert target.read_text() == "victim\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert conf.read_bytes() == before and not conf.is_symlink()
+    assert backups(conf) == []
+    left = [p.name for p in conf.parent.iterdir() if p.name.startswith(".config")]
+    assert left == []  # the EXIT trap removed the swapped name (not its target)
+
+
+BACKUP_STUBS = {"install_app": "CODE_INSTALLED=1; NEW_COMMIT=abc1234; OLD_COMMIT=0ld0000"}
+
+
+def backup_run(
+    shell: list[str], tmp_path: Path, data: Path, overrides: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    """The real backup_db; as_service_user runs its command here, and says so."""
+    as_user = 'as_service_user() { echo "AS $SVC_USER" >&2; sh -c "$1"; }'
+    return run_main(
+        tmp_path,
+        BASE_ENV,
+        conf_path(tmp_path),
+        {"backup_db"},
+        stub_extra=BACKUP_STUBS,
+        overrides=(
+            f"DATA_DIR='{data}'",
+            f"BACKUP_DIR='{data}/backups'",
+            f"SVC_USER='{ME}'",
+            as_user,
+            *overrides,
+        ),
+        shell=tuple(shell),
+    )
+
+
+def make_db(data: Path) -> None:
+    data.mkdir(exist_ok=True)
+    con = sqlite3.connect(data / "atlas.db")
+    con.execute("CREATE TABLE t (x)")
+    con.execute("INSERT INTO t VALUES (42)")
+    con.commit()
+    con.close()
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_database_backup_is_made_by_the_service_user(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    make_db(data)
+    old = data / "backups"
+    old.mkdir()
+    for i in range(4):  # older backups: two of them go (3 kept with the new one)
+        f = old / f"atlas-2020010{i}-000000-aaaaaaa.db"
+        f.write_text("")
+        os.utime(f, (1_600_000_000 + i, 1_600_000_000 + i))
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert f"AS {ME}" in proc.stderr
+    made = [p for p in old.iterdir() if p.name.endswith("-0ld0000.db")]
+    assert len(made) == 1 and f"backed up to {made[0]}" in proc.stdout
+    assert stat.S_IMODE(made[0].stat().st_mode) == 0o600
+    assert sqlite3.connect(made[0]).execute("SELECT x FROM t").fetchone() == (42,)
+    assert sorted(p.name for p in old.iterdir()) == sorted(
+        [made[0].name, "atlas-20200102-000000-aaaaaaa.db", "atlas-20200103-000000-aaaaaaa.db"]
+    )
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_database_backup_creates_its_directory_0700(shell: list[str], tmp_path: Path) -> None:
+    data = tmp_path / "var-lib"
+    make_db(data)
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE((data / "backups").stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_linked_backup_dir_is_refused(shell: list[str], tmp_path: Path) -> None:
+    target = outside_dir(tmp_path)
+    data = tmp_path / "var-lib"
+    make_db(data)
+    (data / "backups").symlink_to(target)
+    proc = backup_run(shell, tmp_path, data)
+    assert proc.returncode == 1
+    link = data / "backups"
+    assert f"refusing to write database backups into {link}: {LINK_REFUSED}" in proc.stderr
+    assert "AS " not in proc.stderr
+    assert list(target.iterdir()) == []
+    assert STARTED_AGAIN in proc.stderr or NOT_STARTED in proc.stderr  # the trap restarts it
+
+
+def test_root_never_changes_ownership_by_name_in_the_data_dir() -> None:
+    text = SCRIPT.read_text()
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert not re.search(r"\bchown\s+[\"'$-]", code)  # only os.fchown, on an O_NOFOLLOW descriptor
+    assert not re.search(r"install -d[^\n]*-o ", code)
+    assert "cp -p" not in code
+    backup = function_body("backup_db")
+    assert "as_service_user" in backup and "chmod 0600" not in backup
+
+
+def test_readme_documents_the_symlink_rules_and_the_capabilities() -> None:
+    text = " ".join((ROOT / "README.md").read_text().split())
+    section = text[text.index("## Remote access and security") :]
+    for needle in ("symbolic link", "file capabilities", "not tested on Alpine"):
         assert needle in section, needle

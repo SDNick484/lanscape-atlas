@@ -4,6 +4,15 @@
 # arp-scan and nmap need raw sockets. `capabilities` grants them to the
 # unprivileged service user as ambient capabilities (leading ^), which
 # supervise-daemon supports from OpenRC 0.45 onwards.
+#
+# Ambient capabilities reach the Python process and every child, not just the two
+# scanners. File capabilities (setcap cap_net_raw+ep on arp-scan; cap_net_raw,
+# cap_net_admin+eip on nmap; both root:lanscape 0750) would confine them, but are not
+# used yet: setcap on /usr/bin/arp-scan and /usr/bin/nmap is lost whenever apk upgrades
+# or reinstalls those packages (and changes files apk owns), copies under
+# /opt/lanscape-atlas would miss nmap's security updates, and neither has been shown to
+# work for the collectors in an unprivileged Alpine LXC container (setcap there needs
+# namespaced file capabilities). See README, "Remote access and security".
 
 description="lanscape-atlas home network inventory"
 
