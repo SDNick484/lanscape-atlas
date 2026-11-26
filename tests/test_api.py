@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -536,11 +537,14 @@ def test_one_deep_scan_per_device(app: FastAPI) -> None:
 
     release: list[asyncio.Event] = []
     started: list[str] = []
+    second_started = threading.Event()
 
     async def blocking(argv: list[str], timeout_s: float) -> str:
         ev = asyncio.Event()
         release.append(ev)
         started.append(argv[-1])
+        if len(started) == 2:
+            second_started.set()
         await ev.wait()
         return "<nmaprun/>"
 
@@ -567,6 +571,9 @@ def test_one_deep_scan_per_device(app: FastAPI) -> None:
         assert d["id"] not in app.state.deep_scan_tasks
         # Finished: a new scan may start.
         assert c.post(url).status_code == 202
+        # The scan checks the device in a worker thread before it reaches the runner;
+        # leaving the client (shutdown cancels scans) before then would cancel it unstarted.
+        assert second_started.wait(5)
     assert len(started) == 2
 
 
