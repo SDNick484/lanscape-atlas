@@ -6,12 +6,27 @@ import sqlite3
 from importlib import resources
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+
+class _Connection(sqlite3.Connection):
+    """Runs ``PRAGMA optimize`` before every close, so planner statistics stay current.
+
+    The pragma only analyzes tables this connection queried, and the results persist in
+    the database, so the short-lived and long-lived connections both feed the planner.
+    """
+
+    def close(self) -> None:
+        try:
+            self.execute("PRAGMA optimize")
+        except sqlite3.Error:
+            pass  # optimize is advisory; a failure must never keep the connection open
+        super().close()
 
 
 def open_db(path: Path | str) -> sqlite3.Connection:
     """Open the database with WAL, foreign keys and a busy timeout."""
-    conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False)
+    conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False, factory=_Connection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
