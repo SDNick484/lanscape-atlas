@@ -61,6 +61,8 @@
     tx = clamp(tx, 1 - s, 0);
     ty = clamp(ty, 1 - s, 0);
     viewEl.style.transform = "translate(" + tx * 100 + "%, " + ty * 100 + "%) scale(" + s + ")";
+    // At zoom 1 there is nothing to pan, so touch is left to the page (app.css: touch-action).
+    stage.classList.toggle("fp-zoomed", s > MIN);
     if (s !== shown) {
       shown = s;
       stage.setAttribute("data-zoom", String(s));
@@ -300,10 +302,15 @@
   }, true);
 
   // Wheel and trackpad pinch (sent as wheel with ctrlKey). Only over the stage.
+  // The wheel is consumed only when it moves the view; at the limits (fit, scrolled out
+  // to 1x) it passes to the page, so the plan never traps the page's scroll.
   stage.addEventListener("wheel", function (evt) {
-    evt.preventDefault();
+    var s0 = s, tx0 = tx, ty0 = ty;
     var dy = evt.deltaY * (evt.deltaMode === 1 ? 16 : evt.deltaMode === 2 ? 400 : 1);
     zoomBy(Math.exp(-dy * (evt.ctrlKey ? 0.01 : 0.0015)), evt.clientX, evt.clientY);
+    if (Math.abs(s - s0) > 1e-9 || Math.abs(tx - tx0) > 1e-9 || Math.abs(ty - ty0) > 1e-9) {
+      evt.preventDefault();
+    }
   }, { passive: false });
 
   stage.addEventListener("keydown", function (evt) {
@@ -330,8 +337,8 @@
       return;
     }
     var ours = hover || stage.contains(document.activeElement);
-    if (ours) {
-      evt.preventDefault(); // no page scroll while panning the plan
+    if (ours && s > MIN) {
+      evt.preventDefault(); // no page scroll while panning a zoomed plan
     }
     if (!evt.repeat && ours) {
       spaceHeld = true;
