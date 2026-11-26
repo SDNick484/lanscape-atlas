@@ -53,6 +53,7 @@ TOOL_NAMES = (
     "update_device",
     "claim_interface",
     "set_place",
+    "forget_device",
     "run_deep_scan",
     "recent_changes",
     "undo",
@@ -294,6 +295,15 @@ def build_mcp(
         """Put a device in a place (room or area such as "Office" or "Living room"),
         creating the place if it does not exist yet. Returns {"batch_id": n}."""
         return {"batch_id": service.set_place(ACTOR, device_id, place_name)}
+
+    @tool()
+    def forget_device(device_id: int) -> dict[str, int]:
+        """Delete a device together with its interfaces, IP history and services (for example
+        a stale random-MAC device). Refused while the device has links, Bluetooth identities or
+        a linked Bluetooth scanner: remove those first. If it is seen on the network again it
+        comes back as a new device. Returns {"batch_id": n}; undo(batch_id) restores it unless
+        one of its interfaces has been seen again since."""
+        return {"batch_id": service.forget_device(ACTOR, device_id)}
 
     @tool()
     async def run_deep_scan(device_id: int) -> dict[str, str]:

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Forget {{ d.name or "Device %d"|format(d.id) }}{% endblock %}
+{% block content %}
+<h1>Forget {{ d.name or "(unnamed)" }} <span class="muted">#{{ d.id }}</span>?</h1>
+<div class="card" id="forget-confirm">
+  <p>This removes the device, its {{ d.interfaces|length }} interface{{ "" if d.interfaces|length == 1 else "s" }}
+  ({% for i in d.interfaces %}<span class="mono">{{ i.address }}</span>{{ ", " if not loop.last }}{% else %}none{% endfor %}),
+  its IP history and its {{ d.services|length }} service{{ "" if d.services|length == 1 else "s" }}.
+  You can undo it from <a href="{{ root }}/history">History</a>.</p>
+  <p>If the device is seen on the network again it comes back as a new device in the Inbox, not as this one.</p>
+  <form method="post" action="{{ root }}/devices/{{ d.id }}/forget">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="danger" id="forget-confirm-button">Forget device</button>
+    <a href="{{ root }}/{{ 'inbox' if next == 'inbox' else 'devices/%d'|format(d.id) }}">Cancel</a>
+  </form>
+</div>
+{% endblock %}

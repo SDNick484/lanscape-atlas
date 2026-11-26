@@ -477,6 +477,45 @@ def device_roaming(request: Request, device_id: PathId, form: Form) -> Response:
     return _redirect(request, f"/devices/{device_id}")
 
 
+def _forget_page(
+    request: Request,
+    device_id: int,
+    nxt: str,
+    flash: tuple[str, str] | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    page = _load_view(_service(request), device_id)
+    return render(
+        request,
+        "forget.html",
+        {"nav": "devices", "d": page.view, "next": nxt, "flash": flash},
+        status_code,
+    )
+
+
+def _forget_next(raw: str | None) -> str:
+    """Where to go after forgetting: the Inbox if asked, else the device list."""
+    return "inbox" if raw == "inbox" else "devices"
+
+
+@router.get("/devices/{device_id}/forget", response_class=HTMLResponse)
+def device_forget_confirm(
+    request: Request, device_id: PathId, next: str | None = None
+) -> HTMLResponse:
+    """The confirmation step: a plain page with a POST form, no JavaScript dialog."""
+    return _forget_page(request, device_id, _forget_next(next))
+
+
+@router.post("/devices/{device_id}/forget", response_model=None)
+def device_forget(request: Request, device_id: PathId, form: Form) -> Response:
+    nxt = _forget_next(_text(form, "next"))
+    try:
+        _service(request).forget_device(ACTOR, device_id)
+    except ValueError as e:
+        return _forget_page(request, device_id, nxt, ("error", _message(e)), 422)
+    return _redirect(request, "/inbox" if nxt == "inbox" else "/")
+
+
 # -------------------------------------------------------------------- inbox
 
 

@@ -22,7 +22,8 @@ ranges, not a real network.
   each with provenance ("set by user / claude / collector") and precedence
   user > claude > collector.
 - **Inbox** for never-seen devices and unclaimed random-MAC interfaces, with quick
-  actions to name, type, claim, or mark known/unwanted.
+  actions to name, type, claim, mark known/unwanted, or forget a device (see
+  [Forgetting a device](#forgetting-a-device)).
 - **Topology** view: router, mesh nodes, switches, devices. Discovered links are
   dashed, manual links solid; drag to arrange, add placeholders for unmanaged switches.
   See [Topology](#topology) below.
@@ -35,6 +36,23 @@ ranges, not a real network.
   set its scale, draw rooms, place devices. See below.
 - **Bluetooth Find** (Phase 3): where was my remote or phone last heard, by room, from
   ESP32 Bluetooth proxies through Home Assistant. See below.
+
+## Forgetting a device
+
+*Forget device* (on the device page, and in the Inbox quick actions) deletes a device
+together with its interfaces, IP history and services, so a stale random-MAC device does
+not sit in the Inbox for ever. A confirmation page comes first (no JavaScript dialog).
+The same action is `DELETE /api/v1/devices/{id}` and the MCP tool `forget_device`; each
+returns the `batch_id`.
+
+- It is one History batch: **Undo** restores the device with its original id, values,
+  provenance, room and saved topology position. Raw observations are detached rather than
+  restored, and Bluetooth sightings are not restored.
+- It is refused while the device has manual links, Bluetooth identities or a linked
+  Bluetooth scanner: remove or unclaim those first.
+- A device that is seen on the network again comes back as a **new** device in the Inbox,
+  not as the one you forgot. Once that has happened Undo is refused (the interface now
+  belongs to the new device); merge the new device with *claim* instead.
 
 ## Topology
 
@@ -704,7 +722,7 @@ claude mcp add --transport http atlas https://atlas.example.com/mcp \
 ```
 
 Tools: `find_device`, `list_devices`, `get_device`, `list_services`, `update_device`,
-`claim_interface`, `set_place`, `run_deep_scan`, `recent_changes`, `undo`,
+`claim_interface`, `set_place`, `forget_device`, `run_deep_scan`, `recent_changes`, `undo`,
 `get_floor_plan`, `place_devices`, `where_is`, `ble_candidates`, `claim_ble`, `hide_ble`.
 
 Everything Claude writes is recorded with actor `claude`. It appears in History as
