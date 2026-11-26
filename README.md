@@ -734,8 +734,10 @@ Tools:
 
 - `scripts/check_leaks.py` fails on MAC addresses outside the documentation range,
   128-bit UUIDs other than `00000000-0000-4000-8000-0000000000xx` and the Bluetooth base
-  (`xxxxxxxx-0000-1000-8000-00805f9b34fb`), private (RFC 1918) IPv4 addresses, and any
-  term from your personal denylist. The
+  (`xxxxxxxx-0000-1000-8000-00805f9b34fb`), IPv4 addresses outside the documentation
+  ranges (including RFC 1918, CGNAT (RFC 6598) and public addresses), IPv6 addresses
+  outside `2001:db8::/32` (link-local only when it embeds a MAC), and any term from your
+  personal denylist. A tracked file that cannot be read also fails. The
   pre-commit hook runs it on staged files; CI runs it on the whole repository.
 - The optional denylist lives **outside the repository** at
   `~/.config/lanscape-atlas/denylist.txt` (one term per line, `#` comments). Put your
