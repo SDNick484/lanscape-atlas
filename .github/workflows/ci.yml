@@ -1,15 +1,39 @@
 name: ci
+
+# Branch pushes are covered by their pull request; only main is built on push.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A newer push to the same branch or PR makes the older run pointless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Jobs only read the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # Installed explicitly (not relied on from the runner image) so the installer's
+      # shellcheck test runs; with CI set, that test fails rather than skips without it.
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: ruff format --check .
@@ -17,18 +41,73 @@ jobs:
       - run: pytest
       - run: python scripts/check_leaks.py
 
+  # The Playwright tests in tests/browser skip when Playwright or Chromium is missing;
+  # with CI set they fail instead, so they cannot silently stop running.
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e .[dev,browser]
+      - run: playwright install --with-deps chromium
+      # Makes a missing Playwright or Chromium a failure instead of a skip.
+      - run: pytest tests/browser
+        env:
+          LANSCAPE_BROWSER_TESTS: "1"
+
+  # CI used editable installs while production installs a wheel. Build the wheel,
+  # install it into a clean virtualenv away from the source tree and exercise it, so a
+  # packaging-data regression (templates, static files, migrations, data/) fails here.
+  wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install hatchling
+      - run: pip wheel . --no-deps --no-build-isolation -w dist
+      - name: Smoke-test the wheel (migrate, GET a page and a static file)
+        run: scripts/smoke-wheel.sh dist/*.whl
+
+  # Known vulnerabilities in the dependency set. A separate job: a new advisory against a
+  # third-party package should show up here without hiding the test results.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install . pip-audit
+      - run: pip-audit --skip-editable
+
   # Production runs on Alpine (musl, apk's python3) under OpenRC. This job runs the
   # same suite there. Keep the image and the Python guard in step with the server.
   # No compiler toolchain is installed, matching deploy/setup-alpine.sh: a dependency
   # without a musl wheel fails here exactly as it would on the server.
   alpine:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container: alpine:3.24.1
     env:
       ALPINE_PYTHON: "3.14"
     steps:
+      # shellcheck and curl are test tooling (installer lint, wheel smoke test), not
+      # something deploy/setup-alpine.sh installs on the server.
       - name: Install system packages (as deploy/setup-alpine.sh does)
-        run: apk add --no-cache git python3 py3-pip arp-scan nmap
+        run: apk add --no-cache git python3 py3-pip arp-scan nmap shellcheck curl
       - uses: actions/checkout@v4
       # Steps run as root but the workspace belongs to the runner user, so git refuses it
       # ("dubious ownership") once checkout's temporary safe.directory entry is gone.
@@ -49,3 +128,7 @@ jobs:
       - run: mypy src
       - run: pytest
       - run: python scripts/check_leaks.py
+      - name: Smoke-test the wheel on Alpine
+        run: |
+          pip wheel . --no-deps --no-build-isolation -w dist
+          scripts/smoke-wheel.sh dist/*.whl
