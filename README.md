@@ -392,7 +392,7 @@ package normally includes the `venv` module; if `python3 -m venv` reports it
 missing on your release, install `py3-virtualenv` and use `virtualenv` instead.
 
 ```sh
-apk add python3 py3-pip git arp-scan nmap
+apk add python3 py3-pip git arp-scan nmap logrotate
 
 # Get the code; every later step runs from inside the checkout
 git clone https://github.com/SDNick484/lanscape-atlas.git
@@ -422,6 +422,9 @@ su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-ou
 install -m 0755 deploy/openrc/lanscape-atlas /etc/init.d/lanscape-atlas
 rc-update add lanscape-atlas default
 rc-service lanscape-atlas start
+
+# Log rotation (logrotate runs daily from /etc/periodic/daily)
+install -m 0644 deploy/logrotate/lanscape-atlas /etc/logrotate.d/lanscape-atlas
 ```
 
 **Make it reachable from the LAN.** By default `serve` listens on `127.0.0.1`
@@ -462,7 +465,12 @@ nmap uses them. Ambient capabilities under `supervise-daemon` require
 capabilities on the binaries and remove the `NMAP_PRIVILEGED` line.
 
 The service logs (INFO level, with time, level and logger name) to
-`/var/log/lanscape-atlas.log`.
+`/var/log/lanscape-atlas.log`. `deploy/logrotate/lanscape-atlas` rotates it weekly, or
+as soon as the daily logrotate run finds it over 10 MB, and keeps four old logs. If the
+service crashes, `supervise-daemon` starts it again after 5 s, but gives up after 5
+restarts within 5 minutes; `rc-service lanscape-atlas status` then says `crashed`. Fix
+the cause (see the log), then `rc-service lanscape-atlas zap` and
+`rc-service lanscape-atlas start`.
 
 `lanscape-atlas update-oui` re-downloads the IEEE MA-L list. It validates the file
 before replacing the old one and leaves the old file in place on any failure, so it
@@ -474,13 +482,16 @@ to `/etc/crontabs/root` and make sure `crond` runs (`rc-update add crond default
 17 4 * * 0 su -s /bin/sh lanscape -c '/opt/lanscape-atlas/venv/bin/lanscape-atlas update-oui'
 ```
 
+The scripted install below sets this up for you (as a weekly `/etc/periodic` job).
+
 ### Scripted install and upgrade
 
 `deploy/setup-alpine.sh` performs the steps above and is safe to re-run, so the same
 command installs and later upgrades. It needs root, an Alpine container with OpenRC
 0.45 or newer, and Python 3.12 or newer. It only touches `/opt/lanscape-atlas`,
-`/etc/lanscape-atlas`, `/var/lib/lanscape-atlas`, the log file, its own init script
-and logrotate entry; it never upgrades packages or restarts other services.
+`/etc/lanscape-atlas`, `/var/lib/lanscape-atlas`, the log file, its own init script,
+logrotate entry and weekly job, and its lock; it never upgrades packages or restarts
+other services.
 
 1. Copy `deploy/setup.env.example` to `/etc/lanscape-atlas/setup.env`, fill it in and
    `chmod 600` it. It holds your router password, API token and (for Bluetooth Find)
@@ -517,6 +528,40 @@ which case the code may not match the database and may not start; the pre-upgrad
 is in `/var/lib/lanscape-atlas/backups`). It reports the service as started only if
 `rc-service lanscape-atlas status` says so afterwards, and otherwise says it is down. A
 service that was not running when the script began is not started by a failed run.
+
+Other things a run takes care of:
+
+- **One run at a time.** A run holds `/run/lanscape-atlas-setup.lock` (a directory with
+  its PID) from after the first config check until it exits; a second run stops with the
+  PID of the first. A lock whose PID no longer runs (the run was killed with `kill -9`)
+  is stale and is taken over with a warning. `--dry-run` takes no lock.
+- **A crashed service.** If `rc-service lanscape-atlas status` says `crashed` (it gave
+  up respawning), the script resets it with `rc-service lanscape-atlas zap`, which
+  `rc-service lanscape-atlas start` needs before it starts anything, and then starts it
+  as usual; a failed run starts it again too.
+- **A changed `REPO_URL`.** The checkout follows `REPO_URL` in `setup.env`: when it
+  differs from the checkout's `origin`, the script runs `git remote set-url origin`
+  before fetching (the URLs are not printed).
+- **A Python upgrade.** After an Alpine upgrade from, say, Python 3.12 to 3.13 the old
+  virtualenv's `python` still runs but has no packages and no pip. The script compares
+  the version in the virtualenv's `pyvenv.cfg` with `python3` and checks
+  `python -m pip --version`, and rebuilds the virtualenv from the wheels when either
+  fails.
+- **Temporary files.** Everything goes in one temporary directory (plus a file next to
+  `config.toml` while it is replaced), removed when the script exits, whatever the
+  outcome. The config checks and `--dry-run` render `config.toml` in memory only, so
+  its secrets are never written to a temporary file.
+- **The smoke test** passes only when a collector finished a run after this start, not
+  on a `last_ok` left in the database by the previous version. When it fails, it says
+  whether `rc-service` reports the service running.
+- **The weekly vendor list refresh.** The script installs
+  `/etc/periodic/weekly/lanscape-atlas-update-oui`, which runs `update-oui` as
+  `lanscape` and appends its output to the service log. Alpine's root crontab runs
+  `/etc/periodic/weekly` (Saturday 03:00) as long as `crond` runs; the script warns if
+  it is not in the default runlevel, but does not start it. To opt out, set
+  `UPDATE_OUI_WEEKLY=false` in `setup.env` and re-run: the job is removed. If
+  `/etc/crontabs/root` already has an `update-oui` line (the manual install above), no
+  job is added.
 
 Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
 run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If a hand

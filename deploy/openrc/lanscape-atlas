@@ -11,6 +11,13 @@ command="/opt/lanscape-atlas/venv/bin/lanscape-atlas"
 command_args="serve"
 command_user="lanscape"
 supervisor="supervise-daemon"
+# A crash loop must not run forever (each start logs a traceback): wait 5 s between
+# respawns, and give up after 5 respawns within 300 s. rc-service status then says
+# "crashed"; fix the cause, then rc-service lanscape-atlas zap and start it again (the
+# installer does the zap itself).
+respawn_delay=5
+respawn_max=5
+respawn_period=300
 capabilities="^cap_net_raw,^cap_net_admin"
 # nmap otherwise assumes a non-root user cannot send raw packets and falls back
 # to slower connect scans. Only correct with the ambient capabilities above,
