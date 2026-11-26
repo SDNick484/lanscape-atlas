@@ -59,6 +59,7 @@
   var MIN_SIDE = 0.002; // smallest furniture side, as a fraction of the plan width
   var MIN_DRAG_PX = 6; // a furniture rectangle drag shorter than this is no rectangle
   var LABEL_SIZE = 0.02; // a new label's text height, as a fraction of the plan width
+  var HISTORY_MAX = 100; // undo steps kept
   var TEXT_MAX = 80; // server: SHAPE_LABEL_MAX
   var FIT_TOL = 1e-6; // a corner may overshoot the plan by this much (server: 2e-6)
   var SIGNS = [[-1, -1], [1, -1], [1, 1], [-1, 1]]; // rectangle corners, in order
@@ -319,6 +320,9 @@
     var pendingLabel = null; // Label tool: the plan point its text box will place
     var discarded = false;
     var base = {}; // id -> JSON of the server's {geometry, label} this page last saw
+    var undoStack = [], redoStack = []; // JSON snapshots of the pending state, newest last
+    var current = null; // snapshot of the state as it is now
+    var merging = null; // id whose text is being typed: its keystrokes make one entry
 
     var gShapes = svgEl("g", { "class": "fp-shapes" });
     var gTexts = svgEl("g", { "class": "fp-texts" });
@@ -329,6 +333,8 @@
     var hintEl = document.getElementById("draw-hint");
     var flipBtn = document.getElementById("door-flip");
     var deleteBtn = document.getElementById("shape-delete");
+    var undoBtn = document.getElementById("draw-undo");
+    var redoBtn = document.getElementById("draw-redo");
     var lengthIn = document.getElementById("draw-length");
     var labelIn = document.getElementById("draw-text");
     var textIn = document.getElementById("shape-text");
@@ -780,7 +786,54 @@
 
     // ------------------------------------------------------------- edits
 
-    function changed() {
+    // ---------------------------------------------------------- history
+    // One entry per completed gesture: every edit funnels through changed(), which
+    // runs once per drop, click or key (a drag is not one call per pointermove).
+
+    function snapshot() {
+      return JSON.stringify({ shapes: shapes, order: order, created: created, updated: updated, deleted: deleted, nextTemp: nextTemp });
+    }
+
+    function restore(json) {
+      var o = JSON.parse(json);
+      shapes = o.shapes; order = o.order; created = o.created; updated = o.updated; deleted = o.deleted; nextTemp = o.nextTemp;
+      current = json;
+      if (selectedId !== null && (!shapes[selectedId] || deleted[selectedId])) { selectedId = null; }
+      ctx.changed();
+      render();
+      updatePanel();
+    }
+
+    function resetHistory() {
+      undoStack = []; redoStack = []; merging = null;
+      current = snapshot();
+    }
+
+    function canAct() { return active && !drag && !rectDrag && !pendingLabel; }
+
+    function undo() {
+      if (!undoStack.length || !canAct()) { return; }
+      redoStack.push(current);
+      merging = null;
+      restore(undoStack.pop());
+    }
+
+    function redo() {
+      if (!redoStack.length || !canAct()) { return; }
+      undoStack.push(current);
+      merging = null;
+      restore(redoStack.pop());
+    }
+
+    function changed(mergeId) {
+      var same = mergeId !== undefined && merging === mergeId && undoStack.length;
+      merging = mergeId === undefined ? null : mergeId;
+      if (!same) {
+        undoStack.push(current);
+        if (undoStack.length > HISTORY_MAX) { undoStack.shift(); }
+      }
+      redoStack = [];
+      current = snapshot();
       ctx.changed();
       render();
       updatePanel();
@@ -796,9 +849,9 @@
       return id;
     }
 
-    function touch(id) {
+    function touch(id, mergeId) {
       if (id > 0) { updated[id] = true; }
-      changed();
+      changed(mergeId);
     }
 
     function remove(id) {
@@ -1303,6 +1356,8 @@
       var s = selectedId !== null ? shapes[selectedId] : null;
       if (flipBtn) { flipBtn.disabled = !(s && s.kind === "door"); }
       if (deleteBtn) { deleteBtn.disabled = !s; }
+      if (undoBtn) { undoBtn.disabled = !undoStack.length; }
+      if (redoBtn) { redoBtn.disabled = !redoStack.length; }
       if (textIn) {
         var texty = !!(s && (s.kind === "furniture" || s.kind === "label"));
         textIn.disabled = !texty;
@@ -1317,6 +1372,11 @@
       return !!(el && el.closest && el.closest(EDITABLE));
     }
 
+    // A field that takes text keeps its own Ctrl+Z; buttons and checkboxes do not.
+    function typingIn(el) {
+      return !!(el && el.closest && el.closest("input:not([type=checkbox]):not([type=button]), textarea, select, [contenteditable]"));
+    }
+
     var KEYS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
     function onKeyDown(e) {
@@ -1327,6 +1387,11 @@
           if (e.key === "Alt") { e.preventDefault(); }
           renderOverlay();
         }
+        return;
+      }
+      if (active && (e.ctrlKey || e.metaKey) && !e.altKey && /^[zy]$/i.test(e.key) && !typingIn(e.target)) {
+        if (/y/i.test(e.key) || e.shiftKey) { redo(); } else { undo(); }
+        e.preventDefault();
         return;
       }
       if (!active || e.target === lengthIn || isEditable(e.target)) {
@@ -1437,7 +1502,10 @@
           if (selectedId !== null) { remove(selectedId); }
         });
       }
+      if (undoBtn) { undoBtn.addEventListener("click", undo); }
+      if (redoBtn) { redoBtn.addEventListener("click", redo); }
       if (textIn) {
+        textIn.addEventListener("focus", function () { merging = null; });
         textIn.addEventListener("input", function () {
           var s = selectedId !== null ? shapes[selectedId] : null;
           if (!s || (s.kind !== "furniture" && s.kind !== "label")) {
@@ -1448,7 +1516,7 @@
             return; // a label always has text; the box shows the old text again on leaving
           }
           s.label = text;
-          touch(s.id);
+          touch(s.id, s.id); // typing in the box is one undo step, not one per key
         });
         textIn.addEventListener("change", updatePanelText);
         textIn.addEventListener("blur", updatePanelText);
@@ -1538,6 +1606,10 @@
       if (selectedId !== null && !shapes[selectedId]) { selectedId = null; }
       ctx.batch = batch;
       changed();
+      // The re-base rewrote shapes and `base` under the stack, so earlier snapshots
+      // would put pre-rebase copies back over the server's: start the history afresh.
+      resetHistory();
+      updatePanel();
       return [];
     }
 
@@ -1550,6 +1622,7 @@
         base[s.id] = shapeKey(shapes[s.id]);
       }
     });
+    resetHistory();
     wire();
     render();
 
@@ -1598,7 +1671,7 @@
         }
         return Object.keys(created).length + Object.keys(updated).length + Object.keys(deleted).length;
       },
-      discard: function () { discarded = true; },
+      discard: function () { discarded = true; resetHistory(); updatePanel(); },
       conflicts: conflictsWith,
       rebase: rebaseOnto,
       payload: function () {
