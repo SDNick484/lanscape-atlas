@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -579,10 +580,48 @@ def test_openapi_under_api_and_protected(
         assert c.get("/api/openapi.json").status_code == 401
         r = c.get("/api/openapi.json", headers=good)
         assert r.status_code == 200 and "/api/v1/devices" in r.json()["paths"]
-        assert c.get("/api/docs").status_code == 401
-        assert c.get("/api/docs", headers=good).status_code == 200
-        for gone in ("/openapi.json", "/docs", "/redoc"):
+        # FastAPI's own docs page is off; the old /api/docs path is gone.
+        assert c.get("/api/docs", headers=good).status_code == 404
+        assert c.get("/api/redoc", headers=good).status_code == 404
+        for gone in ("/openapi.json", "/redoc"):
             assert c.get(gone).status_code == 404, gone
+
+
+def _page_refs(html: str) -> list[str]:
+    return re.findall(r'(?:src|href)="([^"]+)"', html)
+
+
+@pytest.mark.parametrize("token", [None, TOKEN])
+def test_docs_page_is_local_and_open(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock, token: str | None
+) -> None:
+    """/docs is an ordinary page: no external host, and its assets come from /static."""
+    app = _make_app(tmp_path, db, clock, token=token)
+    with TestClient(app) as c:
+        r = c.get("/docs")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        refs = _page_refs(r.text)
+        assert "/static/swagger-ui-bundle.js" in refs and "/static/swagger-ui.css" in refs
+        for ref in refs:
+            assert ref.startswith("/static/") and "://" not in ref, ref
+            assert c.get(ref).status_code == 200, ref
+        assert "://" not in r.text
+        script = c.get("/static/api-docs.js").text
+        assert "://" not in script and "validatorUrl: null" in script
+        assert '"/api/openapi.json"' in script
+
+
+def test_docs_page_with_token_leaves_spec_protected(
+    tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
+) -> None:
+    """The page itself is open, so a browser can load it; the spec still needs the token."""
+    app = _make_app(tmp_path, db, clock, token=TOKEN)
+    with TestClient(app) as c:
+        assert c.get("/docs").status_code == 200
+        assert c.get("/api/openapi.json").status_code == 401
+        wrong = {"Authorization": "Bearer nope"}
+        assert c.get("/api/openapi.json", headers=wrong).status_code == 401
 
 
 # ------------------------------------------------------------- Ruling 44

@@ -33,7 +33,7 @@ from fastapi.exception_handlers import (
     request_validation_exception_handler,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -62,6 +62,10 @@ from lanscape_atlas.web.floorplan_api import router as floorplan_router
 log = logging.getLogger(__name__)
 
 PROTECTED_PREFIXES = ("/api", "/mcp")
+
+# The API description page (Swagger UI, vendored under static/). Outside /api so a browser
+# can open it: its spec, /api/openapi.json, is the part behind the bearer token.
+API_DOCS_PAGE = Path(__file__).parent / "static" / "api-docs.html"
 
 
 def load_oui(data_dir: Path) -> OuiDB:
@@ -490,15 +494,22 @@ def create_app(
             if owns_conn:
                 db.close()
 
-    # OpenAPI/docs live under /api so the bearer token covers them (Ruling 33d).
+    # The OpenAPI spec stays under /api so the bearer token covers it (Ruling 33d).
+    # FastAPI's own docs page loads Swagger UI from a CDN, so it is off; /docs serves
+    # the vendored page instead.
     app = FastAPI(
         title="lanscape-atlas",
         version="0.1.0",
         lifespan=lifespan,
         openapi_url="/api/openapi.json",
-        docs_url="/api/docs",
+        docs_url=None,
         redoc_url=None,
     )
+
+    @app.get("/docs", include_in_schema=False)
+    async def api_docs() -> FileResponse:
+        return FileResponse(API_DOCS_PAGE, media_type="text/html; charset=utf-8")
+
     app.state.settings = settings
     app.state.conn = db
     app.state.clock = clock
