@@ -486,11 +486,27 @@ and logrotate entry; it never upgrades packages or restarts other services.
    read-only deploy key, prints the public half and exits (status 3); add it under
    the repository's Settings, Deploy keys, then run it again.
 
-Each run stops the service, checks out `--ref` (default `main`), reinstalls into the
-virtualenv, backs up the database (last three kept) when the code changed, renders
-`config.toml` from `setup.env`, migrates, restarts, and finishes with a smoke test of
-`/api/v1/collectors` and `/api/v1/devices`. The API token is generated on the first run
-and kept afterwards unless you set `API_TOKEN`; the script never prints it.
+Each run does everything that needs the network while the installed version is still
+running: it fetches and checks out `--ref` (default `main`), then downloads and builds
+the app and its dependencies as wheels (`pip wheel`, into a temporary directory under
+`/opt/lanscape-atlas`). If GitHub or PyPI cannot be reached, or a dependency has no
+usable wheel, the run ends there and the service was never stopped. Only then does it
+stop the service, install from those wheels (no network), back up the database (last
+three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
+start the service. It finishes by refreshing the vendor list (`update-oui`; a failed
+download is only a warning, and the running service uses the new list from its next
+start) and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
+generated on the first run and kept afterwards unless you set `API_TOKEN`; the script
+never prints it.
+
+If a run fails after the service was stopped and before it was started again, the
+script starts the service again with whatever is installed at that point and says what
+that is: the step that failed, whether it is the previous version, the new code or a
+half-updated virtualenv, and whether the database migration had already started (in
+which case the code may not match the database and may not start; the pre-upgrade copy
+is in `/var/lib/lanscape-atlas/backups`). It reports the service as started only if
+`rc-service lanscape-atlas status` says so afterwards, and otherwise says it is down. A
+service that was not running when the script began is not started by a failed run.
 
 Edit `setup.env`, not `config.toml`: the latter is regenerated from `setup.env` on every
 run. Its second line, `# sha256: ...`, lets the script recognise a hand edit. If a hand
@@ -510,10 +526,11 @@ in `setup.env` to change the value. `--dry-run` reports a hand edit too.
 
 A file with the `# sha256:` line is checked right after preflight, before the service is
 stopped. Every file is checked again right after the new code is checked out, against
-its `config.example.toml`, before anything is installed. If the run stops after the
-service was stopped, the script starts the old, untouched install again with your
-unchanged `config.toml` (or, if that fails, tells you to run
-`rc-service lanscape-atlas start`).
+its `config.example.toml`, before the service is stopped and before anything is
+installed, so a hand edit normally ends the run with the old install still running. If
+the service was already stopped (an upgrade started by an older copy of the script, which
+stopped it first), the script starts the old, untouched install again with your unchanged
+`config.toml` (or, if that fails, tells you to run `rc-service lanscape-atlas start`).
 
 Before each replace, the current file is copied to
 `/var/lib/lanscape-atlas/config.toml.YYYYmmdd-HHMMSS` (UTC, mode 0600); the newest five

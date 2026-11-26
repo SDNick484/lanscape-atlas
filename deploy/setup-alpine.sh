@@ -6,6 +6,23 @@
 # the LAN it scans. Nothing outside the paths listed below is touched, and no
 # other service is stopped, restarted or upgraded.
 #
+# Order of a run (see "main" at the end). Everything that depends on the network or
+# on the new code being buildable happens while the installed version is still
+# running, so a GitHub or PyPI outage, or a dependency without a usable wheel, ends
+# the run with the service untouched:
+#   1. preflight, config.toml hand-edit check, packages, user, repository access
+#   2. git fetch and checkout (the service runs from the virtualenv, not from src/),
+#      then continue with the setup script that came with the new code
+#   3. config.toml hand-edit check against the new config.example.toml
+#   4. pip wheel: the app and its dependencies, into a temporary wheelhouse
+#   5. STOP the service
+#   6. pip install from the wheelhouse (no network), database backup, config.toml,
+#      migrate, init script and logrotate
+#   7. START the service, then update-oui (network, never fatal) and the smoke test
+# If the run fails after 5 and before the start in 7, the EXIT trap starts the
+# service again with whatever is installed at that point and says what that is
+# (restart_after_failure).
+#
 #   sh setup-alpine.sh --dry-run     inspect and report; change nothing
 #   sh setup-alpine.sh               install / upgrade
 #   sh setup-alpine.sh --ref v0.2.0  deploy a tag, branch or commit instead of main
@@ -71,11 +88,23 @@ CHECK_HOOK=""
 DISCARD_CONFIG_EDITS=0
 CONF_HAND_EDITED=0
 CODE_INSTALLED=0
+# install_app finished: the virtualenv holds the new code completely.
+INSTALL_DONE=0
+# "$APP migrate" was started: the database may be in the new layout.
+MIGRATE_STARTED=0
+# The step that is running (for the failure report in on_exit).
+CURRENT_STEP="startup"
+# Temporary build directory (wheelhouse and its virtualenv); on_exit removes it.
+WORK_DIR=""
 # setup.env keys given a non-empty value (the legacy hand-edit rule needs them).
 ENV_SET=""
 CONF_CHOWN=1
 PROBLEMS=0
-# Carried across the re-exec below so a failure can still say the service was left stopped.
+# 1 while this run has stopped a service that was running and has not started it again;
+# on_exit starts it again if the run fails in that state. It is only ever set by
+# stopping a running service, so a service that was down before the run stays down.
+# Carried across the re-exec (reexec_if_updated): scripts older than this one stopped
+# the service before re-executing.
 STOPPED=${LANSCAPE_SETUP_STOPPED:-0}
 SCRIPT_PATH=$0
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -102,7 +131,10 @@ BLE_CANDIDATE_MIN_RSSI=""
 # ------------------------------------------------------------------ output
 
 say() { printf '%s\n' "$*"; }
-step() { printf '\n==> %s\n' "$*"; }
+step() {
+	CURRENT_STEP=$*
+	printf '\n==> %s\n' "$*"
+}
 note() { printf '    %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die() {
@@ -132,13 +164,47 @@ act() {
 	fi
 }
 
+# Called from the EXIT trap when the run failed after it stopped a running service
+# and before it started it again: start what is installed now, and report only what
+# `rc-service status` shows afterwards.
+restart_after_failure() {
+	warn "the run failed during step '$CURRENT_STEP' (exit status $1), after $APP was stopped; it did NOT complete"
+	if [ "$CODE_INSTALLED" = 0 ]; then
+		what="the previously installed version (the virtualenv was not changed)"
+	elif [ "$INSTALL_DONE" = 1 ]; then
+		what="the NEWLY installed code (${NEW_COMMIT:-unknown commit})"
+	else
+		what="a virtualenv that was being updated when the run failed and may be incomplete"
+	fi
+	if [ "$MIGRATE_STARTED" = 1 ]; then
+		warn "the database migration had started: the database may already be in the new layout, and the code being started may not match it (backups: $BACKUP_DIR)"
+	fi
+	printf '    %s\n' "starting $APP again: $what" >&2
+	start_rc=0
+	rc-service "$APP" start >&2 || start_rc=$?
+	if [ "$start_rc" = 0 ] && rc-service "$APP" status >/dev/null 2>&1; then
+		warn "$APP was started again and rc-service reports it running: $what. That is not proof that it serves: check $LOG_FILE. Fix the error above and re-run."
+	else
+		warn "$APP could NOT be started again (rc-service start exit status $start_rc) and is DOWN: $what. See $LOG_FILE; fix the error above and re-run, or try: rc-service $APP start"
+	fi
+}
+
 on_exit() {
 	rc=$?
-	if [ "$rc" -ne 0 ] && [ "$STOPPED" = 1 ]; then
-		warn "failed after stopping $APP; it was NOT restarted. Fix the error and re-run."
+	[ -z "$WORK_DIR" ] || rm -rf "$WORK_DIR" || true
+	# Never on --dry-run or in the internal single-step modes: they stop nothing.
+	if [ "$rc" -ne 0 ] && [ "$STOPPED" = 1 ] && [ "$DRY_RUN" = 0 ] &&
+		[ -z "$RENDER_OUT$CHECK_HOOK$CONFIG_HOOK" ]; then
+		STOPPED=0
+		restart_after_failure "$rc"
 	fi
 }
 trap on_exit EXIT
+# A shell killed by a signal skips its EXIT trap (ash, dash); exiting from the
+# signal's own trap runs it.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 usage() {
 	cat <<EOF
@@ -618,11 +684,11 @@ PY
 
 have_python() { command -v python3 >/dev/null 2>&1; }
 
-# A hand-edit stop: a problem on --dry-run; otherwise, if this run (or the script
-# before the re-exec) stopped the service, start it again with the unchanged
-# config.toml, then stop. Normally the check runs before anything is installed
-# (check_config_after_checkout); if the defensive re-check in write_config fires,
-# the new code is already in the venv, and the message says so.
+# A hand-edit stop: a problem on --dry-run; otherwise, if this run (or an older
+# script before the re-exec) stopped the service, start it again with the unchanged
+# config.toml, then stop. Normally the checks run before the service is stopped
+# (check_config_early, check_config_after_checkout); if the defensive re-check in
+# write_config fires, the new code is already in the venv, and the message says so.
 hand_edit_stop() {
 	if [ "$DRY_RUN" = 1 ]; then
 		problem "$HAND_EDITED_MSG"
@@ -813,9 +879,10 @@ update_config() {
 	note "wrote $CONF (0600)"
 }
 
-# After the new code is checked out and before anything is installed: render
-# config.toml against the new config.example.toml (system python3) and discard it.
-# A hand-edit stop here restarts the old, untouched install if it was stopped. Other
+# After the new code is checked out, before the service is stopped and before
+# anything is installed: render config.toml against the new config.example.toml
+# (system python3) and discard it. A hand-edit stop here leaves the old install
+# running (or restarts it, if an older script stopped it before the re-exec). Other
 # render problems are left to write_config. --dry-run: write_config does this check.
 check_config_after_checkout() {
 	[ "$DRY_RUN" = 0 ] || return 0
@@ -1018,8 +1085,11 @@ ensure_repo_access() {
 stop_service() {
 	step "Stop service"
 	if [ -x "$INIT_FILE" ] && rc-service "$APP" status >/dev/null 2>&1; then
-		act "rc-service $APP stop" rc-service "$APP" stop
+		# Set first: a stop that fails half-way must also end in a start attempt.
 		[ "$DRY_RUN" = 1 ] || STOPPED=1
+		act "rc-service $APP stop" rc-service "$APP" stop
+	elif [ "$STOPPED" = 1 ]; then
+		note "$APP was already stopped before the setup script was updated"
 	else
 		note "$APP is not running"
 	fi
@@ -1029,6 +1099,8 @@ OLD_COMMIT=${LANSCAPE_SETUP_OLD:-}
 NEW_COMMIT=""
 NEW_FULL=""
 
+# Runs while the service is up: the service runs from the non-editable install in
+# $VENV (a built wheel) and from /etc/init.d, never from $SRC.
 checkout_code() {
 	step "Code ($REF)"
 	if [ "$DRY_RUN" = 1 ]; then
@@ -1063,7 +1135,8 @@ checkout_code() {
 	fi
 }
 
-# After the checkout, continue with the script that came with the new code.
+# After the checkout, continue with the script that came with the new code. The new
+# script starts again from the top; LANSCAPE_SETUP_* carry what it cannot find out again.
 reexec_if_updated() {
 	[ "$DRY_RUN" = 0 ] || return 0
 	[ -z "${LANSCAPE_SETUP_REEXEC:-}" ] || return 0
@@ -1087,11 +1160,19 @@ venv_ok() {
 }
 
 NEED_INSTALL=1
+WHEELHOUSE=""
+APP_WHEEL=""
 
-install_app() {
-	step "Virtualenv and package"
+# Before the service is stopped: everything pip needs from the network or has to
+# build. The app and all its dependencies become wheels in a temporary wheelhouse,
+# made by the pip of a throwaway virtualenv so that the service's own virtualenv is
+# not touched while it runs. A failure here leaves the installed version as it was.
+# --prefer-binary: there is no compiler, so an older release with a wheel beats a
+# newer one that is source-only.
+build_wheels() {
+	step "Wheels (network; the service is not stopped yet)"
 	if [ "$DRY_RUN" = 1 ]; then
-		note "(dry-run) would: create or refresh $VENV and pip install $SRC"
+		note "(dry-run) would: pip wheel $SRC and its dependencies into a temporary wheelhouse"
 		return 0
 	fi
 	stamped=""
@@ -1101,6 +1182,39 @@ install_app() {
 		note "$NEW_COMMIT already installed; skipping pip"
 		return 0
 	fi
+	rm -rf "${PREFIX:?}"/.build.* # left behind by a run that was killed
+	WORK_DIR=$(mktemp -d "$PREFIX/.build.XXXXXX")
+	WHEELHOUSE=$WORK_DIR/wheels
+	pip_log=$WORK_DIR/pip-wheel.log
+	note "pip wheel (the app and its dependencies) into $WHEELHOUSE"
+	if ! {
+		python3 -m venv "$WORK_DIR/venv" &&
+			"$WORK_DIR/venv/bin/pip" wheel --quiet --disable-pip-version-check --no-input \
+				--prefer-binary --wheel-dir "$WHEELHOUSE" "$SRC"
+	} >"$pip_log" 2>&1; then
+		tail -n 40 "$pip_log" >&2
+		die "pip wheel failed (output above); the installed version was not changed"
+	fi
+	for wheel in "$WHEELHOUSE"/lanscape_atlas-*.whl; do
+		if [ -f "$wheel" ]; then
+			APP_WHEEL=$wheel
+		fi
+	done
+	[ -n "$APP_WHEEL" ] || die "pip wheel left no lanscape_atlas wheel in $WHEELHOUSE"
+}
+
+# After the service is stopped: no network. Dependencies the virtualenv already
+# satisfies are kept as they are (no --upgrade); the rest come from the wheelhouse.
+install_app() {
+	step "Virtualenv and package"
+	if [ "$DRY_RUN" = 1 ]; then
+		note "(dry-run) would: create or refresh $VENV and pip install from the wheelhouse"
+		return 0
+	fi
+	if [ "$NEED_INSTALL" = 0 ]; then
+		note "$NEW_COMMIT already installed; nothing to do"
+		return 0
+	fi
 	CODE_INSTALLED=1 # from here on the venv may be rebuilt or hold the new code
 	if ! { [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'pass' >/dev/null 2>&1; }; then
 		note "creating virtualenv $VENV"
@@ -1108,17 +1222,19 @@ install_app() {
 		python3 -m venv "$VENV"
 	fi
 	pip_log=$(mktemp)
-	note "pip install (dependencies, then the app itself)"
+	note "pip install from the wheelhouse (dependencies, then the app itself)"
 	if ! {
-		"$VENV/bin/pip" install --quiet --disable-pip-version-check --no-input "$SRC" &&
+		"$VENV/bin/pip" install --quiet --disable-pip-version-check --no-input \
+			--no-index --find-links "$WHEELHOUSE" "$APP_WHEEL" &&
 			"$VENV/bin/pip" install --quiet --disable-pip-version-check --no-input \
-				--force-reinstall --no-deps "$SRC"
+				--no-index --force-reinstall --no-deps "$APP_WHEEL"
 	} >"$pip_log" 2>&1; then
 		tail -n 40 "$pip_log" >&2
 		rm -f "$pip_log"
 		die "pip install failed (output above)"
 	fi
 	rm -f "$pip_log"
+	INSTALL_DONE=1
 }
 
 backup_db() {
@@ -1191,20 +1307,50 @@ run_as_service_user() {
 	su -s /bin/sh "$SVC_USER" -c "LANSCAPE_DATA_DIR='$DATA_DIR' '$VENV/bin/$APP' $1"
 }
 
-migrate_and_oui() {
-	step "Database migration and vendor list"
-	if [ "$DRY_RUN" = 1 ]; then
-		note "(dry-run) would: $APP migrate, then $APP update-oui (as $SVC_USER)"
-		return 0
-	fi
-	db_path=$(run_as_service_user migrate) || die "$APP migrate failed"
-	note "migrated: $db_path"
+OUI_FETCHED=0
+
+# fetch_oui NOTE-SUFFIX. Never fatal. update-oui replaces oui.csv atomically once the
+# download validates, so it is safe while the service runs.
+fetch_oui() {
+	OUI_FETCHED=1
 	if run_as_service_user update-oui >/dev/null 2>&1; then
-		note "vendor list updated"
+		note "vendor list updated$1"
 	else
 		warn "update-oui failed (no network?); the previous vendor list stays in place"
 	fi
+}
+
+migrate_db() {
+	step "Database migration"
+	if [ "$DRY_RUN" = 1 ]; then
+		note "(dry-run) would: $APP migrate (as $SVC_USER)"
+		return 0
+	fi
+	MIGRATE_STARTED=1
+	db_path=$(run_as_service_user migrate) || die "$APP migrate failed"
+	note "migrated: $db_path"
+	if [ ! -f "$DATA_DIR/oui.csv" ]; then
+		# No list yet (first install): without it the service would start with the
+		# small bundled sample and keep it until its next start.
+		fetch_oui ""
+	fi
 	[ -z "$NEW_FULL" ] || printf '%s\n' "$NEW_FULL" >"$STAMP"
+}
+
+# After the service is started, so the download (up to 60 s against IEEE) costs no
+# downtime. The service reads oui.csv when it starts: it uses the new list from its
+# next start.
+update_oui() {
+	step "Vendor list"
+	if [ "$DRY_RUN" = 1 ]; then
+		note "(dry-run) would: $APP update-oui (as $SVC_USER; a failure is only a warning)"
+		return 0
+	fi
+	if [ "$OUI_FETCHED" = 1 ]; then
+		note "already fetched before the service was started"
+		return 0
+	fi
+	fetch_oui " (the running service uses it from its next start)"
 }
 
 install_if_changed() { # install_if_changed SRC DEST MODE
@@ -1382,16 +1528,20 @@ check_config_early
 install_packages
 ensure_user
 ensure_repo_access
-stop_service
+# Network and build steps first, while the installed version keeps running.
 checkout_code
 reexec_if_updated
 check_config_after_checkout
+build_wheels
+# From here to start_service the service is down; on_exit restarts it on a failure.
+stop_service
 install_app
 backup_db
 write_config
-migrate_and_oui
+migrate_db
 install_service_files
 start_service
+update_oui
 smoke_test
 
 step "Done"
