@@ -578,6 +578,68 @@ def test_one_deep_scan_per_device(app: FastAPI) -> None:
     assert len(started) == 2
 
 
+def _devices_with_ip(client: TestClient, n: int) -> list[dict[str, Any]]:
+    devices = client.get("/api/v1/devices", params={"online": "true", "limit": 1000}).json()
+    found = [d for d in devices if d["ipv4"]]
+    assert len(found) >= n
+    return found[:n]
+
+
+@pytest.mark.parametrize("ending", ["finish", "fail", "cancel"])
+def test_deep_scan_limit_refuses_third_and_frees_slots(app: FastAPI, ending: str) -> None:
+    import asyncio
+
+    async def wait_done(task: asyncio.Task[None]) -> None:
+        await asyncio.wait([task])
+
+    entered: dict[str, threading.Event] = {}
+    release: dict[str, asyncio.Event] = {}
+
+    async def blocking(argv: list[str], timeout_s: float) -> str:
+        ip = argv[-1]
+        release[ip] = asyncio.Event()
+        entered[ip].set()
+        await release[ip].wait()
+        if ip == ips[0] and ending == "fail":
+            raise RuntimeError("nmap fell over")
+        return "<nmaprun/>"
+
+    app.state.deep_scan_runner = blocking
+    with TestClient(app) as c:
+        ds = _devices_with_ip(c, 3)
+        ids = [d["id"] for d in ds]
+        ips = [d["ipv4"] for d in ds]
+        entered.update({ip: threading.Event() for ip in ips})
+        for i in (0, 1):
+            assert c.post(f"/api/v1/devices/{ids[i]}/deep-scan").status_code == 202
+            assert entered[ips[i]].wait(5)
+        first = app.state.deep_scan_tasks[ids[0]]
+
+        # Over the process-wide limit: refused now, not queued.
+        refused = c.post(f"/api/v1/devices/{ids[2]}/deep-scan")
+        assert refused.status_code == 429
+        assert refused.json() == {"detail": "too many deep scans running (limit 2)"}
+        assert ids[2] not in app.state.deep_scan_tasks
+
+        # End one scan the requested way; its slot must free for the refused device.
+        if ending == "cancel":
+            c.portal.call(first.cancel)
+        else:
+            c.portal.call(release[ips[0]].set)
+        c.portal.call(wait_done, first)
+        assert ids[0] not in app.state.deep_scan_tasks
+        assert c.post(f"/api/v1/devices/{ids[2]}/deep-scan").status_code == 202
+        assert entered[ips[2]].wait(5)
+
+        # Clean up: wait for every remaining scan to finish before leaving the client.
+        rest = [app.state.deep_scan_tasks[i] for i in (ids[1], ids[2])]
+        for t in rest:
+            c.portal.call(t.cancel)
+        for t in rest:
+            c.portal.call(wait_done, t)
+        assert not app.state.deep_scan_tasks
+
+
 def test_openapi_under_api_and_protected(
     tmp_path: Path, db: sqlite3.Connection, clock: FixedClock
 ) -> None:

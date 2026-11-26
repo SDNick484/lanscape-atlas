@@ -13,6 +13,15 @@ from lanscape_atlas.service import Service
 
 log = logging.getLogger(__name__)
 
+# Process-wide cap on deep scans running at once (across all devices). A request over
+# the cap is refused, not queued: nmap -p- is heavy and a looping client must not be able
+# to start one per device at the same moment.
+MAX_DEEP_SCANS = 2
+
+
+class DeepScanLimitReached(ScanRefused):
+    """Refused: ``MAX_DEEP_SCANS`` deep scans are already running."""
+
 
 def _recheck(svc: Service, device_id: int) -> str:
     with svc.lock:
@@ -39,10 +48,15 @@ def start_deep_scan(state: Any, device_id: int) -> asyncio.Task[None]:
     """Validate and start a background deep scan of ``device_id`` on the running loop.
 
     ``state`` is ``app.state``. Raises ``KeyError`` (unknown device) or
-    ``ScanRefused`` (policy, no usable IPv4, or a scan already running) before
-    anything starts. Must be called on the event loop thread: check-then-insert
-    into ``state.deep_scan_tasks`` relies on that to allow at most one in-flight
-    scan per device (Ruling 33c).
+    ``ScanRefused`` (policy, no usable IPv4, a scan of this device already running,
+    or ``MAX_DEEP_SCANS`` scans running) before anything starts. Must be called on the
+    event loop thread: check-then-insert into ``state.deep_scan_tasks`` relies on that to
+    allow at most one in-flight scan per device (Ruling 33c) and at most
+    ``MAX_DEEP_SCANS`` overall.
+
+    A running scan occupies its ``state.deep_scan_tasks`` entry until the task is done,
+    whatever ended it (finish, failure, cancellation, or cancellation before it started):
+    the done callback removes the entry, so the slot is released on every path.
     """
     svc: Service = state.service
     tasks: dict[int, asyncio.Task[None]] = state.deep_scan_tasks
@@ -51,6 +65,8 @@ def start_deep_scan(state: Any, device_id: int) -> asyncio.Task[None]:
     running = tasks.get(device_id)
     if running is not None and not running.done():
         raise ScanRefused("deep scan already running")
+    if sum(1 for t in tasks.values() if not t.done()) >= MAX_DEEP_SCANS:
+        raise DeepScanLimitReached(f"too many deep scans running (limit {MAX_DEEP_SCANS})")
     task = asyncio.create_task(
         _deep_scan_job(svc, state.ingestor, state.deep_scan_runner, device_id),
         name=f"deep-scan:{device_id}",

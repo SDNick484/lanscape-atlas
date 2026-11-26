@@ -55,7 +55,7 @@ from lanscape_atlas.web import find, floorplan, pages
 from lanscape_atlas.web.api import router as api_router
 from lanscape_atlas.web.ble_api import router as ble_router
 from lanscape_atlas.web.body_limit import JsonBodyLimitMiddleware
-from lanscape_atlas.web.deep_scan import start_deep_scan
+from lanscape_atlas.web.deep_scan import DeepScanLimitReached, start_deep_scan
 from lanscape_atlas.web.floorplan_api import STALE_MESSAGE, STALE_SHAPES_MESSAGE
 from lanscape_atlas.web.floorplan_api import router as floorplan_router
 
@@ -190,6 +190,13 @@ async def _scan_refused(request: Request, exc: Exception) -> Response:
     if _is_page(request):
         return pages.error_page(request, 409, _message(exc, "scan refused"))
     return JSONResponse({"detail": _message(exc, "scan refused")}, status_code=409)
+
+
+async def _scan_busy(request: Request, exc: Exception) -> Response:
+    # Over the process-wide deep scan cap: a retry later can succeed, hence 429.
+    if _is_page(request):
+        return pages.error_page(request, 429, _message(exc, "too many scans"))
+    return JSONResponse({"detail": _message(exc, "too many scans")}, status_code=429)
 
 
 async def _http_error(request: Request, exc: Exception) -> Response:
@@ -529,6 +536,7 @@ def create_app(
     app.add_exception_handler(OverflowError, _overflow)
     app.add_exception_handler(UndoConflict, _undo_conflict)
     app.add_exception_handler(StaleWrite, _stale_write)
+    app.add_exception_handler(DeepScanLimitReached, _scan_busy)
     app.add_exception_handler(ScanRefused, _scan_refused)
     app.add_exception_handler(StarletteHTTPException, _http_error)
     app.add_exception_handler(RequestValidationError, _validation_error)
