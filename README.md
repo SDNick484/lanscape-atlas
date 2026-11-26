@@ -462,7 +462,8 @@ is in the `421` response and, once per name, in the log.
 `capabilities="^cap_net_raw,^cap_net_admin"` and exports `NMAP_PRIVILEGED=1` so
 nmap uses them. Ambient capabilities under `supervise-daemon` require
 **OpenRC 0.45 or newer**; on older versions run the service as root, or set file
-capabilities on the binaries and remove the `NMAP_PRIVILEGED` line.
+capabilities on the binaries and remove the `NMAP_PRIVILEGED` line. Why the init script
+does not use file capabilities itself: see [Remote access and security](#remote-access-and-security).
 
 The service logs (INFO level, with time, level and logger name) to
 `/var/log/lanscape-atlas.log`. `deploy/logrotate/lanscape-atlas` rotates it weekly, or
@@ -512,8 +513,8 @@ running: it fetches and checks out `--ref` (default `main`), then downloads and 
 the app and its dependencies as wheels (`pip wheel`, into a temporary directory under
 `/opt/lanscape-atlas`). If GitHub or PyPI cannot be reached, or a dependency has no
 usable wheel, the run ends there and the service was never stopped. Only then does it
-stop the service, install from those wheels (no network), back up the database (last
-three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
+stop the service, install from those wheels (no network), back up the database (as
+`lanscape`; last three kept) when the code changed, render `config.toml` from `setup.env`, migrate and
 start the service. It finishes by refreshing the vendor list (`update-oui`; a failed
 download is only a warning, and the running service uses the new list from its next
 start) and a smoke test of `/api/v1/collectors` and `/api/v1/devices`. The API token is
@@ -686,6 +687,33 @@ lanscape-atlas has no accounts of its own. Choose one of these setups:
    but **anyone who can reach the port can read and write your inventory**, including
    renaming devices, changing trust, deleting links and triggering scans. Use it only
    on a network you fully trust, and never expose the port to the internet.
+
+**The service account and the installer.** The app runs as the unprivileged
+`lanscape` user, which owns `/var/lib/lanscape-atlas` and can therefore put a symbolic
+link (or a hard link) anywhere in it. `deploy/setup-alpine.sh` runs as root, so it never
+follows one there: it stops with a message naming the path when `/var/lib/lanscape-atlas`,
+its `floorplan` directory, `backups` directory or `config.toml` is a symbolic link
+(`--dry-run` reports it). It creates those directories with `mkdir`, which does not
+follow a link, and sets their owner and mode through a descriptor opened with
+`O_NOFOLLOW` (not `install -d -o`, which follows a linked directory). `config.toml` and
+its timestamped backups are written into a temporary file the script made, opened
+without following a link and refused if it is no longer a regular file of root's with a
+single link, then renamed into place. The database backup before a migration is made by
+`lanscape` itself (into `/var/lib/lanscape-atlas/backups`, 0700, three kept), so root
+never opens the database or writes into that directory.
+
+**Capabilities.** The init script still grants `cap_net_raw` and `cap_net_admin` as
+ambient capabilities, which the whole Python process and every child inherit, not only
+`arp-scan` and `nmap`. File capabilities restricted to the `lanscape` group (`arp-scan`
+needs only `cap_net_raw`) would be narrower, but are not used yet: `setcap` on
+`/usr/bin/arp-scan` and `/usr/bin/nmap` changes files `apk` owns and is lost whenever
+`apk` upgrades or reinstalls them, which would stop the collectors until the installer
+runs again; private copies under `/opt/lanscape-atlas` would miss nmap's security
+updates; and neither has been shown to work for the collectors in an unprivileged
+Alpine LXC container, where `setcap` needs namespaced file capabilities. The symbolic
+link refusals are covered by the test suite, which CI runs under the shells it has
+(including busybox `sh` in an Alpine container); they were not tested on Alpine itself
+as root with OpenRC, and file capabilities were not tested at all.
 
 ## MCP
 

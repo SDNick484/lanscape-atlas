@@ -44,6 +44,9 @@
 #   /etc/lanscape-atlas/                    setup.env, deploy key, known_hosts (root, 0700)
 #   /var/lib/lanscape-atlas/                data, config.toml (lanscape, 0700/0600), backups/,
 #                                           config.toml.YYYYmmdd-HHMMSS (config backups)
+#                                           The service user owns this directory and can put a
+#                                           symbolic link anywhere in it, so root never follows
+#                                           one there: see refuse_link and service_dir
 #   /var/log/lanscape-atlas.log             service log (rotated weekly, or at 10 MB)
 #   /etc/init.d/lanscape-atlas              OpenRC service
 #   /etc/logrotate.d/lanscape-atlas         log rotation
@@ -62,6 +65,7 @@ umask 022
 
 APP=lanscape-atlas
 SVC_USER=lanscape
+SVC_GROUP=$SVC_USER
 PREFIX=/opt/$APP
 SRC=$PREFIX/src
 VENV=$PREFIX/venv
@@ -187,6 +191,16 @@ act() {
 		note "$desc"
 		"$@"
 	fi
+}
+
+# refuse_link PATH WHAT: a problem when PATH is a symbolic link. $SVC_USER owns $DATA_DIR
+# and can create links anywhere in it; a root process that followed one could be made to
+# chown, chmod or overwrite any file on the system. This check gives the clear message;
+# the operations themselves also refuse links (O_NOFOLLOW, mkdir, rename), so a link
+# planted after the check is not followed either.
+refuse_link() {
+	[ -L "$1" ] || return 0
+	problem "refusing to $2 $1: it is a symbolic link. The $SVC_USER account can create links in $DATA_DIR, so this may be an attempt to make this script (root) change another file; check where it points (ls -l $1), remove it and re-run"
 }
 
 # Called from the EXIT trap when the run failed after it stopped a running service
@@ -512,7 +526,7 @@ uses_ssh() {
 
 # ---------------------------------------------------------- config rendering
 
-# render_config OUT EXAMPLE [EXISTING]
+# render_config OUT EXAMPLE [EXISTING [OWNER]]
 #
 # Fills config.example.toml from the env settings. Every key it sets must exist in
 # the example (so an example that drifts from this script fails loudly), and the
@@ -535,6 +549,9 @@ uses_ssh() {
 # (never values) with the setup.env key for each, and exits $HAND_EDITED_RC without
 # writing OUT; with --discard-config-edits it lists them and carries on.
 #
+# OUT is never followed if it is a symbolic link; OWNER (user:group) is set on the
+# written file through its descriptor.
+#
 # OUT empty: a check only. Nothing is written anywhere (the render, secrets included,
 # stays in this python process); the last line of stdout is "unchanged" when EXISTING
 # already holds exactly this render, else "changed".
@@ -548,12 +565,15 @@ render_config() {
 		CFG_ROUTER_USE_SSL=$ROUTER_USE_SSL CFG_ASUS_INTERVAL=$ASUSROUTER_INTERVAL_S \
 		CFG_HA_URL=$HA_URL CFG_HA_TOKEN=$HA_TOKEN CFG_HA_VERIFY_TLS=$HA_VERIFY_TLS \
 		CFG_BLE_MIN_RSSI=$BLE_CANDIDATE_MIN_RSSI \
-		CFG_DATA_DIR=$DATA_DIR python3 -I - <<'PY'
+		CFG_DATA_DIR=$DATA_DIR CFG_OWNER=${4:-} python3 -I - <<'PY'
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
+import stat
 import sys
 import tomllib
 
@@ -604,7 +624,11 @@ def set_key(section, key, value, commented=False):
 existing_raw = None  # bytes of the existing config.toml, if any
 existing_cfg = None  # ...parsed, if it is valid TOML
 if env.get("CFG_EXISTING") and os.path.isfile(env["CFG_EXISTING"]):
-    with open(env["CFG_EXISTING"], "rb") as fh:
+    try:  # never through a symbolic link (refuse_link gives the message first)
+        fd = os.open(env["CFG_EXISTING"], os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        sys.exit(f"ERROR: refusing to read {env['CFG_EXISTING']}: {exc.strerror}")
+    with os.fdopen(fd, "rb") as fh:
         existing_raw = fh.read()
     try:
         existing_cfg = tomllib.loads(existing_raw.decode("utf-8"))
@@ -770,7 +794,23 @@ if not env["CFG_OUT"]:
     print("unchanged" if existing_raw == text.encode("utf-8") else "changed")
     sys.exit(0)
 
-fd = os.open(env["CFG_OUT"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+# OUT is the temp file update_config made next to config.toml, in a directory the service
+# user owns: it may have been swapped for a link since. Never follow a symbolic link, and
+# write only into a file this process owns with no other name (a hard link to another
+# file would be overwritten too). Owner and mode are set on the descriptor, not the name.
+try:
+    fd = os.open(env["CFG_OUT"], os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+except OSError as exc:
+    sys.exit(f"ERROR: refusing to write {env['CFG_OUT']}: {exc.strerror} (a symbolic link?)")
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.geteuid():
+    os.close(fd)
+    sys.exit(f"ERROR: refusing to write {env['CFG_OUT']}: not a regular file of this user with one link")
+os.ftruncate(fd, 0)
+os.fchmod(fd, 0o600)
+if env["CFG_OWNER"]:
+    user, group = env["CFG_OWNER"].split(":")
+    os.fchown(fd, pwd.getpwnam(user).pw_uid, grp.getgrnam(group).gr_gid)
 with os.fdopen(fd, "w", encoding="utf-8") as fh:
     fh.write(text)
 print(f"api_token: {source} (it is stored only in config.toml)")
@@ -831,6 +871,8 @@ checksum_state() {
 # so update_config checks it later.) The keys are listed against the current
 # checkout's config.example.toml when there is one.
 check_config_early() {
+	refuse_link "$CONF" "read or replace"
+	[ ! -L "$CONF" ] || return 0 # --dry-run: reported
 	[ -f "$CONF" ] && [ -r "$CONF" ] || return 0
 	case $(checksum_state "$CONF") in
 	none) return 0 ;;
@@ -869,6 +911,9 @@ check_config_early() {
 # $CONFIG_BACKUPS_KEPT such copies. The copy is made in a fresh temp file and renamed,
 # so nothing is written through a symlink; names already taken by anything (a dangling
 # link included) are skipped. config.toml.prev (older scripts) is left alone.
+# The temp file sits in a directory the service user owns, so copy_into_tmp writes it
+# without following a link or writing into a hard link, and sets owner and mode on the
+# descriptor; mv replaces a name and never follows a link.
 backup_config() {
 	stamp=$(date -u +%Y%m%d-%H%M%S)
 	dest=$CONF.$stamp
@@ -878,8 +923,7 @@ backup_config() {
 		n=$((n + 1))
 	done
 	BACKUP_TMP=$(mktemp "$(dirname "$CONF")/.config-backup.XXXXXX")
-	cp -p "$CONF" "$BACKUP_TMP"
-	chmod 0600 "$BACKUP_TMP"
+	copy_into_tmp "$CONF" "$BACKUP_TMP"
 	if [ -e "$dest" ] || [ -L "$dest" ]; then
 		die "$dest appeared while backing up config.toml; nothing was changed"
 	fi
@@ -887,6 +931,34 @@ backup_config() {
 	BACKUP_TMP=""
 	note "previous config.toml backed up to $dest"
 	prune_config_backups
+}
+
+# copy_into_tmp SRC TMP: copy SRC into TMP, a file this run made with mktemp, mode 0600
+# and SRC's owner and group (as cp -p would). Refuses, without writing anything, when
+# either is a symbolic link, or TMP is no longer a regular file of root's with one link.
+copy_into_tmp() {
+	python3 -I - "$1" "$2" <<'PY'
+import os
+import stat
+import sys
+
+src, tmp = sys.argv[1], sys.argv[2]
+try:
+    sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    dfd = os.open(tmp, os.O_WRONLY | os.O_NOFOLLOW)
+except OSError as exc:
+    sys.exit(f"ERROR: refusing to back up {src} to {tmp}: {exc.strerror} (a symbolic link?)")
+sst, dst = os.fstat(sfd), os.fstat(dfd)
+if not stat.S_ISREG(sst.st_mode):
+    sys.exit(f"ERROR: refusing to back up {src}: not a regular file")
+if not stat.S_ISREG(dst.st_mode) or dst.st_nlink != 1 or dst.st_uid != os.geteuid():
+    sys.exit(f"ERROR: refusing to write {tmp}: not a regular file of this user with one link")
+os.ftruncate(dfd, 0)
+os.fchmod(dfd, 0o600)
+with os.fdopen(sfd, "rb") as fin, os.fdopen(dfd, "wb") as fout:
+    fout.write(fin.read())
+    os.fchown(fout.fileno(), sst.st_uid, sst.st_gid)
+PY
 }
 
 # is_config_backup SUFFIX: SUFFIX (after "config.toml.") is YYYYmmdd-HHMMSS or
@@ -921,6 +993,8 @@ prune_config_backups() {
 # file is backed up first; an unchanged one is left alone.
 update_config() {
 	example=$1
+	refuse_link "$CONF" "read or replace"
+	[ ! -L "$CONF" ] || return 0 # --dry-run: reported
 	if [ "$DRY_RUN" = 1 ]; then
 		if [ "$CONF_HAND_EDITED" = 1 ]; then
 			note "(dry-run) hand edits to config.toml are reported above"
@@ -948,11 +1022,16 @@ update_config() {
 		fi
 		return 0
 	fi
-	# Next to config.toml (mode 0700 directory) so that the rename below is atomic.
+	# Next to config.toml (mode 0700 directory) so that the rename below is atomic. The
+	# service user can swap the temp file for a link before render_config writes it:
+	# render_config refuses that, and sets owner and mode on the file it opened. The
+	# rename (mv) replaces a name and never follows a link.
 	CONF_TMP=$(mktemp "$(dirname "$CONF")/.config.XXXXXX")
 	msg=$RUN_TMP/render.out
+	owner=""
+	[ "$CONF_CHOWN" = 0 ] || owner=$SVC_USER:$SVC_GROUP
 	rc=0
-	render_config "$CONF_TMP" "$example" "$CONF" >"$msg" || rc=$?
+	render_config "$CONF_TMP" "$example" "$CONF" "$owner" >"$msg" || rc=$?
 	if [ "$rc" != 0 ]; then
 		rm -f "$CONF_TMP" "$msg"
 		CONF_TMP=""
@@ -968,8 +1047,6 @@ update_config() {
 		return 0
 	fi
 	[ ! -f "$CONF" ] || backup_config
-	[ "$CONF_CHOWN" = 0 ] || chown "$SVC_USER:$SVC_USER" "$CONF_TMP"
-	chmod 0600 "$CONF_TMP"
 	mv -f "$CONF_TMP" "$CONF"
 	CONF_TMP=""
 	note "wrote $CONF (0600)"
@@ -982,6 +1059,7 @@ update_config() {
 # render problems are left to write_config. --dry-run: write_config does this check.
 check_config_after_checkout() {
 	[ "$DRY_RUN" = 0 ] || return 0
+	refuse_link "$CONF" "read or replace"
 	[ -f "$CONF" ] || return 0
 	[ "$DISCARD_CONFIG_EDITS" = 0 ] || return 0
 	step "Configuration check"
@@ -1123,9 +1201,45 @@ ensure_user() {
 		act "adduser -S -D -H -G $SVC_USER -h $DATA_DIR $SVC_USER" \
 			adduser -S -D -H -G "$SVC_USER" -h "$DATA_DIR" "$SVC_USER"
 	fi
-	act "data dir $DATA_DIR (0700, $SVC_USER)" install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
-	act "floor plan dir $DATA_DIR/floorplan (0750, $SVC_USER)" install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR/floorplan"
+	make_data_dirs
 	act "config dir $ETC_DIR (0700, root)" install -d -m 0700 "$ETC_DIR"
+}
+
+make_data_dirs() {
+	refuse_link "$DATA_DIR" "create or chown"
+	refuse_link "$DATA_DIR/floorplan" "create or chown"
+	act "data dir $DATA_DIR (0700, $SVC_USER)" service_dir "$DATA_DIR" 0700
+	act "floor plan dir $DATA_DIR/floorplan (0750, $SVC_USER)" service_dir "$DATA_DIR/floorplan" 0750
+}
+
+# service_dir PATH MODE: PATH is a directory owned by $SVC_USER:$SVC_GROUP with MODE.
+# Not `install -d -o`: that follows a symbolic link at PATH (GNU install does; busybox
+# was not checked), and the service user can plant one inside $DATA_DIR. mkdir never
+# follows a link; the directory is then opened with O_NOFOLLOW and changed through that
+# descriptor, so a link (planted before or during the run) is refused, never followed.
+service_dir() {
+	refuse_link "$1" "create or chown"
+	python3 -I - "$1" "$2" "$SVC_USER" "$SVC_GROUP" <<'PY'
+import grp
+import os
+import pwd
+import sys
+
+path, mode, user, group = sys.argv[1], int(sys.argv[2], 8), sys.argv[3], sys.argv[4]
+try:
+    os.mkdir(path, 0o700)
+except FileExistsError:
+    pass
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as exc:  # ELOOP: a symbolic link; ENOTDIR: not a directory
+    sys.exit(f"ERROR: refusing to chown {path}: it is a symbolic link or not a directory ({exc.strerror})")
+try:
+    os.fchown(fd, pwd.getpwnam(user).pw_uid, grp.getgrnam(group).gr_gid)
+    os.fchmod(fd, mode)
+finally:
+    os.close(fd)
+PY
 }
 
 GIT_SSH="ssh -i $DEPLOY_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$KNOWN_HOSTS"
@@ -1395,6 +1509,11 @@ install_app() {
 	INSTALL_DONE=1
 }
 
+# The copy is made by the service user, never by root: the database, its -wal/-shm/
+# -journal files and $BACKUP_DIR are all in $DATA_DIR, where the service user could
+# plant a symbolic link for root to open, write or chown. The backups were always the
+# service user's (0600); now they are also written by it. (Issue #47 replaces the
+# python below with `lanscape-atlas backup`; it stays the service user's job.)
 backup_db() {
 	step "Database backup"
 	db=$DATA_DIR/atlas.db
@@ -1403,30 +1522,49 @@ backup_db() {
 		return 0
 	fi
 	if [ "$DRY_RUN" = 1 ]; then
-		note "(dry-run) would: back up $db to $BACKUP_DIR if the code changed (keep $BACKUPS_KEPT)"
+		refuse_link "$BACKUP_DIR" "write database backups into"
+		note "(dry-run) would: back up $db to $BACKUP_DIR as $SVC_USER if the code changed (keep $BACKUPS_KEPT)"
 		return 0
 	fi
 	if [ "$NEED_INSTALL" = 0 ]; then
 		note "code unchanged; no backup needed"
 		return 0
 	fi
-	(umask 077 && install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$BACKUP_DIR")
-	dest=$BACKUP_DIR/atlas-$(date -u +%Y%m%d-%H%M%S)-${OLD_COMMIT:-none}.db
-	python3 -I -c '
-import sqlite3, sys
-src = sqlite3.connect(sys.argv[1])
-dst = sqlite3.connect(sys.argv[2])
+	refuse_link "$BACKUP_DIR" "write database backups into"
+	backup_py=$RUN_TMP/backup-db.py
+	cat >"$backup_py" <<'PY'
+import os
+import sqlite3
+import sys
+
+db, backup_dir, name, kept = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    os.mkdir(backup_dir, 0o700)
+except FileExistsError:
+    pass
+dest = os.path.join(backup_dir, name)
+os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+src = sqlite3.connect(db)
+dst = sqlite3.connect(dest)
 src.backup(dst)
 dst.close()
 src.close()
-' "$db" "$dest"
-	chown "$SVC_USER:$SVC_USER" "$dest"
-	chmod 0600 "$dest"
+ours = [
+    e for e in os.scandir(backup_dir)
+    if e.name.startswith("atlas-") and e.name.endswith(".db") and e.is_file(follow_symlinks=False)
+]
+ours.sort(key=lambda e: e.stat(follow_symlinks=False).st_mtime, reverse=True)
+for old in ours[kept:]:
+    os.unlink(old.path)
+print(dest)
+PY
+	chmod 0644 "$backup_py"
+	name=atlas-$(date -u +%Y%m%d-%H%M%S)-${OLD_COMMIT:-none}.db
+	python=$(command -v python3)
+	dest=$(as_service_user "umask 077; '$python' -I '$backup_py' '$db' '$BACKUP_DIR' '$name' $BACKUPS_KEPT") ||
+		die "the database backup (as $SVC_USER) failed; nothing was migrated"
+	rm -f "$backup_py"
 	note "backed up to $dest"
-	# shellcheck disable=SC2012 # names are ours: atlas-<timestamp>-<commit>.db
-	ls -1t "$BACKUP_DIR"/atlas-*.db | tail -n +$((BACKUPS_KEPT + 1)) | while IFS= read -r old; do
-		rm -f "$old"
-	done
 }
 
 write_config() {
@@ -1462,7 +1600,12 @@ PY
 }
 
 run_as_service_user() {
-	su -s /bin/sh "$SVC_USER" -c "LANSCAPE_DATA_DIR='$DATA_DIR' '$VENV/bin/$APP' $1"
+	as_service_user "LANSCAPE_DATA_DIR='$DATA_DIR' '$VENV/bin/$APP' $1"
+}
+
+# as_service_user COMMAND: run a shell command line as $SVC_USER.
+as_service_user() {
+	su -s /bin/sh "$SVC_USER" -c "$1"
 }
 
 OUI_FETCHED=0
@@ -1624,6 +1767,7 @@ start_service() {
 run_smoke() { # run_smoke OUTFILE
 	python3 -I - "$BIND_HOST" "$BIND_PORT" "$CONF" "$SVC_STARTED_AT" "$SMOKE_RUN_WAIT_S" >"$1" 2>&1 <<'PY'
 import json
+import os
 import sys
 import time
 import tomllib
@@ -1631,7 +1775,8 @@ import urllib.error
 import urllib.request
 
 host, port, conf, started, run_wait = sys.argv[1:6]
-with open(conf, "rb") as fh:
+# config.toml is in the service user's directory: never read it through a link.
+with os.fdopen(os.open(conf, os.O_RDONLY | os.O_NOFOLLOW), "rb") as fh:
     token = tomllib.load(fh).get("api_token", "") or ""
 base = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}"
 
