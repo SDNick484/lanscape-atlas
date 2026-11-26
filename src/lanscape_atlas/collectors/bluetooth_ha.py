@@ -3,7 +3,12 @@
 Connects to ``/api/websocket``, authenticates with a long-lived token and subscribes to
 ``bluetooth/subscribe_scanner_details`` (id 1) and ``bluetooth/subscribe_advertisements``
 (id 2). Parsed adverts and scanner names are handed to callbacks; this module never touches
-the database. The connection is retried forever with a configurable backoff.
+the database. The connection is retried forever, with capped exponential backoff and jitter.
+
+Failure logging is rate limited: the first failure of an outage (and any change of error)
+is a WARNING, the same error again is a WARNING at most once per ``REPEAT_WARNING``, and
+every other attempt is at DEBUG. Reconnecting after an outage is one INFO line with how long
+the connection was down.
 
 HA's advert stream is change-driven: an address is only pushed when its payload
 (manufacturer data, service data, service UUIDs, name) changes, so a steady beacon is pushed
@@ -23,13 +28,15 @@ import asyncio
 import contextlib
 import json
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiohttp
 
+from lanscape_atlas.backoff import capped_backoff
 from lanscape_atlas.bluetooth.match import Advert, normalize_address, parse_advert
 from lanscape_atlas.bluetooth.skew import SkewCorrector
 from lanscape_atlas.clock import Clock
@@ -42,6 +49,31 @@ ADVERTS_ID = 2
 HEARTBEAT_S = 30
 MAX_MSG_SIZE = 16 * 1024 * 1024  # one snapshot (HA's whole advert history) is one frame
 _MAX_ERROR = 300
+# Reconnect backoff: 1, 2, 4, ... s up to 5 min, then each delay jittered to 50-100 %.
+BACKOFF_BASE_S = 1.0
+BACKOFF_CAP_S = 300.0
+REPEAT_WARNING = timedelta(hours=1)  # an unchanged error is warned again at most this often
+
+
+def equal_jitter(delay: float) -> float:
+    """A random delay between half and all of ``delay`` (so clients do not retry in step)."""
+    return random.uniform(delay / 2, delay)
+
+
+def _duration(td: timedelta) -> str:
+    """``45s``, ``4m30s``, ``2h05m``."""
+    total = max(0, int(td.total_seconds()))
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _attempts(n: int) -> str:
+    return f"{n} failed attempt" if n == 1 else f"{n} failed attempts"
 
 
 @dataclass
@@ -76,7 +108,10 @@ class HaBluetoothClient:
         on_scanners: Callable[[dict[str, str | None]], None],
         clock: Clock,
         *,
-        backoff_s: tuple[float, ...] = (1, 2, 5, 15, 60),
+        backoff_base_s: float = BACKOFF_BASE_S,
+        backoff_cap_s: float = BACKOFF_CAP_S,
+        jitter: Callable[[float], float] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         handshake_timeout_s: float = 30,
         snapshot_s: float = 30,
         snapshot_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -85,7 +120,10 @@ class HaBluetoothClient:
         self._on_advert = on_advert
         self._on_scanners = on_scanners
         self._clock = clock
-        self._backoff_s = backoff_s or (1.0,)
+        self._backoff_base_s = backoff_base_s
+        self._backoff_cap_s = backoff_cap_s
+        self._jitter = jitter if jitter is not None else equal_jitter
+        self._sleep = sleep
         self._handshake_timeout_s = handshake_timeout_s
         self._snapshot_s = snapshot_s
         self._snapshot_sleep = snapshot_sleep
@@ -97,7 +135,11 @@ class HaBluetoothClient:
         self._connected = False
         self._since: datetime | None = None
         self._last_error: str | None = None
-        self._failures = 0
+        self._failures = 0  # consecutive failed attempts
+        # Outage logging: when the current outage began, and the last WARNING's error/time.
+        self._down_since: datetime | None = None
+        self._warned_error: str | None = None
+        self._warned_at: datetime | None = None
 
     # -- public API -------------------------------------------------------------------------
 
@@ -133,8 +175,44 @@ class HaBluetoothClient:
             self._since = self._clock()
 
     def _record_error(self, text: str) -> None:
-        self._last_error = self._redact(text)
-        log.warning("Home Assistant Bluetooth: %s", self._last_error)
+        """Count one failed attempt and log it (rate limited; redacted, never with exc_info)."""
+        now = self._clock()
+        error = self._last_error = self._redact(text)
+        self._failures += 1
+        if self._down_since is None:
+            self._down_since = now  # connected (or starting) -> failing
+        elif error == self._warned_error and self._warned_at is not None:
+            if now - self._warned_at < REPEAT_WARNING:
+                log.debug("Home Assistant Bluetooth: %s", error)
+                return
+            log.warning(
+                "Home Assistant Bluetooth: still failing after %s (%s): %s",
+                _duration(now - self._down_since),
+                _attempts(self._failures),
+                error,
+            )
+            self._warned_at = now
+            return
+        log.warning("Home Assistant Bluetooth: %s", error)
+        self._warned_error, self._warned_at = error, now
+
+    def _mark_connected(self) -> None:
+        """Handshake complete: log the end of an outage (once) and reset failure state."""
+        if self._down_since is not None:
+            log.info(
+                "Home Assistant Bluetooth: connected again after %s down (%s)",
+                _duration(self._clock() - self._down_since),
+                _attempts(self._failures),
+            )
+        self._failures = 0
+        self._last_error = None
+        self._down_since = self._warned_error = self._warned_at = None
+        self._set_connected(True)
+
+    def _reconnect_delay(self) -> float:
+        # The first retry waits the base delay; capped_backoff is total for any count.
+        nominal = capped_backoff(self._backoff_base_s, self._failures - 1, self._backoff_cap_s)
+        return self._jitter(nominal)
 
     async def _run(self) -> None:
         while True:
@@ -148,9 +226,7 @@ class HaBluetoothClient:
             except Exception as exc:  # noqa: BLE001 - any transport failure means retry
                 self._record_error(f"{type(exc).__name__}: {exc}")
             self._set_connected(False)
-            delay = self._backoff_s[min(self._failures, len(self._backoff_s) - 1)]
-            self._failures += 1
-            await asyncio.sleep(delay)
+            await self._sleep(self._reconnect_delay())
 
     async def _connect_once(self) -> None:
         verify = self._settings.verify_tls
@@ -241,9 +317,7 @@ class HaBluetoothClient:
                     if cid in pending:
                         pending.discard(cid)
                         if not pending:
-                            self._failures = 0
-                            self._last_error = None
-                            self._set_connected(True)
+                            self._mark_connected()
                             handshake.reschedule(None)
                             snapshots = asyncio.create_task(
                                 self._snapshots(ws), name="ha-bluetooth-snapshots"

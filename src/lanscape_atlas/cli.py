@@ -82,12 +82,23 @@ def init_data_dir() -> Path:
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
+# apscheduler logs two INFO lines per job run (thousands a day); WARNING keeps missed runs,
+# "maximum number of running instances reached" and job exceptions (ERROR).
+QUIET_LOGGERS = {"apscheduler": logging.WARNING}
+
+
 def configure_logging() -> None:
-    """INFO-level logging with time, level and logger name, unless already configured."""
+    """INFO-level logging with time, level and logger name, unless already configured.
+
+    The loggers in ``QUIET_LOGGERS`` are set to their level so routine chatter does not bury
+    real warnings.
+    """
     root = logging.getLogger()
     if root.handlers:
         return
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    for name, level in QUIET_LOGGERS.items():
+        logging.getLogger(name).setLevel(level)
 
 
 def serve(host: str | None, port: int | None) -> None:

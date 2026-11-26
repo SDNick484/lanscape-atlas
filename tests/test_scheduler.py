@@ -6,6 +6,7 @@ import shutil
 import stat
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from lanscape_atlas.collectors.arp import ArpCollector
 from lanscape_atlas.config import BluetoothSettings, CollectorSettings, RouterSettings, Settings
 from lanscape_atlas.observation import Observation
 from lanscape_atlas.scheduler import (
+    BACKOFF_CAP_S,
     CollectorRunner,
     RunOutcome,
     next_delay,
@@ -729,6 +731,40 @@ async def test_no_ble_flush_job_without_runtime(settings, runner, svc) -> None:
         assert "ble_flush" not in {j.id for j in sched.get_jobs()}
     finally:
         await stop_scheduler(sched, [], runner=runner)
+
+
+@pytest.mark.parametrize(
+    ("failures", "expected"),
+    [
+        (0, 60.0),
+        (1, 120.0),
+        (5, 1920.0),
+        (20, 3600.0),
+        (1023, 3600.0),
+        (1024, 3600.0),
+        (1025, 3600.0),
+        (5000, 3600.0),
+        (10**6, 3600.0),
+    ],
+)
+def test_next_delay_is_total(failures: int, expected: float) -> None:
+    # A float base: 2**1024 cannot be converted to float, which used to raise OverflowError.
+    assert next_delay(60.0, failures) == expected
+
+
+def test_record_status_after_huge_failure_count(runner, db, clock) -> None:
+    # Production: Home Assistant unreachable for ~17 h, one failure a minute; once the count
+    # passed ~1024 every status write raised OverflowError and the row went stale.
+    with db:
+        db.execute(
+            "INSERT INTO collector_status(name, consecutive_failures) VALUES ('bluetooth', 2000)"
+        )
+    runner.record_status("bluetooth", "some error")
+    st = status(db, "bluetooth")
+    assert st["consecutive_failures"] == 2001
+    assert st["last_error"] == "some error"
+    assert st["last_error_at"] == iso(clock())
+    assert st["next_run_at"] == iso(clock() + timedelta(seconds=BACKOFF_CAP_S))
 
 
 async def test_record_status_ok_and_error_redacted(runner, db, clock) -> None:

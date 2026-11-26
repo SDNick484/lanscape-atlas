@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
 from tzlocal import get_localzone
 
+from lanscape_atlas.backoff import capped_backoff
 from lanscape_atlas.clock import Clock, iso
 from lanscape_atlas.collectors.base import Collector
 from lanscape_atlas.config import Settings, _default_collectors
@@ -46,8 +47,8 @@ PRUNE_HOUR, PRUNE_MINUTE = 4, 41
 
 
 def next_delay(base_s: float, failures: int) -> float:
-    """Exponential backoff: ``min(base_s * 2**failures, 3600)``."""
-    return float(min(base_s * 2**failures, BACKOFF_CAP_S))
+    """Exponential backoff: ``min(base_s * 2**failures, 3600)``, for any ``failures >= 0``."""
+    return capped_backoff(base_s, failures, BACKOFF_CAP_S)
 
 
 @dataclass(frozen=True)

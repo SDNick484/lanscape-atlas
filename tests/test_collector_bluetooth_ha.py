@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -79,7 +80,8 @@ def make_client(
     settings = HomeAssistantSettings(
         url=str(server.make_url("")).rstrip("/"), token=token, verify_tls=True
     )
-    kw.setdefault("backoff_s", (0.01,))
+    kw.setdefault("backoff_base_s", 0.01)
+    kw.setdefault("backoff_cap_s", 0.01)
     return HaBluetoothClient(settings, sink.on_advert, sink.on_scanners, clock, **kw)
 
 
@@ -220,7 +222,9 @@ async def test_callback_exception_does_not_kill_connection(
             raise RuntimeError(f"oops {TOKEN}")
 
     settings = HomeAssistantSettings(url=str(server.make_url("")).rstrip("/"), token=TOKEN)
-    client = HaBluetoothClient(settings, flaky, sink.on_scanners, clock, backoff_s=(0.01,))
+    client = HaBluetoothClient(
+        settings, flaky, sink.on_scanners, clock, backoff_base_s=0.01, backoff_cap_s=0.01
+    )
     caplog.set_level(logging.DEBUG)
 
     async def body() -> None:
@@ -255,7 +259,7 @@ async def test_reconnects_after_server_drop(
     fake.drop_after_frames.add(0)
     fake.frames[1] = [{"id": 2, "type": "event", "event": {"add": [adv(DEV2)]}}]
     sink = Sink()
-    client = make_client(server, sink, clock, backoff_s=(0.2,))
+    client = make_client(server, sink, clock, backoff_base_s=0.2, backoff_cap_s=0.2)
     observed: list[bool] = []
 
     async def body() -> None:
@@ -343,7 +347,9 @@ async def test_stop_cancels_cleanly(ha: tuple[FakeHA, TestServer], clock: FixedC
 async def test_stop_before_connect_and_while_backing_off(clock: FixedClock) -> None:
     settings = HomeAssistantSettings(url="http://127.0.0.1:1", token=TOKEN)
     sink = Sink()
-    client = HaBluetoothClient(settings, sink.on_advert, sink.on_scanners, clock, backoff_s=(30,))
+    client = HaBluetoothClient(
+        settings, sink.on_advert, sink.on_scanners, clock, backoff_base_s=30, backoff_cap_s=30
+    )
     await client.stop()  # never started
     await client.start()
     await wait_for(lambda: client.status().last_error is not None)
@@ -377,7 +383,9 @@ async def test_handshake_timeout_is_an_error_and_retried(
 async def test_since_is_start_time_before_any_connection(clock: FixedClock) -> None:
     settings = HomeAssistantSettings(url="http://127.0.0.1:1", token=TOKEN)
     sink = Sink()
-    client = HaBluetoothClient(settings, sink.on_advert, sink.on_scanners, clock, backoff_s=(30,))
+    client = HaBluetoothClient(
+        settings, sink.on_advert, sink.on_scanners, clock, backoff_base_s=30, backoff_cap_s=30
+    )
     assert client.status().since is None  # not started
     await client.start()
     started = clock()
@@ -591,3 +599,205 @@ async def test_snapshot_frame_above_default_ws_limit(
     await run(client, body)
     assert fake.connections == 1
     assert sink.adverts[0].name == big
+
+
+# -- reconnect backoff and failure logging (fake clock) -------------------------------------
+
+LOGGER = "lanscape_atlas.collectors.bluetooth_ha"
+UNREACHABLE = "Connection timeout to host wss://ha.example.com:8123/api/websocket"
+
+
+class FakeSleep:
+    """The reconnect sleep, on the fake clock.
+
+    Records each requested delay and advances ``clock`` by ``step_s`` (default: the delay
+    itself) instead of waiting. After ``limit`` calls it parks until the client is stopped.
+    ``on_call(n)`` runs at the n-th call, before the clock moves.
+    """
+
+    def __init__(
+        self,
+        clock: FixedClock,
+        *,
+        step_s: float | None = None,
+        limit: int | None = None,
+        on_call: Callable[[int], None] | None = None,
+    ) -> None:
+        self.clock = clock
+        self.step_s = step_s
+        self.limit = limit
+        self.on_call = on_call
+        self.delays: list[float] = []
+        self.parked = asyncio.Event()
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
+        if self.on_call is not None:
+            self.on_call(len(self.delays))
+        if self.limit is not None and len(self.delays) >= self.limit:
+            self.parked.set()
+            await asyncio.Event().wait()  # until stop() cancels the task
+        self.clock.advance(seconds=self.step_s if self.step_s is not None else delay)
+        await asyncio.sleep(0)
+
+
+def unreachable_client(
+    clock: FixedClock, sleep: FakeSleep, errors: Callable[[], Exception] | None = None, **kw: Any
+) -> HaBluetoothClient:
+    """A client whose every connection attempt fails like an unreachable HA host."""
+    settings = HomeAssistantSettings(url="https://ha.example.com:8123", token=TOKEN)
+    sink = Sink()
+    kw.setdefault("jitter", lambda d: d)
+    client = HaBluetoothClient(settings, sink.on_advert, sink.on_scanners, clock, sleep=sleep, **kw)
+
+    async def refuse() -> None:
+        raise errors() if errors is not None else aiohttp.ConnectionTimeoutError(UNREACHABLE)
+
+    client._connect_once = refuse  # type: ignore[method-assign]
+    return client
+
+
+async def run_until_parked(client: HaBluetoothClient, sleep: FakeSleep) -> None:
+    await client.start()
+    try:
+        await asyncio.wait_for(sleep.parked.wait(), 10)
+    finally:
+        await client.stop()
+
+
+def records(caplog: pytest.LogCaptureFixture, level: int) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == LOGGER and r.levelno == level]
+
+
+async def test_reconnect_backoff_is_exponential_and_capped(clock: FixedClock) -> None:
+    sleep = FakeSleep(clock, limit=12)
+    await run_until_parked(unreachable_client(clock, sleep), sleep)
+    assert sleep.delays == [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300]
+
+
+async def test_reconnect_backoff_is_jittered_by_default(clock: FixedClock) -> None:
+    sleep = FakeSleep(clock, limit=30)
+    client = unreachable_client(clock, sleep, jitter=None)  # None: the client's default
+    await run_until_parked(client, sleep)
+    for n, delay in enumerate(sleep.delays):
+        nominal = min(2.0**n, 300.0)
+        assert nominal / 2 <= delay <= nominal
+    assert len(set(sleep.delays[10:])) > 1  # attempts at the cap do not line up
+
+
+async def test_reconnect_backoff_survives_huge_failure_count(clock: FixedClock) -> None:
+    # The scheduler's 2**failures overflowed past ~1024 failures; the reconnect path must not.
+    sleep = FakeSleep(clock, step_s=90, limit=2000)
+    await run_until_parked(unreachable_client(clock, sleep), sleep)
+    assert len(sleep.delays) == 2000 and sleep.delays[-1] == 300
+
+
+@pytest.mark.parametrize(("attempts", "warnings"), [(1, 1), (40, 1), (41, 2), (100, 3)])
+async def test_unreachable_warns_once_then_hourly(
+    clock: FixedClock, caplog: pytest.LogCaptureFixture, attempts: int, warnings: int
+) -> None:
+    # One attempt every 90 s (production's cadence): attempt 41 is the first an hour in.
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    sleep = FakeSleep(clock, step_s=90, limit=attempts)
+    await run_until_parked(unreachable_client(clock, sleep), sleep)
+    warn, debug = records(caplog, logging.WARNING), records(caplog, logging.DEBUG)
+    assert len(warn) == warnings
+    assert len(warn) + len(debug) == attempts  # every other attempt is at DEBUG
+    assert not records(caplog, logging.INFO) and not records(caplog, logging.ERROR)
+    # The first line keeps the old wording, so the symptom stays searchable.
+    assert (
+        warn[0].getMessage() == f"Home Assistant Bluetooth: ConnectionTimeoutError: {UNREACHABLE}"
+    )
+    for n, rec in enumerate(warn[1:], start=1):
+        assert f"still failing after {n}h00m" in rec.getMessage()
+        assert UNREACHABLE in rec.getMessage()
+    assert all(r.exc_info is None for r in caplog.records)
+
+
+async def test_changed_error_while_failing_is_warned(
+    clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    script = iter(["first", "first", "second", "second", "second"])
+    sleep = FakeSleep(clock, step_s=90, limit=5)
+    client = unreachable_client(clock, sleep, errors=lambda: OSError(next(script)))
+    await run_until_parked(client, sleep)
+    assert [r.getMessage() for r in records(caplog, logging.WARNING)] == [
+        "Home Assistant Bluetooth: OSError: first",
+        "Home Assistant Bluetooth: OSError: second",
+    ]
+    assert len(records(caplog, logging.DEBUG)) == 3
+
+
+async def test_failure_log_is_redacted(clock: FixedClock, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    sleep = FakeSleep(clock, step_s=3600, limit=3)  # warn, hourly warn, hourly warn
+    client = unreachable_client(clock, sleep, errors=lambda: OSError(f"refused {TOKEN}"))
+    await run_until_parked(client, sleep)
+    assert len(records(caplog, logging.WARNING)) == 3
+    assert TOKEN not in caplog.text
+    assert all(r.exc_info is None for r in caplog.records)
+
+
+async def test_recovery_logs_one_info_with_downtime(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake, server = ha
+    fake.fail_ids[2] = "not ready"
+
+    def heal(n: int) -> None:
+        if n == 3:
+            fake.fail_ids.clear()  # the 4th attempt, 270 s after the first, succeeds
+
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    client = make_client(server, Sink(), clock, sleep=FakeSleep(clock, step_s=90, on_call=heal))
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected)
+
+    await run(client, body)
+    assert [r.getMessage() for r in records(caplog, logging.INFO)] == [
+        "Home Assistant Bluetooth: connected again after 4m30s down (3 failed attempts)"
+    ]
+    assert len(records(caplog, logging.WARNING)) == 1
+
+
+async def test_drop_after_recovery_is_warned_again(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # connected -> failing is a state change: warned at once, however recent the last warning.
+    fake, server = ha
+    fake.fail_ids[2] = "not ready"
+    fake.drop_after_frames.add(1)  # the first good connection is dropped by HA
+
+    def heal(n: int) -> None:
+        if n == 1:
+            fake.fail_ids.clear()
+
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    client = make_client(server, Sink(), clock, sleep=FakeSleep(clock, step_s=90, on_call=heal))
+
+    async def body() -> None:
+        await wait_for(lambda: fake.connections >= 3 and client.status().connected)
+
+    await run(client, body)
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == LOGGER] == [
+        ("WARNING", "Home Assistant Bluetooth: command 2 failed: not ready"),
+        ("INFO", "Home Assistant Bluetooth: connected again after 1m30s down (1 failed attempt)"),
+        ("WARNING", "Home Assistant Bluetooth: connection closed"),
+        ("INFO", "Home Assistant Bluetooth: connected again after 1m30s down (1 failed attempt)"),
+    ]
+
+
+async def test_first_connection_logs_nothing(
+    ha: tuple[FakeHA, TestServer], clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fake, server = ha
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    client = make_client(server, Sink(), clock)
+
+    async def body() -> None:
+        await wait_for(lambda: client.status().connected)
+
+    await run(client, body)
+    assert not [r for r in caplog.records if r.name == LOGGER]

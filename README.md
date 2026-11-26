@@ -278,6 +278,22 @@ OpenRC service. Use it only where you control the service environment (for examp
 running `lanscape-atlas serve` by hand); otherwise put the token in `config.toml` or
 `setup.env`.
 
+**Changing the Home Assistant URL later.** The URL is read from `config.toml` when the
+service starts. If you added `[home_assistant]` to `config.toml` by hand, a later change of
+Home Assistant's address (new IP, host name, port or `https://`) must be made there too,
+followed by `rc-service lanscape-atlas restart`. On a scripted install you can instead
+move the table into `setup.env` as `HA_URL` and `HA_TOKEN` (both are required) and re-run
+the script, which then keeps `config.toml` in step. Until you do, the service keeps trying
+the old address. The symptom is a log line like
+
+```text
+WARNING lanscape_atlas.collectors.bluetooth_ha: Home Assistant Bluetooth: ConnectionTimeoutError: Connection timeout to host wss://ha.example.com:8123/api/websocket
+```
+
+(or `ClientConnectorError: Cannot connect to host ...`), logged when the connection starts
+failing and then once an hour, plus the banner "Home Assistant is unreachable" on the
+Find page.
+
 Without a `[home_assistant]` table the Find page still shows claimed devices from the
 database but says it needs Home Assistant.
 
