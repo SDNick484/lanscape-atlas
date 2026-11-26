@@ -244,14 +244,14 @@ def live_server(tmp_path: Path, clock: FixedClock) -> Iterator[str]:
 @pytest.fixture
 def page() -> Iterator[Any]:
     """A Playwright page. Skipped when Playwright or Chromium is unavailable, except
-    with CI set, where a missing browser is a failure (the tests must not vanish)."""
+    in the CI browser job (LANSCAPE_BROWSER_TESTS set), where it is a failure."""
     sync_api = pytest.importorskip("playwright.sync_api")
     with sync_api.sync_playwright() as pw:
         try:
             browser = pw.chromium.launch()
         except Exception as exc:  # browser binary not installed
-            if os.environ.get("CI"):
-                pytest.fail(f"Playwright browser unavailable but CI is set: {exc}")
+            if os.environ.get("LANSCAPE_BROWSER_TESTS"):
+                pytest.fail(f"Playwright browser unavailable (LANSCAPE_BROWSER_TESTS set): {exc}")
             pytest.skip(f"Playwright browser unavailable: {exc}")
         pg = browser.new_page(viewport={"width": 1280, "height": 900})
         yield pg

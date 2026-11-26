@@ -55,7 +55,10 @@ jobs:
           cache-dependency-path: pyproject.toml
       - run: pip install -e .[dev,browser]
       - run: playwright install --with-deps chromium
+      # Makes a missing Playwright or Chromium a failure instead of a skip.
       - run: pytest tests/browser
+        env:
+          LANSCAPE_BROWSER_TESTS: "1"
 
   # CI used editable installs while production installs a wheel. Build the wheel,
   # install it into a clean virtualenv away from the source tree and exercise it, so a

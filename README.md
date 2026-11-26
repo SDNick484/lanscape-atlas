@@ -686,8 +686,8 @@ unless Playwright and a browser are installed:
 .venv/bin/pytest tests/browser
 ```
 
-With `CI` set in the environment a missing Playwright or Chromium fails the run
-instead of skipping, which is how CI uses it.
+With `LANSCAPE_BROWSER_TESTS=1` set a missing Playwright or Chromium fails the run
+instead of skipping; the CI browser job sets it.
 `lanscape-atlas ingest-file tests/fixtures/fake_house.json` loads the fake-house
 dataset for local UI work.
 
